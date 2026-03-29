@@ -1,0 +1,36 @@
+networks:
+  sdlcma_net:
+    external: true
+
+services:
+  redis:
+    image: redis:7-alpine
+    networks: [sdlcma_net]
+    ports:
+      - "6379:6379"
+
+  gateway:
+    image: dh-gateway:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    ports:
+      - "8000:8000"
+    environment:
+      ENV: local_docker_compose
+    networks: [sdlcma_net]
+    depends_on:
+      - redis
+
+  orchestrator:
+    image: dh-orchestrator:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    environment:
+      ENV: local_docker_compose
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [sdlcma_net]
+    depends_on:
+      - redis

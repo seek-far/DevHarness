@@ -1,0 +1,24 @@
+FROM python:3.12-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git openssh-client && \
+    rm -rf /var/lib/apt/lists/* && \
+    git config --global user.email "ci-agent@sdlcma.local" && \
+    git config --global user.name "CI Agent"
+
+WORKDIR /app
+
+COPY bf_worker/requirements.txt /app/bf_worker/requirements.txt
+RUN pip install --no-cache-dir -r bf_worker/requirements.txt
+
+COPY bf_worker/ /app/bf_worker/
+COPY settings/ /app/settings/
+
+ENV PYTHONPATH="/app:/app/bf_worker"
+
+WORKDIR /app/bf_worker
+
+COPY bf_worker/entrypoint.sh /app/bf_worker/entrypoint.sh
+RUN chmod +x /app/bf_worker/entrypoint.sh
+
+ENTRYPOINT ["/app/bf_worker/entrypoint.sh"]

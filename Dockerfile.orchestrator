@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY orchestrator/requirements.txt /app/orchestrator/requirements.txt
+RUN pip install --no-cache-dir -r orchestrator/requirements.txt
+
+COPY orchestrator/ /app/orchestrator/
+COPY settings/ /app/settings/
+
+CMD ["python", "-m", "orchestrator.orchestrator"]

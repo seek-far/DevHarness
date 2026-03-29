@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic-settings
+python-dotenv
+httpx
+requests[socks]
+langgraph>=0.2
+langchain-core>=0.2
+openai>=1.0
+redis[hiredis]>=5.0
+langchain-openai
+pytest
+docker>=7.0

@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+pydantic-settings
+redis[hiredis]>=5.0
