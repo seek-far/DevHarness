@@ -1,0 +1,340 @@
+"""
+Local providers — run bug-fix workflow against a local directory,
+independent of GitLab or any remote CI system.
+
+Two modes:
+  - LocalGitProvider:   source dir is a git repo, uses git for branching/commit
+  - LocalNoGitProvider: plain directory, works on a temp copy, outputs a patch file
+"""
+
+from __future__ import annotations
+import datetime
+import difflib
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from .base import SourceProvider, VCSProvider, ReviewProvider
+
+logger = logging.getLogger(__name__)
+
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
+
+def _ensure_venv(work_dir: Path) -> Path | None:
+    """
+    Create `.venv` in `work_dir` (idempotent) and install `requirements.txt`
+    if present. Returns the venv's bin/Scripts directory, or None if no venv
+    was needed (no requirements.txt and no existing .venv).
+    """
+    venv_path = work_dir / ".venv"
+    bin_dir = venv_path / ("Scripts" if sys.platform == "win32" else "bin")
+    venv_python = bin_dir / ("python.exe" if sys.platform == "win32" else "python")
+    req_file = work_dir / "requirements.txt"
+
+    if venv_python.exists():
+        logger.debug("venv already exists at %s", venv_path)
+        return bin_dir
+
+    if not req_file.exists():
+        logger.debug("no requirements.txt at %s, skipping venv creation", work_dir)
+        return None
+
+    logger.info("creating venv at %s", venv_path)
+    subprocess.run(["python", "-m", "venv", str(venv_path)], check=True)
+
+    logger.info("installing dependencies from %s", req_file)
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "-r", str(req_file), "-q"],
+        check=True,
+    )
+    return bin_dir
+
+
+def _run_test_cmd(repo_path: Path, test_cmd: str) -> tuple[bool, str]:
+    """
+    Run a test command and return (passed, output).
+    If `repo_path/.venv/` exists (or requirements.txt is present so we create one),
+    prepend the venv's bin dir to PATH so the command resolves to venv-installed tools.
+    """
+    bin_dir = _ensure_venv(repo_path)
+    env = os.environ.copy()
+    if bin_dir is not None:
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        env["VIRTUAL_ENV"] = str(repo_path / ".venv")
+        logger.info("running test command with venv: %s in %s", test_cmd, repo_path)
+    else:
+        logger.info("running test command: %s in %s", test_cmd, repo_path)
+    proc = subprocess.run(
+        test_cmd,
+        shell=True,
+        cwd=str(repo_path),
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    output = proc.stdout + proc.stderr
+    return proc.returncode == 0, output
+
+
+def _read_local_file(source_dir: Path, file_path: str) -> str:
+    full_path = source_dir / file_path
+    if not full_path.exists():
+        raise FileNotFoundError(f"File not found: {full_path}")
+    return full_path.read_text(encoding="utf-8", errors="ignore")
+
+
+# ── LocalGitProvider ──────────────────────────────────────────────────────────
+
+class LocalGitProvider(SourceProvider, VCSProvider, ReviewProvider):
+    """Local git repo mode — branches, commits locally, no remote push."""
+
+    def __init__(self, source_dir: str, trace_file: str = "",
+                 test_cmd: str = "pytest"):
+        self._source_dir = Path(source_dir).resolve()
+        self._trace_file = trace_file
+        self._test_cmd = test_cmd
+
+        if not (self._source_dir / ".git").exists():
+            raise ValueError(f"Not a git repo: {self._source_dir}")
+
+    def _git(self, *args, cwd=None):
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd or str(self._source_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Git error: {result.stderr.strip()}")
+        return result.stdout.strip()
+
+    # ── SourceProvider ────────────────────────────────────────────────────────
+
+    def fetch_trace(self, **kwargs) -> str:
+        if self._trace_file:
+            logger.info("reading trace from file: %s", self._trace_file)
+            return Path(self._trace_file).read_text(encoding="utf-8", errors="ignore")
+        # Run test command and capture output as trace
+        logger.info("running test command to generate trace: %s", self._test_cmd)
+        _, output = _run_test_cmd(self._source_dir, self._test_cmd)
+        return output
+
+    def fetch_file(self, file_path: str, ref: str = "main") -> str:
+        return _read_local_file(self._source_dir, file_path)
+
+    # ── VCSProvider ───────────────────────────────────────────────────────────
+
+    def ensure_repo_ready(self, bug_id: str) -> Path:
+        # Repo already exists locally; just return the path
+        logger.info("local git repo ready at %s", self._source_dir)
+        return self._source_dir
+
+    def create_fix_branch(self, bug_id: str, repo_path: Path) -> dict:
+        now = datetime.datetime.now()
+        branch_id = now.strftime("%H_%M_%S") + f"_{now.microsecond // 100000}"
+        branch_name = f"auto/bug_{bug_id}-patch_{branch_id}"
+
+        self._git("checkout", "-b", branch_name, cwd=str(repo_path))
+        current_commit = self._git("rev-parse", "HEAD", cwd=str(repo_path))
+
+        logger.info("created local fix branch: %s", branch_name)
+        return {
+            "status": "success",
+            "branch_name": branch_name,
+            "base_branch": "HEAD",
+            "commit": current_commit,
+        }
+
+    def commit_and_push(self, repo_path: Path, message: str) -> dict:
+        status = self._git("status", "--porcelain", cwd=str(repo_path))
+        if not status:
+            logger.info("no changes to commit")
+            return {"status": "no_changes"}
+
+        self._git("add", "-A", cwd=str(repo_path))
+        self._git("commit", "-m", message, cwd=str(repo_path))
+        commit_hash = self._git("rev-parse", "HEAD", cwd=str(repo_path))
+        branch = self._git("rev-parse", "--abbrev-ref", "HEAD", cwd=str(repo_path))
+
+        logger.info("committed locally: %s on %s (no push)", commit_hash[:8], branch)
+        return {"status": "success", "branch": branch, "commit": commit_hash}
+
+    # ── ReviewProvider ────────────────────────────────────────────────────────
+
+    def create_review(self, repo_path: Path, state: dict) -> dict:
+        logger.info("local git mode: fix committed on branch %s", state.get("fix_branch_name"))
+        return {"status": "local_commit", "branch": state.get("fix_branch_name")}
+
+    def wait_ci_result(self, bug_id: str, timeout: int = 300) -> str | None:
+        # In local mode, tests were already run in apply_change_and_test.
+        # Return success to let the graph proceed to create_review.
+        logger.info("local mode: skipping CI wait, using local test result")
+        return "success"
+
+
+# ── LocalNoGitProvider ────────────────────────────────────────────────────────
+
+class LocalNoGitProvider(SourceProvider, VCSProvider, ReviewProvider):
+    """
+    Plain directory mode — no git required.
+    Creates a temp copy of the source dir to work in.
+    Produces a patch file and report for user review.
+    """
+
+    def __init__(self, source_dir: str, output_dir: str = ".",
+                 trace_file: str = "", test_cmd: str = "pytest",
+                 bug_id: str = "BUG-LOCAL"):
+        self._source_dir = Path(source_dir).resolve()
+        self._output_dir = Path(output_dir).resolve()
+        self._trace_file = trace_file
+        self._test_cmd = test_cmd
+        self._bug_id = bug_id
+        self._work_dir: Path | None = None  # set during ensure_repo_ready
+
+        if not self._source_dir.is_dir():
+            raise ValueError(f"Source directory not found: {self._source_dir}")
+
+    @property
+    def work_dir(self) -> Path:
+        if self._work_dir is None:
+            raise RuntimeError("ensure_repo_ready() must be called first")
+        return self._work_dir
+
+    # ── SourceProvider ────────────────────────────────────────────────────────
+
+    def fetch_trace(self, **kwargs) -> str:
+        if self._trace_file:
+            logger.info("reading trace from file: %s", self._trace_file)
+            return Path(self._trace_file).read_text(encoding="utf-8", errors="ignore")
+        # Run test command in the temp working copy so .venv doesn't pollute source
+        work_dir = self.ensure_repo_ready(self._bug_id)
+        logger.info("running test command to generate trace: %s", self._test_cmd)
+        _, output = _run_test_cmd(work_dir, self._test_cmd)
+        return output
+
+    def fetch_file(self, file_path: str, ref: str = "main") -> str:
+        # Read from the working copy if available, else from source
+        base = self._work_dir if self._work_dir else self._source_dir
+        return _read_local_file(base, file_path)
+
+    # ── VCSProvider ───────────────────────────────────────────────────────────
+
+    def ensure_repo_ready(self, bug_id: str) -> Path:
+        # Idempotent: only copy once
+        if self._work_dir and self._work_dir.exists():
+            return self._work_dir
+        tmp_base = Path(tempfile.gettempdir()) / "sdlcma_local" / bug_id
+        if tmp_base.exists():
+            shutil.rmtree(tmp_base)
+        shutil.copytree(self._source_dir, tmp_base)
+        self._work_dir = tmp_base
+        logger.info("created working copy at %s", tmp_base)
+        return tmp_base
+
+    def create_fix_branch(self, bug_id: str, repo_path: Path) -> dict:
+        # No-op for no-git mode — just record a label
+        branch_name = f"local-fix-{bug_id}"
+        logger.info("no-git mode: logical branch label = %s", branch_name)
+        return {
+            "status": "success",
+            "branch_name": branch_name,
+            "base_branch": "none",
+            "commit": "none",
+        }
+
+    def commit_and_push(self, repo_path: Path, message: str) -> dict:
+        # Generate a unified diff patch comparing original to modified
+        patch_lines = []
+        for root, _dirs, files in os.walk(str(repo_path)):
+            for fname in files:
+                mod_path = Path(root) / fname
+                rel = mod_path.relative_to(repo_path)
+                orig_path = self._source_dir / rel
+
+                if not orig_path.exists():
+                    # New file
+                    mod_content = mod_path.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
+                    patch_lines.extend(difflib.unified_diff(
+                        [], mod_content,
+                        fromfile=f"a/{rel}", tofile=f"b/{rel}",
+                    ))
+                    continue
+
+                try:
+                    orig_content = orig_path.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
+                    mod_content = mod_path.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
+                except (UnicodeDecodeError, PermissionError):
+                    continue
+
+                if orig_content != mod_content:
+                    patch_lines.extend(difflib.unified_diff(
+                        orig_content, mod_content,
+                        fromfile=f"a/{rel}", tofile=f"b/{rel}",
+                    ))
+
+        if not patch_lines:
+            logger.info("no changes detected")
+            return {"status": "no_changes"}
+
+        # Write patch file
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        bug_id = repo_path.name  # bug_id was used as the dir name
+        patch_path = self._output_dir / f"{bug_id}.patch"
+        patch_path.write_text("".join(patch_lines), encoding="utf-8")
+        logger.info("patch written to %s", patch_path)
+
+        return {"status": "success", "patch_file": str(patch_path)}
+
+    # ── ReviewProvider ────────────────────────────────────────────────────────
+
+    def create_review(self, repo_path: Path, state: dict) -> dict:
+        bug_id = state.get("bug_id", "unknown")
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+
+        patch_path = self._output_dir / f"{bug_id}.patch"
+        report_path = self._output_dir / f"{bug_id}_report.md"
+
+        # Build report
+        lines = [
+            f"# Bug Fix Report: {bug_id}\n",
+            f"\n## Error Summary\n\n```\n{state.get('error_info', 'N/A')}\n```\n",
+            f"\n## Suspect File\n\n`{state.get('suspect_file_path', 'N/A')}`\n",
+            f"\n## Test Result\n\n**Passed:** {state.get('test_passed', 'N/A')}\n",
+        ]
+
+        if state.get("test_output"):
+            lines.append(f"\n```\n{state['test_output'][:2000]}\n```\n")
+
+        if state.get("react_reasoning"):
+            lines.append(f"\n## LLM Reasoning\n\n{state['react_reasoning']}\n")
+
+        lines.append(f"\n## Apply the Fix\n\n```bash\npatch -p1 -d {self._source_dir} < {patch_path}\n```\n")
+        lines.append(f"\n## Working Copy\n\n`{repo_path}`\n")
+
+        report_path.write_text("".join(lines), encoding="utf-8")
+        logger.info("report written to %s", report_path)
+
+        # Print summary to console
+        print(f"\nFix generated and tested ({'PASSED' if state.get('test_passed') else 'FAILED'}).")
+        print(f"\n  Review:  {report_path}")
+        if patch_path.exists():
+            print(f"  Patch:   {patch_path}")
+            print(f"\n  To apply:  patch -p1 -d {self._source_dir} < {patch_path}")
+        print()
+
+        return {
+            "status": "report_generated",
+            "report_file": str(report_path),
+            "patch_file": str(patch_path) if patch_path.exists() else None,
+        }
+
+    def wait_ci_result(self, bug_id: str, timeout: int = 300) -> str | None:
+        # In no-git mode, tests were already run locally.
+        logger.info("no-git mode: skipping CI wait, using local test result")
+        return "success"

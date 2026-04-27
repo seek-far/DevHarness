@@ -1,39 +1,135 @@
 # DevHarness
 
-**DevHarness** is an automated bug-fixing agent for CI/CD pipelines. It listens for GitLab CI failure webhooks, uses an LLM-powered ReAct loop to diagnose the failure and generate a patch, validates the fix locally, then opens a merge request — all without human intervention.
+**DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file.
 
 ---
 
-## How It Works
+## Two Modes of Operation
+
+### GitLab Mode (Full Pipeline)
+
+Listens for GitLab CI failure webhooks, diagnoses and fixes the bug automatically, then opens a merge request — no human intervention needed.
 
 ```
 GitLab CI fails
       │
       ▼
-[Gateway]  ── webhook received ──►  gateway:stream (Redis)
+[Gateway]  ── webhook ──►  Redis stream
       │
       ▼
 [Orchestrator]  ── spawns ──►  [Worker] (one per bug)
                                     │
                           ┌─────────▼──────────┐
                           │   LangGraph nodes   │
-                          │  fetch_trace        │
-                          │  parse_trace        │
-                          │  fetch_source_file  │
-                          │  react_loop (LLM)   │
-                          │  create_fix_branch  │
-                          │  apply + pytest     │
-                          │  commit + push      │
-                          │  wait CI result     │
-                          │  create_mr          │
+                          │  (via GitLabProvider)│
                           └────────────────────┘
+                                    │
+                              Merge Request
 ```
 
-The **Worker** runs a LangGraph state machine. The LLM is given the CI trace and source file; it calls tools (`fetch_additional_file`, `fetch_file_segment`, `submit_fix`, `abort_fix`) until it produces a patch or gives up. The patch is applied and tested in an isolated Python venv before being committed.
+### Standalone Mode (Local)
+
+Runs against a local directory — no GitLab, no CI, no Redis required. Just point it at a project with failing tests.
+
+```
+Local project + error trace
+      │
+      ▼
+[Standalone Runner]
+      │
+      ▼
+[Worker] ── same LangGraph nodes ──►  Fix commit (git) or patch file (no-git)
+             (via LocalProvider)
+```
+
+**Two sub-modes:**
+- **With git** (`LocalGitProvider`): Source dir is a git repo. Creates a fix branch, commits locally (no push).
+- **Without git** (`LocalNoGitProvider`): Plain directory. Creates a temp copy, generates a unified diff patch file + review report. Original source is never modified.
+
+---
+
+## Quick Start
+
+### Standalone Mode (Simplest)
+
+```bash
+# Fix a project using a captured error trace:
+python -m bf_worker.standalone \
+  --source-dir /path/to/project \
+  --trace-file /path/to/error.log
+
+# Let the tool discover errors by running tests:
+python -m bf_worker.standalone \
+  --source-dir /path/to/project \
+  --test-cmd "pytest tests/"
+
+# No-git mode with interactive review:
+python -m bf_worker.standalone \
+  --source-dir /path/to/project \
+  --trace-file error.log \
+  --no-git --review --output-dir ./results
+```
+
+**Standalone CLI options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--source-dir` | (required) | Path to the project source directory |
+| `--trace-file` | | File containing test/CI error output |
+| `--test-cmd` | `pytest` | Command to run if no trace file provided |
+| `--bug-id` | `BUG-LOCAL-1` | Identifier for this fix |
+| `--no-git` | auto-detect | Force no-git mode |
+| `--output-dir` | fresh temp dir | Where to write patch file and report (default: `{tmp}/sdlcma_out/{bug_id}_XXXX/`) |
+| `--review` | off | Interactive review before applying (no-git mode) |
+
+### GitLab Mode
+
+```bash
+# 1. Gateway (webhook receiver)
+uvicorn gateway.gateway:app --host 0.0.0.0 --port 8000
+
+# 2. Orchestrator
+python -m orchestrator.orchestrator
+```
+
+Or use `dh_entry.py` to launch both together:
+
+```bash
+python dh_entry.py
+```
 
 ---
 
 ## Architecture
+
+### Provider Abstraction
+
+The worker's LangGraph nodes access all external resources through a **provider abstraction layer** (`bf_worker/providers/`). This decouples the core bug-fixing logic from any specific platform:
+
+```
+                    ┌───────────────────────┐
+                    │   LangGraph Nodes     │
+                    │  (platform-agnostic)  │
+                    └───────────┬───────────┘
+                                │ state["provider"]
+                    ┌───────────▼───────────┐
+                    │   Provider ABCs       │
+                    │  Source / VCS / Review │
+                    └───┬───────┬───────┬───┘
+                        │       │       │
+               ┌────────▼┐ ┌───▼────┐ ┌▼─────────┐
+               │ GitLab  │ │ Local  │ │ LocalNo   │
+               │ Provider│ │ Git    │ │ Git       │
+               └─────────┘ └────────┘ └───────────┘
+```
+
+| ABC | Responsibility |
+|---|---|
+| `SourceProvider` | Fetch CI traces and source file content |
+| `VCSProvider` | Repo setup, branch creation, commit/push |
+| `ReviewProvider` | Post-fix output (MR, CI wait, report) |
+
+### Services (GitLab Mode)
 
 Three independently-running services communicate via **Redis Streams**:
 
@@ -43,14 +139,30 @@ Three independently-running services communicate via **Redis Streams**:
 | **Orchestrator** | Async event loop. Reads the stream, spawns one Worker subprocess per bug, monitors heartbeats, routes validation results back to workers. |
 | **Worker** | Spawned once per bug. Runs the LangGraph fix pipeline, maintains a Redis heartbeat, cleans up on exit. |
 
+### Worker Graph
+
+The same LangGraph state machine runs in all modes:
+
+```
+fetch_trace → parse_trace → fetch_source_file → react_loop
+    → create_fix_branch → apply_change_and_test → commit_change
+    → wait_ci_result → create_mr → END
+                                          ↓ (any failure)
+                                     handle_failure
+```
+
+The **ReAct loop** gives the LLM tools (`fetch_additional_file`, `fetch_file_segment`, `submit_fix`, `abort_fix`) and runs up to 8 reasoning steps. The patch is applied and tested in an isolated Python venv before being committed.
+
 ---
 
 ## Requirements
 
 - Python 3.10+
-- Redis 7+
-- GitLab instance (self-hosted or cloud) with webhook support
 - An OpenAI-compatible LLM API (tested with Alibaba Dashscope / Qwen)
+
+Additional for GitLab mode:
+- Redis 7+
+- GitLab instance with webhook support
 
 ---
 
@@ -89,16 +201,16 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 
 | Variable | Description |
 |---|---|
-| `GITLAB_PRIVATE_TOKEN` | GitLab personal access token with `api` scope |
+| `GITLAB_PRIVATE_TOKEN` | GitLab personal access token with `api` scope (GitLab mode only) |
 | `LLM_API_KEY` | API key for your LLM provider |
 | `LLM_API_BASE_URL` | OpenAI-compatible base URL (e.g. Dashscope) |
 | `LLM_MODEL` | Model name (e.g. `qwen3-coder-480b-a35b-instruct`) |
 
 ---
 
-## Running
+## Running (GitLab Mode Details)
 
-DevHarness supports two run modes, controlled by `settings/.env`:
+DevHarness supports two GitLab deployment modes, controlled by `settings/.env`:
 
 ### Mode 1: Local Multi-Process (`ENV=local_multi_process`)
 
@@ -112,12 +224,6 @@ uvicorn gateway.gateway:app --host 0.0.0.0 --port 8000
 python -m orchestrator.orchestrator
 ```
 
-Or use `dh_entry.py` to launch both together:
-
-```bash
-python dh_entry.py
-```
-
 ### Mode 2: Docker Compose (`ENV=local_docker_compose`)
 
 Gateway, Orchestrator, and Redis run as Docker containers. Workers are spawned as separate containers on demand by the orchestrator via the Docker API.
@@ -127,25 +233,10 @@ Gateway, Orchestrator, and Redis run as Docker containers. Workers are spawned a
 - SSH private key configured in `settings/orchestrator_local_docker_compose.env`
 
 ```bash
-# Create the shared network (if not already created)
 docker network create sdlcma_net
-
-# Build service images
 docker compose build
-
-# Build the worker image (not part of compose services)
 docker build -f Dockerfile.bf-worker -t dh-bf-worker:latest .
-
-# Start services
 docker compose up
-```
-
-**Configuration files for Docker Compose mode:**
-
-```bash
-cp settings/orchestrator_local_docker_compose.env.example  settings/orchestrator_local_docker_compose.env
-cp settings/worker_local_docker_compose.env.example        settings/worker_local_docker_compose.env
-cp gateway/gateway_local_docker_compose.env.example        gateway/gateway_local_docker_compose.env
 ```
 
 ### GitLab Webhook Setup
@@ -168,8 +259,10 @@ Trigger: **Pipeline events**
 Runs the full pipeline (gateway → orchestrator → worker) against an isolated Redis DB with a synthetic bug report:
 
 ```bash
-python integration_test.py [--redis-url redis://...] [--bug-id BUG-IT-1]
+uv run python integration_test.py [--redis-url redis://...] [--bug-id BUG-IT-1]
 ```
+
+> Use `uv run python` rather than invoking a venv interpreter directly — `apply_change_and_test` shells out to `python -m venv` to set up an isolated test environment, and that requires `python` (not just `python3`) to be on PATH.
 
 > There are no unit tests — only this end-to-end integration test.
 
@@ -181,8 +274,6 @@ Manually send a pipeline webhook payload to the gateway for testing:
 python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [--file path/to/msg.txt]
 ```
 
-Reads from `test_utility/pipeline_msg.txt` by default.
-
 ---
 
 ## Project Structure
@@ -191,16 +282,22 @@ Reads from `test_utility/pipeline_msg.txt` by default.
 ├── gateway/                  # FastAPI webhook receiver
 ├── orchestrator/             # Async orchestrator (consumer, spawner, monitor, router)
 ├── bf_worker/
+│   ├── providers/
+│   │   ├── base.py           # Provider ABCs (SourceProvider, VCSProvider, ReviewProvider)
+│   │   ├── gitlab_provider.py  # GitLab implementation
+│   │   └── local_provider.py   # Local git + no-git implementations
 │   ├── graph/
-│   │   ├── nodes/            # LangGraph nodes (one file per step)
+│   │   ├── nodes/            # LangGraph nodes (platform-agnostic via provider)
 │   │   ├── builder.py        # Graph definition and edges
 │   │   ├── routing.py        # Conditional edge functions
-│   │   └── state.py          # BugFixState TypedDict
+│   │   └── state.py          # BugFixState TypedDict (includes provider ref)
 │   ├── services/
-│   │   ├── gitlab_utils.py   # GitLab API and git operations
+│   │   ├── gitlab_utils.py   # GitLab API and git operations (used by GitLabProvider)
 │   │   ├── apply_patch.py    # Patch application logic
-│   │   └── react_tools.py    # LLM tool definitions
-│   └── entrypoint.sh         # Docker entrypoint (SSH key setup)
+│   │   ├── parse_trace.py    # Trace parsing (regex-based)
+│   │   └── react_tools.py    # LLM tool definitions (provider-agnostic)
+│   ├── bf_worker.py          # Entry point for GitLab mode (with Redis heartbeat)
+│   └── standalone.py         # Entry point for standalone local mode
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender

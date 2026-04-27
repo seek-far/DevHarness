@@ -15,8 +15,12 @@ Prerequisites:
   - Dependencies: pip install fastapi uvicorn redis pydantic-settings httpx
 
 Usage:
-  python integration_test.py
-  python integration_test.py --redis-url redis://127.0.0.1:6379/15 --bug-id BUG-IT-1
+  uv run python integration_test.py
+  uv run python integration_test.py --redis-url redis://127.0.0.1:6379/15 --bug-id BUG-IT-1
+
+Note: Use `uv run python` rather than calling a venv interpreter directly.
+`apply_change_and_test` shells out to `python -m venv` to create an isolated
+test environment, which requires `python` (not just `python3`) on PATH.
 """
 
 from __future__ import annotations

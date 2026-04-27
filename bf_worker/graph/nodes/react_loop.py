@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
 sys.path.append(str(Path(__file__).resolve().parents[3]))
 from settings import worker_cfg as cfg
@@ -161,7 +161,7 @@ def react_loop(state: BugFixState) -> BugFixState:
             break
 
         # ── handle fetch tools ────────────────────────────────────────────────
-        tool_result = execute_tool(tool_name, tool_input, state["project_web_url"], state["bug_id"])
+        tool_result = execute_tool(tool_name, tool_input, state["provider"])
 
         # Append tool result as a ToolMessage (LangChain format)
         messages.append(ToolMessage(

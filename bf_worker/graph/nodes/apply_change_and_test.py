@@ -9,7 +9,6 @@ Node: apply_change_and_test
 
 from __future__ import annotations
 import logging
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,20 +16,23 @@ from pathlib import Path
 from graph.state import BugFixState
 from services.apply_patch import apply_change_infos
 
-sys.path.append(str(Path.cwd().parent))
-from settings import worker_cfg as cfg
-
 logger = logging.getLogger(__name__)
 
 
 def apply_change_and_test(state: BugFixState) -> BugFixState:
-    repo_path = Path(cfg.repo_base_path) / state["bug_id"]
+    provider = state["provider"]
+    bug_id = state["bug_id"]
+
+    # Resolve repo path — provider.ensure_repo_ready was already called in
+    # create_fix_branch, so we reconstruct the path the same way.
+    repo_path = provider.ensure_repo_ready(bug_id)
+
     llm_result = state["llm_result"]
     change_infos = llm_result["fixes"]
     suspect_file = state["suspect_file_path"]
     src_filepath = str(repo_path / suspect_file)
 
-    # ── 1. Apply patch ────────────────────────────────────────────────────────
+    # ── 1. Apply patch ───────────────────────────────────────────────���────────
     try:
         apply_change_infos(src_filepath=src_filepath, change_infos=change_infos)
         logger.info("patch applied to %s", src_filepath)
@@ -64,7 +66,7 @@ def apply_change_and_test(state: BugFixState) -> BugFixState:
             check=True,
         )
 
-    # ── 3. Run pytest ─────────────────────────────────────────────────────────
+    # ── 3. Run pytest ──────────���────────────────────────────────���─────────────
     logger.info("running pytest in %s", repo_path)
     proc = subprocess.run(
         [str(venv_python), "-m", "pytest", "--tb=short", "-q"],

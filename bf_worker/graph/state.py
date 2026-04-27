@@ -3,10 +3,13 @@ BugFixState — the single source of truth passed between all LangGraph nodes.
 """
 
 from __future__ import annotations
-from typing import TypedDict
+from typing import Any, TypedDict
 
 
 class BugFixState(TypedDict, total=False):
+    # ── provider (injected at startup) ────────────────────────────────────────
+    provider: Any  # SourceProvider & VCSProvider & ReviewProvider instance
+
     # ── inputs ────────────────────────────────────────────────────────────────
     bug_id: str
     project_id: str

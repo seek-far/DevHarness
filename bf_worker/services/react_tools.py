@@ -10,12 +10,6 @@ Public API:
 
 from __future__ import annotations
 import logging
-import sys
-from pathlib import Path
-
-sys.path.append(str(Path(__file__).resolve().parents[2]))
-from settings import worker_cfg as cfg
-from services.gitlab_utils import Repo
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +26,7 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "fetch_additional_file",
             "description": (
-                "Fetch the full content of a source file from the GitLab repo. "
+                "Fetch the full content of a source file from the repository. "
                 "Use when you need more context beyond the primary suspect file "
                 "(e.g. models.py, serializers.py, urls.py). "
                 "The file is fetched from the main branch."
@@ -165,23 +159,20 @@ TOOLS_SCHEMA = [
 ]
 
 
-# ── Tool execution ─────────────────────────────────────────────────────────────
+# ── Tool execution ────────���───────────────────────────���────────────────────────
 
-def execute_tool(tool_name: str, tool_input: dict, project_web_url: str, bug_id: str) -> str:
+def execute_tool(tool_name: str, tool_input: dict, provider) -> str:
     """
     Execute a fetch tool and return the result as a plain string.
     submit_fix and abort_fix are handled directly in react_loop — never
     passed here.
     """
-    repo_path = Path(cfg.repo_base_path) / bug_id
-    repo = Repo(repo_path=str(repo_path), repo_url=project_web_url)
-
     if tool_name == "fetch_additional_file":
-        return _fetch_full_file(repo, tool_input["path"])
+        return _fetch_full_file(provider, tool_input["path"])
 
     if tool_name == "fetch_file_segment":
         return _fetch_segment(
-            repo,
+            provider,
             tool_input["path"],
             tool_input["start_line"],
             tool_input["end_line"],
@@ -192,11 +183,11 @@ def execute_tool(tool_name: str, tool_input: dict, project_web_url: str, bug_id:
     return f"[error: unknown tool '{tool_name}']"
 
 
-# ── private helpers ────────────────────────────────────────────────────────────
+# ── private helpers ───────────────────────────────────────────��────────────────
 
-def _fetch_full_file(repo: Repo, path: str) -> str:
+def _fetch_full_file(provider, path: str) -> str:
     try:
-        content = repo.gitlab_fetch_file(path)
+        content = provider.fetch_file(path)
     except Exception as exc:
         logger.warning("fetch_additional_file failed for '%s': %s", path, exc)
         return f"[error fetching '{path}': {exc}]"
@@ -211,9 +202,9 @@ def _fetch_full_file(repo: Repo, path: str) -> str:
     return f"# File: {path}\n```python\n{content}\n```{truncated}"
 
 
-def _fetch_segment(repo: Repo, path: str, start: int, end: int) -> str:
+def _fetch_segment(provider, path: str, start: int, end: int) -> str:
     try:
-        content = repo.gitlab_fetch_file(path)
+        content = provider.fetch_file(path)
     except Exception as exc:
         logger.warning("fetch_file_segment failed for '%s': %s", path, exc)
         return f"[error fetching '{path}': {exc}]"

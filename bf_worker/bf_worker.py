@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 from graph.builder import build_graph
 from graph.state import BugFixState
+from providers.gitlab_provider import GitLabProvider
 
 from pathlib import Path
 sys.path.append(str(Path.cwd()))
@@ -87,10 +88,14 @@ class BugFixWorker:
 
     def _run_graph(self) -> None:
         """Build and invoke the LangGraph (synchronous call, runs in executor)."""
+        project_web_url = os.environ["project_web_url"]
+        provider = GitLabProvider(project_web_url=project_web_url)
+
         initial_state: BugFixState = {
+            "provider":        provider,
             "bug_id":          self.bug_id,
             "project_id":      os.environ["project_id"],
-            "project_web_url": os.environ["project_web_url"],
+            "project_web_url": project_web_url,
             "job_id":          os.environ["job_id"],
             # counters start at zero
             "llm_retry_count": 0,
