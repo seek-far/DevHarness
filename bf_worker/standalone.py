@@ -49,8 +49,9 @@ _HERE = Path(__file__).resolve().parent          # bf_worker/
 sys.path.insert(0, str(_HERE.parent))            # project root
 sys.path.insert(0, str(_HERE))                   # bf_worker/
 
-from graph.builder import build_graph
-from graph.state import BugFixState
+from agents.base import BugInput
+from agents.langgraph_agent import LangGraphAgent
+from journal import JournalWriter
 from providers.local_provider import LocalGitProvider, LocalNoGitProvider
 
 logger = logging.getLogger(__name__)
@@ -165,28 +166,20 @@ def main() -> None:
             bug_id=args.bug_id,
         )
 
-    # Build initial state
-    initial_state: BugFixState = {
-        "provider": provider,
-        "bug_id": args.bug_id,
-        "project_id": "",
-        "project_web_url": "",
-        "job_id": "",
-        "llm_retry_count": 0,
-        "fix_retry_count": 0,
-    }
+    # Build agent + bug input
+    bug_input = BugInput(bug_id=args.bug_id, provider=provider)
+    agent = LangGraphAgent(journal=JournalWriter())
 
-    # Run the graph
-    graph = build_graph()
-    logger.info("graph compiled, invoking...")
-    final_state: BugFixState = graph.invoke(initial_state)
+    logger.info("invoking agent=%s ...", agent.name)
+    fix_output = agent.fix(bug_input)
 
-    if final_state.get("error"):
-        logger.error("graph finished with error: %s", final_state["error"])
-        print(f"\nFix failed: {final_state['error']}", file=sys.stderr)
+    if fix_output.outcome == "error":
+        logger.error("agent finished with error: %s", fix_output.error)
+        print(f"\nFix failed: {fix_output.error}", file=sys.stderr)
         sys.exit(1)
 
-    logger.info("graph finished successfully")
+    logger.info("agent finished: outcome=%s iterations=%d",
+                fix_output.outcome, fix_output.iterations)
 
     # Interactive review for no-git mode
     if args.review and not use_git and hasattr(provider, '_work_dir') and provider._work_dir:

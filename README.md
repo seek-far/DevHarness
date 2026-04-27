@@ -2,6 +2,8 @@
 
 **DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file.
 
+It is also a research platform: the bug-fix approach itself is pluggable (`Agent` interface), and an evaluation harness compares approaches against a curated benchmark.
+
 ---
 
 ## Two Modes of Operation
@@ -101,6 +103,62 @@ python dh_entry.py
 ---
 
 ## Architecture
+
+### Running Mode vs Evaluation Mode
+
+```
+┌─ Running mode ───────────────────────────────┐
+│  picks ONE agent + config (the prod choice)  │
+│  ├─ standalone submode (CLI, current code)   │
+│  └─ gitlab submode (webhook, current code)   │
+│  Side effects: real (MR / patch / commit)    │
+│  Always-on journal: evaluation/journal/      │
+└────────────────────┬─────────────────────────┘
+                     │ both call agent.fix(BugInput)
+┌────────────────────▼─────────────────────────┐
+│   Agent layer  (bf_worker/agents/)           │
+│   LangGraphAgent | (future) AiderAgent | ... │
+└────────────────────┬─────────────────────────┘
+┌────────────────────▼─────────────────────────┐
+│ Evaluation mode  (evaluation/)               │
+│  picks MANY agents × MANY fixtures           │
+│  Output: evaluation/runs/<run_id>/, reports  │
+│  Side effects: none (sandboxed providers)    │
+└──────────────────────────────────────────────┘
+```
+
+### Agent Abstraction
+
+The unit of comparison is the **agent**, not the graph. Different bug-fix approaches (our LangGraph state machine, third-party agents like Aider or SWE-agent, custom approaches) all implement the same minimal interface:
+
+```python
+class Agent(ABC):
+    name: str
+    def fix(self, bug_input: BugInput) -> FixOutput: ...
+```
+
+Adding a third-party agent means writing one adapter class — no need to refactor its internals into our graph.
+
+| Agent | Description |
+|---|---|
+| `LangGraphAgent` | The default — wraps the LangGraph state machine + ReAct loop |
+| (future) | Adapters for Aider, SWE-agent, or custom approaches |
+
+`BugInput` and `FixOutput` are the shared contract between modes. Per-agent enhancements (memory lookup, multi-hypothesis fixing, edge-case test generation) live inside their owning agent — they do not pollute the shared interface.
+
+### Journal & Evaluation
+
+Every running-mode invocation writes a `RunRecord` to `evaluation/journal/<ts>_<bug_id>_<agent>/`. Auto-flagged candidates (failures, no-fix, high-iteration runs) can later be promoted into curated **fixtures** for the benchmark via `python -m evaluation.cli promote`.
+
+```bash
+python -m evaluation.cli list-fixtures        # what's in the benchmark
+python -m evaluation.cli list-journal --flagged  # candidates worth promoting
+python -m evaluation.cli promote <journal_entry> --category off-by-one
+python -m evaluation.cli run                  # sweep agents × fixtures
+python -m evaluation.cli report <run_id>      # comparison table
+```
+
+The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source.
 
 ### Provider Abstraction
 
@@ -282,6 +340,9 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 ├── gateway/                  # FastAPI webhook receiver
 ├── orchestrator/             # Async orchestrator (consumer, spawner, monitor, router)
 ├── bf_worker/
+│   ├── agents/               # Agent abstraction layer (unit of comparison)
+│   │   ├── base.py           #   Agent ABC, BugInput, FixOutput
+│   │   └── langgraph_agent.py  # default agent: wraps the LangGraph state machine
 │   ├── providers/
 │   │   ├── base.py           # Provider ABCs (SourceProvider, VCSProvider, ReviewProvider)
 │   │   ├── gitlab_provider.py  # GitLab implementation
@@ -296,8 +357,17 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   ├── apply_patch.py    # Patch application logic
 │   │   ├── parse_trace.py    # Trace parsing (regex-based)
 │   │   └── react_tools.py    # LLM tool definitions (provider-agnostic)
+│   ├── journal.py            # Auto-captures running-mode runs for retrospective curation
 │   ├── bf_worker.py          # Entry point for GitLab mode (with Redis heartbeat)
 │   └── standalone.py         # Entry point for standalone local mode
+├── evaluation/               # Evaluation mode: sweep agents × fixtures
+│   ├── fixtures/             # Curated benchmark (one bug per subdirectory)
+│   ├── journal/              # Auto-captured runs from running mode (gitignored)
+│   ├── runs/                 # Sweep outputs (gitignored)
+│   ├── fixture.py            # Fixture loader / discovery
+│   ├── runner.py             # run_sweep(agent_specs, fixtures)
+│   ├── metrics.py            # Aggregate run records into comparison tables
+│   └── cli.py                # `bench` CLI: list / run / report / promote
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender

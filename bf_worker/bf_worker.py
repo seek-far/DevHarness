@@ -24,8 +24,9 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 
-from graph.builder import build_graph
-from graph.state import BugFixState
+from agents.base import BugInput
+from agents.langgraph_agent import LangGraphAgent
+from journal import JournalWriter
 from providers.gitlab_provider import GitLabProvider
 
 from pathlib import Path
@@ -87,30 +88,27 @@ class BugFixWorker:
             logger.debug("repo dir not found, skipping cleanup: %s", repo_path)
 
     def _run_graph(self) -> None:
-        """Build and invoke the LangGraph (synchronous call, runs in executor)."""
+        """Build and invoke the agent (synchronous call, runs in executor)."""
         project_web_url = os.environ["project_web_url"]
         provider = GitLabProvider(project_web_url=project_web_url)
 
-        initial_state: BugFixState = {
-            "provider":        provider,
-            "bug_id":          self.bug_id,
-            "project_id":      os.environ["project_id"],
-            "project_web_url": project_web_url,
-            "job_id":          os.environ["job_id"],
-            # counters start at zero
-            "llm_retry_count": 0,
-            "fix_retry_count": 0,
-            # everything else starts as None / absent
-        }
+        bug_input = BugInput(
+            bug_id=self.bug_id,
+            provider=provider,
+            project_id=os.environ["project_id"],
+            project_web_url=project_web_url,
+            job_id=os.environ["job_id"],
+        )
 
-        graph = build_graph()
-        logger.info("graph compiled, invoking…")
-        final_state: BugFixState = graph.invoke(initial_state)
+        agent = LangGraphAgent(journal=JournalWriter())
+        logger.info("invoking agent=%s ...", agent.name)
+        fix_output = agent.fix(bug_input)
 
-        if final_state.get("error"):
-            logger.error("graph finished with error: %s", final_state["error"])
+        if fix_output.outcome == "error":
+            logger.error("agent finished with error: %s", fix_output.error)
         else:
-            logger.info("graph finished successfully")
+            logger.info("agent finished: outcome=%s iterations=%d",
+                        fix_output.outcome, fix_output.iterations)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
