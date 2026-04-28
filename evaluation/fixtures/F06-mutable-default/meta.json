@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F06-mutable-default",
+  "category": "api-misuse",
+  "difficulty": "medium",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Mutable default argument [] is shared across calls — classic Python gotcha."
+}

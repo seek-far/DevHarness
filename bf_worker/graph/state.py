@@ -10,6 +10,9 @@ class BugFixState(TypedDict, total=False):
     # ── provider (injected at startup) ────────────────────────────────────────
     provider: Any  # SourceProvider & VCSProvider & ReviewProvider instance
 
+    # ── hook registry (LangGraphAgent-only; absent for other agents) ──────────
+    hooks: Any     # enhancements.hooks.HookRegistry — present only when enhancements are wired
+
     # ── inputs ────────────────────────────────────────────────────────────────
     bug_id: str
     project_id: str

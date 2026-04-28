@@ -1,0 +1,8 @@
+[
+  {
+    "name": "baseline",
+    "agent": "langgraph",
+    "kwargs": {},
+    "notes": "Default LangGraphAgent with no enhancements. The reference point that future enhancements (memory, multi-hypothesis, edge-case test gen, ...) are compared against."
+  }
+]

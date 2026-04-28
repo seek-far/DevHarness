@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F08-recursion-base",
+  "category": "missing-edge-case",
+  "difficulty": "easy",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "factorial has no base case; recurses forever and hits RecursionError."
+}

@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F10-whitespace",
+  "category": "string-handling",
+  "difficulty": "medium",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Single str.replace('  ', ' ') doesn't collapse 3+ spaces or tabs/newlines."
+}

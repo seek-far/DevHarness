@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F09-float-precision",
+  "category": "api-misuse",
+  "difficulty": "medium",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Uses == for floats; needs math.isclose or absolute-difference tolerance."
+}

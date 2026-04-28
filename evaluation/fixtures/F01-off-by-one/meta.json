@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F01-off-by-one",
+  "category": "off-by-one",
+  "difficulty": "easy",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "items[-n:] returns the whole list when n=0; should return []."
+}

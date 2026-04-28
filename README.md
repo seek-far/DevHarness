@@ -144,21 +144,55 @@ Adding a third-party agent means writing one adapter class — no need to refact
 | `LangGraphAgent` | The default — wraps the LangGraph state machine + ReAct loop |
 | (future) | Adapters for Aider, SWE-agent, or custom approaches |
 
-`BugInput` and `FixOutput` are the shared contract between modes. Per-agent enhancements (memory lookup, multi-hypothesis fixing, edge-case test generation) live inside their owning agent — they do not pollute the shared interface.
+`BugInput`, `FixOutput`, and `RunRecord` are the shared contracts. Per-agent enhancements live inside their owning agent — they do not pollute the shared interface.
+
+### Hook System (LangGraphAgent extensions)
+
+Per-LangGraphAgent enhancements (memory lookup, multi-hypothesis, edge-case test generation, …) plug in via a small `HookRegistry`:
+
+```python
+from enhancements.hooks import HookRegistry, HookName
+
+def memory_lookup(state):
+    # consult memory store, return dict to merge into state
+    return {"prior_fixes": [...]}
+
+agent = LangGraphAgent(enhancements=[(HookName.AGENT_PRE_FIX, memory_lookup)])
+```
+
+Currently wired hook points: `agent.pre_fix`, `agent.post_fix` (called from `LangGraphAgent.fix()`). Graph-internal points (`graph.pre_react_loop`, `graph.post_react_loop`, `graph.pre_apply_test`, `graph.post_apply_test`) are *named* but their call sites in the graph nodes are added when the first enhancement that needs them lands — adding hook calls without a concrete consumer would be premature.
+
+### RunRecord (canonical telemetry schema)
+
+`bf_worker/agents/run_record.py` defines the `RunRecord` dataclass — the single source of truth for the structured outcome of one `agent.fix()` invocation. Both the running-mode journal and the evaluation runner write the same shape, so downstream tooling (metrics, promotion, dashboards) only handles one schema. Bump `SCHEMA_VERSION` for incompatible changes.
 
 ### Journal & Evaluation
 
 Every running-mode invocation writes a `RunRecord` to `evaluation/journal/<ts>_<bug_id>_<agent>/`. Auto-flagged candidates (failures, no-fix, high-iteration runs) can later be promoted into curated **fixtures** for the benchmark via `python -m evaluation.cli promote`.
 
 ```bash
-python -m evaluation.cli list-fixtures        # what's in the benchmark
-python -m evaluation.cli list-journal --flagged  # candidates worth promoting
+python -m evaluation.cli list-fixtures                               # what's in the benchmark
+python -m evaluation.cli list-journal --flagged                      # candidates worth promoting
 python -m evaluation.cli promote <journal_entry> --category off-by-one
-python -m evaluation.cli run                  # sweep agents × fixtures
-python -m evaluation.cli report <run_id>      # comparison table
+python -m evaluation.cli run --config configs/baseline.json          # sweep configured agents × fixtures
+python -m evaluation.cli run --fixture-id F01-off-by-one F03-missing-key  # subset
+python -m evaluation.cli report <run_id>                             # comparison table
 ```
 
 The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source.
+
+#### Bundled fixtures
+
+10 single-file Python bugs in `evaluation/fixtures/` covering off-by-one, type-coercion, missing edge cases, recursion base case, mutable defaults, float precision, and string handling. Each fixture is self-contained (`source/` + `meta.json` + `requirements.txt`). See `evaluation/fixtures/F01-off-by-one/` for the canonical layout.
+
+#### Configs
+
+Agent specs live as JSON lists under `configs/`. The `baseline.json` config (no enhancements) is the reference point against which future enhancements are measured. To compare approaches, write a config listing both, run, and compare:
+
+```bash
+python -m evaluation.cli run --config configs/baseline.json
+python -m evaluation.cli report run_<timestamp>
+```
 
 ### Provider Abstraction
 
@@ -342,7 +376,10 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 ├── bf_worker/
 │   ├── agents/               # Agent abstraction layer (unit of comparison)
 │   │   ├── base.py           #   Agent ABC, BugInput, FixOutput
-│   │   └── langgraph_agent.py  # default agent: wraps the LangGraph state machine
+│   │   ├── run_record.py     #   Canonical RunRecord schema
+│   │   └── langgraph_agent.py  # default agent: wraps the LangGraph state machine + hooks
+│   ├── enhancements/         # LangGraphAgent-only extension layer
+│   │   └── hooks.py          #   HookRegistry, HookName (named extension points)
 │   ├── providers/
 │   │   ├── base.py           # Provider ABCs (SourceProvider, VCSProvider, ReviewProvider)
 │   │   ├── gitlab_provider.py  # GitLab implementation
@@ -361,13 +398,15 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   ├── bf_worker.py          # Entry point for GitLab mode (with Redis heartbeat)
 │   └── standalone.py         # Entry point for standalone local mode
 ├── evaluation/               # Evaluation mode: sweep agents × fixtures
-│   ├── fixtures/             # Curated benchmark (one bug per subdirectory)
+│   ├── fixtures/             # Curated benchmark (10 single-file Python bugs by default)
 │   ├── journal/              # Auto-captured runs from running mode (gitignored)
 │   ├── runs/                 # Sweep outputs (gitignored)
 │   ├── fixture.py            # Fixture loader / discovery
 │   ├── runner.py             # run_sweep(agent_specs, fixtures)
 │   ├── metrics.py            # Aggregate run records into comparison tables
 │   └── cli.py                # `bench` CLI: list / run / report / promote
+├── configs/                  # Agent specs for evaluation sweeps
+│   └── baseline.json         #   No-enhancements reference point
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender

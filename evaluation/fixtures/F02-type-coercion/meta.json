@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F02-type-coercion",
+  "category": "type-error",
+  "difficulty": "easy",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "', '.join(ids) raises TypeError on int list; need to coerce to str."
+}

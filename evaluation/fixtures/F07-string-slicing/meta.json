@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F07-string-slicing",
+  "category": "off-by-one",
+  "difficulty": "easy",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "first_n_chars uses s[1:n] instead of s[:n] — drops the first character."
+}

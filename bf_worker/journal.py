@@ -3,7 +3,7 @@ JournalWriter — captures every running-mode run for retrospective evaluation c
 
 Every invocation of an Agent in running mode writes one directory under
 {journal_dir}/{ts}_{bug_id}_{agent}/ containing:
-  - record.json:   structured RunRecord (config, outcome, iterations, error)
+  - record.json:   serialized RunRecord (canonical schema, see agents.run_record)
   - trace.txt:     captured failure trace (if present)
   - test_output.txt: pytest output from the last apply_change_and_test step
   - llm_result.json: the LLM's final structured fix proposal
@@ -12,7 +12,7 @@ Every invocation of an Agent in running mode writes one directory under
 
 The journal is intentionally cheap and always-on: we don't know a bug is
 "interesting" until after it plays out. Curation (promote candidates to
-benchmark fixtures) happens later via `evaluation/cli.py`.
+benchmark fixtures) happens later via `evaluation/cli.py promote`.
 
 Override the destination via env var BF_JOURNAL_DIR.
 """
@@ -21,9 +21,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
+from agents.run_record import RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -43,28 +43,13 @@ class JournalWriter:
             self.journal_dir = _DEFAULT_DIR
         self.journal_dir.mkdir(parents=True, exist_ok=True)
 
-    def write(self, agent_name: str, bug_input, fix_output, raw_state: dict | None) -> Path | None:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        run_dir = self.journal_dir / f"{ts}_{bug_input.bug_id}_{agent_name}"
+    def write(self, record: RunRecord, final_state: dict | None) -> Path | None:
+        run_dir = self.journal_dir / f"{record.timestamp}_{record.bug_id}_{record.agent_name}"
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "record.json").write_text(record.to_json(), encoding="utf-8")
 
-            record = {
-                "agent":           agent_name,
-                "bug_id":          bug_input.bug_id,
-                "project_id":      bug_input.project_id,
-                "project_web_url": bug_input.project_web_url,
-                "job_id":          bug_input.job_id,
-                "outcome":         fix_output.outcome,
-                "error":           fix_output.error,
-                "iterations":      fix_output.iterations,
-                "timestamp":       ts,
-            }
-            (run_dir / "record.json").write_text(
-                json.dumps(record, indent=2, default=str), encoding="utf-8"
-            )
-
-            state = fix_output.final_state or {}
+            state = final_state or {}
             if state.get("trace"):
                 (run_dir / "trace.txt").write_text(str(state["trace"]), encoding="utf-8")
             if state.get("test_output"):
@@ -75,7 +60,7 @@ class JournalWriter:
                     encoding="utf-8",
                 )
 
-            flag = _flag_reason(fix_output)
+            flag = _flag_reason(record)
             if flag:
                 (run_dir / "FLAGGED").write_text(flag + "\n", encoding="utf-8")
 
@@ -86,10 +71,10 @@ class JournalWriter:
             return None
 
 
-def _flag_reason(fix_output) -> str | None:
+def _flag_reason(record: RunRecord) -> str | None:
     """Heuristic: which runs are worth surfacing for fixture-promotion review."""
-    if fix_output.outcome != "fixed":
-        return f"outcome={fix_output.outcome}"
-    if fix_output.iterations >= 2:
-        return f"high_iterations={fix_output.iterations}"
+    if record.outcome != "fixed":
+        return f"outcome={record.outcome}"
+    if record.iterations >= 2:
+        return f"high_iterations={record.iterations}"
     return None

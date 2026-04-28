@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F05-empty-list",
+  "category": "missing-edge-case",
+  "difficulty": "easy",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "average([]) raises ZeroDivisionError; should return 0.0."
+}

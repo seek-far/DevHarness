@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F03-missing-key",
+  "category": "missing-edge-case",
+  "difficulty": "easy",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "sum_tree raises KeyError on leaf nodes that omit the 'children' key."
+}

@@ -1,22 +1,23 @@
 """
-LangGraphAgent — wraps the existing LangGraph state machine.
+LangGraphAgent — wraps the LangGraph state machine and exposes hook points.
 
-This is one Agent implementation among many. The graph itself, its nodes, and
-the provider abstraction are unchanged; this module just adapts them to the
-Agent interface and writes a journal entry on completion.
+This is one Agent implementation. Per-LangGraphAgent enhancements (memory
+lookup, multi-hypothesis, edge-case test generation, ...) plug in via the
+HookRegistry — no changes to the core graph builder, nodes, or providers.
 
-Future per-agent enhancements (memory lookup, multi-hypothesis, edge-case
-test generation, ...) will register against hooks invoked from inside the
-graph nodes — that hook layer is intentionally not added yet, since adding it
-without a concrete enhancement to motivate the extension points would be
-premature.
+`enhancements` is a list of (hook_name, callback) tuples. They are wired into
+a fresh HookRegistry on each fix() call, then attached to the initial state so
+graph nodes can invoke them at extension points.
 """
 
 from __future__ import annotations
 import logging
-from typing import Any
+import time
+from typing import Any, Iterable
 
 from agents.base import Agent, BugInput, FixOutput, Outcome
+from agents.run_record import RunRecord
+from enhancements.hooks import HookName, HookRegistry
 from graph.builder import build_graph
 from graph.state import BugFixState
 
@@ -26,14 +27,26 @@ logger = logging.getLogger(__name__)
 class LangGraphAgent(Agent):
     name = "langgraph"
 
-    def __init__(self, journal: Any = None):
-        # Compile the graph once per agent instance.
+    def __init__(
+        self,
+        journal: Any = None,
+        enhancements: Iterable[tuple[str, Any]] | None = None,
+        agent_config: dict | None = None,
+    ):
+        # Compile the graph once per agent instance (callable many times via .fix()).
         self._graph = build_graph()
         self._journal = journal
+        self._enhancements = list(enhancements or [])
+        self._agent_config = agent_config or {}
+
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def fix(self, bug_input: BugInput) -> FixOutput:
+        hooks = self._build_hooks()
+
         initial_state: BugFixState = {
             "provider":        bug_input.provider,
+            "hooks":           hooks,
             "bug_id":          bug_input.bug_id,
             "project_id":      bug_input.project_id,
             "project_web_url": bug_input.project_web_url,
@@ -42,19 +55,29 @@ class LangGraphAgent(Agent):
             "fix_retry_count": 0,
         }
 
-        logger.info("agent=%s bug=%s starting", self.name, bug_input.bug_id)
+        # Agent-boundary pre-fix hook (e.g. memory lookup injects prior fix patterns)
+        initial_state = hooks.run(HookName.AGENT_PRE_FIX, initial_state)
 
+        logger.info("agent=%s bug=%s starting (hooks=%s)",
+                    self.name, bug_input.bug_id, hooks)
+
+        t0 = time.monotonic()
         try:
             final_state = self._graph.invoke(initial_state)
         except Exception as exc:
+            elapsed = time.monotonic() - t0
             logger.exception("agent=%s bug=%s crashed", self.name, bug_input.bug_id)
             output = FixOutput(
                 outcome="error",
                 bug_id=bug_input.bug_id,
                 error=str(exc),
             )
-            self._maybe_journal(bug_input, output, None)
+            self._maybe_journal(bug_input, output, None, elapsed)
             return output
+        elapsed = time.monotonic() - t0
+
+        # Agent-boundary post-fix hook (e.g. write outcome to memory store)
+        final_state = hooks.run(HookName.AGENT_POST_FIX, dict(final_state))
 
         outcome: Outcome = "error" if final_state.get("error") else "fixed"
 
@@ -66,20 +89,47 @@ class LangGraphAgent(Agent):
             final_state=_sanitize_state(final_state),
         )
 
-        self._maybe_journal(bug_input, output, final_state)
+        self._maybe_journal(bug_input, output, final_state, elapsed)
         return output
 
-    def _maybe_journal(self, bug_input: BugInput, output: FixOutput, raw_state: dict | None) -> None:
+    # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _build_hooks(self) -> HookRegistry:
+        hooks = HookRegistry()
+        for hook_name, fn in self._enhancements:
+            hooks.register(hook_name, fn)
+        return hooks
+
+    def _maybe_journal(
+        self,
+        bug_input: BugInput,
+        output: FixOutput,
+        raw_state: dict | None,
+        elapsed_s: float,
+    ) -> None:
         if self._journal is None:
             return
         try:
-            self._journal.write(self.name, bug_input, output, raw_state)
+            record = RunRecord.from_outputs(
+                agent_name=self.name,
+                bug_id=bug_input.bug_id,
+                project_id=bug_input.project_id,
+                project_web_url=bug_input.project_web_url,
+                job_id=bug_input.job_id,
+                outcome=output.outcome,
+                error=output.error,
+                iterations=output.iterations,
+                final_state=output.final_state,
+                elapsed_s=round(elapsed_s, 3),
+                agent_config=self._agent_config,
+            )
+            self._journal.write(record, output.final_state)
         except Exception as exc:
             logger.warning("journal write failed (non-fatal): %s", exc)
 
 
 def _sanitize_state(state: dict | None) -> dict | None:
-    """Drop the provider object (not JSON-serializable)."""
+    """Drop non-serializable items (provider object, hook registry)."""
     if state is None:
         return None
-    return {k: v for k, v in state.items() if k != "provider"}
+    return {k: v for k, v in state.items() if k not in ("provider", "hooks")}

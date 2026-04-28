@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F04-case-insensitive",
+  "category": "missing-edge-case",
+  "difficulty": "easy",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "is_palindrome compares case-sensitively; should be case-insensitive."
+}
