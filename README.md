@@ -250,6 +250,20 @@ fetch_trace → parse_trace → fetch_source_file → react_loop
 
 The **ReAct loop** gives the LLM tools (`fetch_additional_file`, `fetch_file_segment`, `submit_fix`, `abort_fix`) and runs up to 8 reasoning steps. The patch is applied and tested in an isolated Python venv before being committed.
 
+### Security & Guardrails
+
+DevHarness runs an autonomous LLM with write authority over your working tree, so a hallucinated path or prompt-injected trace could in principle target a sensitive file. To bound that blast radius, every patch is validated by `bf_worker/services/patch_guard.py` *before* anything is written to disk.
+
+`validate_patch_scope` rejects a fix when:
+
+- The target path resolves outside the repo root (after symlink resolution) — blocks `..` traversal, absolute paths, and symlink escapes.
+- The repo-relative path matches a sensitive deny glob — `.env*`, `*.env`, `.git/**`, `.ssh/**`, `id_rsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `.aws/**`, `.gnupg/**`, `*credentials*`, `*secrets*`.
+- The patch exceeds the per-run caps (default `max_files=5`, `max_lines=50`).
+
+A rejection raises `PatchScopeError`, surfaces as `apply_error` / `test_output: [patch_guard rejected]`, and counts toward `MAX_FIX_RETRIES`. The original source is never mutated and the LLM gets the rejection message back on retry. Unit tests live in `tests/test_patch_guard.py`.
+
+This is **blast-radius defense** — it does not by itself prevent prompt injection via trace or source content. Treat it as a backstop, not the only line of defense.
+
 ---
 
 ## Requirements
@@ -361,7 +375,13 @@ uv run python integration_test.py [--redis-url redis://...] [--bug-id BUG-IT-1]
 
 > Use `uv run python` rather than invoking a venv interpreter directly — `apply_change_and_test` shells out to `python -m venv` to set up an isolated test environment, and that requires `python` (not just `python3`) to be on PATH.
 
-> There are no unit tests — only this end-to-end integration test.
+### Unit Tests
+
+Targeted unit tests live under `tests/`. The patch-scope guardrail is the first thing covered there:
+
+```bash
+uv run pytest tests/
+```
 
 ### Send Pipeline Message
 
@@ -397,6 +417,7 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   ├── services/
 │   │   ├── gitlab_utils.py   # GitLab API and git operations (used by GitLabProvider)
 │   │   ├── apply_patch.py    # Patch application logic
+│   │   ├── patch_guard.py    # Apply-time scope/sensitive-path/cap guardrail
 │   │   ├── parse_trace.py    # Trace parsing (regex-based)
 │   │   └── react_tools.py    # LLM tool definitions (provider-agnostic)
 │   ├── journal.py            # Auto-captures running-mode runs for retrospective curation
@@ -418,6 +439,7 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender
 │   └── pipeline_msg.txt      # Sample pipeline payload
+├── tests/                    # Unit tests (currently: patch_guard)
 ├── docker-compose.yml        # Docker Compose mode services
 ├── Dockerfile.gateway
 ├── Dockerfile.orchestrator

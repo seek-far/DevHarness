@@ -15,6 +15,7 @@ from pathlib import Path
 
 from graph.state import BugFixState
 from services.apply_patch import apply_change_infos
+from services.patch_guard import PatchScopeError, validate_patch_scope
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,19 @@ def apply_change_and_test(state: BugFixState) -> BugFixState:
 
     # ── 1. Apply patch ───────────────────────────────────────────────���────────
     try:
+        validate_patch_scope(repo_path, fixes_by_file)
         for rel_path, fixes in fixes_by_file.items():
             src_filepath = str(repo_path / rel_path)
             apply_change_infos(src_filepath=src_filepath, change_infos=fixes)
             logger.info("patch applied to %s (%d edits)", src_filepath, len(fixes))
+    except PatchScopeError as exc:
+        logger.warning("patch_guard rejected fix: %s", exc)
+        return {
+            "apply_error": f"patch rejected by guardrail: {exc}",
+            "test_passed": False,
+            "test_output": f"[patch_guard rejected]\n{exc}",
+            "fix_retry_count": state.get("fix_retry_count", 0) + 1,
+        }
     except Exception as exc:
         logger.warning("apply_patch failed: %s", exc)
         return {
