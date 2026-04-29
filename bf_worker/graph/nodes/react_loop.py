@@ -21,8 +21,10 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
+import openai
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 
@@ -37,12 +39,52 @@ logger = logging.getLogger(__name__)
 
 MAX_STEPS = 8   # max LLM calls per react_loop invocation
 
+# Retry delays (seconds) before each retry of a transient LLM call.
+# Length determines max retries; (1, 2) → up to 2 retries on top of 1 attempt.
+_LLM_RETRY_DELAYS = (1, 2)
+
 llm = ChatOpenAI(
     api_key=cfg.llm_api_key,
     base_url=cfg.llm_api_base_url,
     model=cfg.llm_model,
     temperature=0,
 ).bind_tools(TOOLS_SCHEMA)
+
+
+def _is_transient_bad_request(exc: openai.BadRequestError) -> bool:
+    # Dashscope occasionally rejects the model's own malformed tool-call args
+    # with a 400 ("function.arguments must be in JSON format"). Same prompt
+    # usually succeeds on resample. Match on substrings so minor wording
+    # changes don't break the filter.
+    msg = str(exc)
+    return "function.arguments" in msg or "must be in JSON format" in msg
+
+
+def _invoke_llm_with_retry(messages: list):
+    """Invoke the LLM, retrying on narrow transient failures.
+
+    Retries: APIConnectionError, RateLimitError, and BadRequestError that
+    matches the malformed-tool-args pattern. Anything else (auth, model
+    typo, oversized payload) propagates immediately.
+    """
+    attempts = 1 + len(_LLM_RETRY_DELAYS)
+    for i in range(attempts):
+        try:
+            return llm.invoke(messages)
+        except (openai.APIConnectionError, openai.RateLimitError) as exc:
+            transient = exc
+        except openai.BadRequestError as exc:
+            if not _is_transient_bad_request(exc):
+                raise
+            transient = exc
+        if i == attempts - 1:
+            raise transient
+        delay = _LLM_RETRY_DELAYS[i]
+        logger.warning(
+            "react_loop: transient LLM error (%s); retry %d/%d in %ds: %s",
+            type(transient).__name__, i + 1, len(_LLM_RETRY_DELAYS), delay, transient,
+        )
+        time.sleep(delay)
 
 _SYSTEM = """\
 You are a Python bug fix agent. Your goal is to find the ROOT CAUSE of a CI \
@@ -111,7 +153,7 @@ def react_loop(state: BugFixState) -> BugFixState:
 
         # ── call LLM ──────────────────────────────────────────────────────────
         logger.info("react_loop: step %d — calling LLM", step_count + 1)
-        assistant_msg = llm.invoke(messages)
+        assistant_msg = _invoke_llm_with_retry(messages)
         step_count += 1
 
         # Append the full assistant message (including tool_calls field)
