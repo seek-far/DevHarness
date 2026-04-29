@@ -37,16 +37,46 @@ _RUNS_ROOT = _HERE / "runs"
 
 # ── Agent factory ────────────────────────────────────────────────────────────
 
+def _build_enhancements(specs: list[dict]) -> list[tuple]:
+    """Translate `enhancements` config entries into (hook_name, callback) tuples.
+
+    A spec entry looks like: {"kind": "memory", "store_path": "...", "top_k": 2}.
+    The factory dispatches on `kind`; add a branch here when introducing a new
+    enhancement.
+    """
+    out: list[tuple] = []
+    for spec in specs:
+        kind = spec.get("kind")
+        if kind == "memory":
+            from enhancements.memory import build_memory_callbacks
+            out.extend(build_memory_callbacks(
+                store_path=spec.get("store_path", "evaluation/memory/store.json"),
+                top_k=int(spec.get("top_k", 2)),
+                write_back=bool(spec.get("write_back", True)),
+            ))
+        else:
+            raise ValueError(f"unknown enhancement kind: {kind!r}")
+    return out
+
+
 def make_agent(agent_spec: dict) -> Agent:
     """Build an Agent instance from a config dict.
 
-    agent_spec = {"name": "...", "agent": "langgraph", "kwargs": {...}}
+    agent_spec = {
+        "name": "...",
+        "agent": "langgraph",
+        "kwargs": {...},
+        "enhancements": [{"kind": "memory", ...}, ...]   # optional
+    }
 
     Add new agents here as adapters are written (Aider, SWE-agent, ...).
     """
     kind = agent_spec.get("agent", "langgraph")
-    kwargs = agent_spec.get("kwargs", {})
+    kwargs = dict(agent_spec.get("kwargs", {}))
     if kind == "langgraph":
+        enh_specs = agent_spec.get("enhancements", [])
+        if enh_specs:
+            kwargs.setdefault("enhancements", _build_enhancements(enh_specs))
         # Eval runs do NOT write to the running-mode journal — eval has its own
         # output directory (evaluation/runs/), so journal stays None.
         return LangGraphAgent(agent_config=agent_spec, **kwargs)

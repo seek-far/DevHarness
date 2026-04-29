@@ -33,3 +33,12 @@ python -m evaluation.cli report <run_id>
 | File | Purpose |
 |---|---|
 | `baseline.json` | LangGraphAgent with no enhancements — the reference point |
+| `memory_vs_baseline.json` | Baseline + memory-enhanced agent in one sweep, for direct comparison |
+
+## Enhancements
+
+A spec may include an `enhancements` array; each entry is `{"kind": "...", ...}` and is dispatched by `evaluation/runner.py:_build_enhancements`. Currently supported kinds:
+
+| Kind | Params | Effect |
+|---|---|---|
+| `memory` | `store_path`, `top_k`, `write_back` | Token-overlap lookup against `evaluation/memory/store.json` at `PRE_REACT_LOOP`; injects up to `top_k` matches as `state["memory_hint"]`. Writer (when `write_back: true`) appends the run's outcome at `AGENT_POST_FIX`. |

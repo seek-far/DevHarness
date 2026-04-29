@@ -160,7 +160,11 @@ def memory_lookup(state):
 agent = LangGraphAgent(enhancements=[(HookName.AGENT_PRE_FIX, memory_lookup)])
 ```
 
-Currently wired hook points: `agent.pre_fix`, `agent.post_fix` (called from `LangGraphAgent.fix()`). Graph-internal points (`graph.pre_react_loop`, `graph.post_react_loop`, `graph.pre_apply_test`, `graph.post_apply_test`) are *named* but their call sites in the graph nodes are added when the first enhancement that needs them lands — adding hook calls without a concrete consumer would be premature.
+Currently wired hook points: `agent.pre_fix`, `agent.post_fix` (called from `LangGraphAgent.fix()`), and `graph.pre_react_loop` (called from `graph/nodes/react_loop.py` — used by the memory enhancement to inject a `memory_hint` into the initial prompt). Other graph-internal points (`graph.post_react_loop`, `graph.pre_apply_test`, `graph.post_apply_test`) are *named* but their call sites in the graph nodes are added when the first enhancement that needs them lands — adding hook calls without a concrete consumer would be premature.
+
+#### Bundled enhancement: memory lookup
+
+`bf_worker/enhancements/memory.py` is a token-overlap memory of past fixes. It registers a `PRE_REACT_LOOP` callback (queries `evaluation/memory/store.json` using `error_info` + `suspect_file_path` and injects up to `top_k` matches as `state["memory_hint"]`, which the ReAct prompt appends as a "Prior similar fixes (reference only)" section) and an `AGENT_POST_FIX` callback (appends each run's outcome to the store). The store is pre-seeded with 10 category-keyed lessons so the first sweep has something to retrieve. Compare baseline vs memory with `configs/memory_vs_baseline.json`.
 
 ### RunRecord (canonical telemetry schema)
 
@@ -187,10 +191,11 @@ The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs 
 
 #### Configs
 
-Agent specs live as JSON lists under `configs/`. The `baseline.json` config (no enhancements) is the reference point against which future enhancements are measured. To compare approaches, write a config listing both, run, and compare:
+Agent specs live as JSON lists under `configs/`. The `baseline.json` config (no enhancements) is the reference point against which future enhancements are measured. To compare approaches, write a config listing both, run, and compare — `configs/memory_vs_baseline.json` is a worked example:
 
 ```bash
-python -m evaluation.cli run --config configs/baseline.json
+python -m evaluation.cli run --config configs/baseline.json            # baseline only
+python -m evaluation.cli run --config configs/memory_vs_baseline.json  # baseline + memory side by side
 python -m evaluation.cli report run_<timestamp>
 ```
 
@@ -401,12 +406,14 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   ├── fixtures/             # Curated benchmark (10 single-file Python bugs by default)
 │   ├── journal/              # Auto-captured runs from running mode (gitignored)
 │   ├── runs/                 # Sweep outputs (gitignored)
+│   ├── memory/               # Memory-enhancement store (pre-seeded JSON, append-mostly)
 │   ├── fixture.py            # Fixture loader / discovery
 │   ├── runner.py             # run_sweep(agent_specs, fixtures)
 │   ├── metrics.py            # Aggregate run records into comparison tables
 │   └── cli.py                # `bench` CLI: list / run / report / promote
 ├── configs/                  # Agent specs for evaluation sweeps
-│   └── baseline.json         #   No-enhancements reference point
+│   ├── baseline.json         #   No-enhancements reference point
+│   └── memory_vs_baseline.json  # Baseline + memory enhancement, side by side
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender

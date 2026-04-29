@@ -112,6 +112,17 @@ TOOLS_SCHEMA = [
                         "items": {
                             "type": "object",
                             "properties": {
+                                "file_path": {
+                                    "type": "string",
+                                    "description": (
+                                        "Repo-relative path of the file to edit. "
+                                        "Required when the fix is in a different "
+                                        "file from the suspect file (e.g. the test "
+                                        "is the suspect but the bug is in an "
+                                        "imported module). If omitted, the suspect "
+                                        "file is used."
+                                    ),
+                                },
                                 "line_number": {
                                     "type": "integer",
                                     "description": "1-based line number in the file.",

@@ -1,0 +1,22 @@
+[
+  {
+    "name": "baseline",
+    "agent": "langgraph",
+    "kwargs": {},
+    "notes": "Reference: LangGraphAgent with no enhancements."
+  },
+  {
+    "name": "memory",
+    "agent": "langgraph",
+    "kwargs": {},
+    "enhancements": [
+      {
+        "kind": "memory",
+        "store_path": "evaluation/memory/store.json",
+        "top_k": 2,
+        "write_back": false
+      }
+    ],
+    "notes": "LangGraphAgent + memory enhancement. PRE_REACT_LOOP injects up to 2 token-overlapped prior fixes. write_back is off for evaluation reproducibility; flip to true for running mode to grow the store over time."
+  }
+]

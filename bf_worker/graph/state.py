@@ -36,6 +36,10 @@ class BugFixState(TypedDict, total=False):
     react_confidence: str | None    # "high" | "medium" | "low"
     react_reasoning: str | None     # LLM's stated reasoning from submit_fix
 
+    # ── enhancements (optional) ───────────────────────────────────────────────
+    memory_hint: str | None         # injected by memory enhancement (PRE_REACT_LOOP)
+    memory_matches_count: int | None  # number of memory entries surfaced
+
     # ── branch / apply ────────────────────────────────────────────────────────
     fix_branch_name: str | None
     apply_error: str | None         # non-None when apply_patch itself crashed

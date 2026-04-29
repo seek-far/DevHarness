@@ -30,12 +30,21 @@ def apply_change_and_test(state: BugFixState) -> BugFixState:
     llm_result = state["llm_result"]
     change_infos = llm_result["fixes"]
     suspect_file = state["suspect_file_path"]
-    src_filepath = str(repo_path / suspect_file)
+
+    # Group fixes by target file. A fix entry's `file_path` (if present) wins;
+    # otherwise the suspect file is used. This lets the LLM fix an imported
+    # module when the suspect happens to be a test file.
+    fixes_by_file: dict[str, list[dict]] = {}
+    for f in change_infos:
+        target = f.get("file_path") or suspect_file
+        fixes_by_file.setdefault(target, []).append(f)
 
     # ── 1. Apply patch ───────────────────────────────────────────────���────────
     try:
-        apply_change_infos(src_filepath=src_filepath, change_infos=change_infos)
-        logger.info("patch applied to %s", src_filepath)
+        for rel_path, fixes in fixes_by_file.items():
+            src_filepath = str(repo_path / rel_path)
+            apply_change_infos(src_filepath=src_filepath, change_infos=fixes)
+            logger.info("patch applied to %s (%d edits)", src_filepath, len(fixes))
     except Exception as exc:
         logger.warning("apply_patch failed: %s", exc)
         return {

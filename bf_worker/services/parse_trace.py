@@ -11,7 +11,11 @@ def parse_trace(trace_text: str):
     
     error_i = -1
     for (trace_i, trace_line) in enumerate(trace_lines):
+        # Standard exception line:  "E   ZeroDivisionError: ..."
         match_res = re.match(r"E\s+([\w\.]+Error: .+)", trace_line)
+        # pytest assertion failure:  "E   assert <expr>" — no exception class shown
+        if match_res is None:
+            match_res = re.match(r"E\s+(assert .+)", trace_line)
         if match_res is not None:
             error_i = trace_i
             break

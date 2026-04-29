@@ -29,6 +29,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 sys.path.append(str(Path(__file__).resolve().parents[3]))
 from settings import worker_cfg as cfg
 
+from enhancements.hooks import HookName
 from graph.state import BugFixState
 from services.react_tools import TOOLS_SCHEMA, execute_tool
 
@@ -59,24 +60,31 @@ fetch_additional_file or fetch_file_segment.
 Rules:
 - Do NOT guess. Understand the root cause before submitting a fix.
 - Each entry in fixes must match a verbatim line from the file.
-- Prefer the smallest change that resolves the root cause.\
+- Prefer the smallest change that resolves the root cause.
+- If the suspect file is a test file but the bug is in an imported module, \
+fetch that module and set file_path on each fix to the module's path. \
+Do not modify the test file itself unless the test is genuinely wrong.\
 """
 
 
 # ── prompt builders ───────────────────────────────────────────────────────────
 
 def _build_initial_messages(state: BugFixState) -> list:
-    user_content = (
-        "## CI failure info\n"
-        f"{state['error_info']}\n\n"
-        f"## Suspect file: {state['suspect_file_path']}\n"
-        "```python\n"
-        f"{state['source_file_content']}\n"
-        "```"
-    )
+    parts = [
+        "## CI failure info",
+        state["error_info"],
+        "",
+        f"## Suspect file: {state['suspect_file_path']}",
+        "```python",
+        state["source_file_content"],
+        "```",
+    ]
+    hint = state.get("memory_hint")
+    if hint:
+        parts.extend(["", hint])
     return [
         SystemMessage(content=_SYSTEM),
-        HumanMessage(content=user_content),
+        HumanMessage(content="\n".join(parts)),
     ]
 
 
@@ -84,6 +92,13 @@ def _build_initial_messages(state: BugFixState) -> list:
 
 def react_loop(state: BugFixState) -> BugFixState:
     logger.info("react_loop: start  bug_id=%s", state.get("bug_id"))
+
+    hooks = state.get("hooks")
+    if hooks is not None:
+        update = hooks.run(HookName.PRE_REACT_LOOP, state)
+        if update is not state:
+            # `run` returns a merged copy when callbacks supplied updates.
+            state = update
 
     messages      = _build_initial_messages(state)
     step_count    = 0
@@ -185,6 +200,10 @@ def react_loop(state: BugFixState) -> BugFixState:
         "react_tool_calls": tool_call_log,
         "react_confidence": confidence,
         "react_reasoning":  reasoning,
+        # Surface memory-related fields for journaling/telemetry (no-op when
+        # the memory enhancement is not registered).
+        "memory_hint":         state.get("memory_hint"),
+        "memory_matches_count": state.get("memory_matches_count"),
         # Clear any stale retry state from a previous cycle
         "test_passed":      None,
         "test_output":      None,
