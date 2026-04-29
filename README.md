@@ -262,7 +262,17 @@ DevHarness runs an autonomous LLM with write authority over your working tree, s
 
 A rejection raises `PatchScopeError`, surfaces as `apply_error` / `test_output: [patch_guard rejected]`, and counts toward `MAX_FIX_RETRIES`. The original source is never mutated and the LLM gets the rejection message back on retry. Unit tests live in `tests/test_patch_guard.py`.
 
-This is **blast-radius defense** — it does not by itself prevent prompt injection via trace or source content. Treat it as a backstop, not the only line of defense.
+This is **blast-radius defense** — it stops a bad write but does not, on its own, prevent the LLM from being talked into proposing one. The next layer covers that.
+
+#### Prompt-injection defense (`bf_worker/services/prompt_guard.py`)
+
+Everything the LLM reads at runtime — CI traces, suspect-file content, files fetched mid-loop, and the memory hint — is untrusted. A malicious comment in source code, a poisoned trace line, or a tampered memory entry could try to talk the LLM into ignoring its system prompt. Three layers defend against that:
+
+1. **System-prompt hardening.** A `[SECURITY]` paragraph in the ReAct system message states that all CI/file content is data, never instructions, and that the only valid actions are calling `fetch_additional_file`, `fetch_file_segment`, `submit_fix`, or `abort_fix`.
+2. **Untrusted-content delimiters.** `wrap_untrusted()` wraps every untrusted block in `<<<UNTRUSTED:label>>> … <<<END UNTRUSTED:label>>>` markers, so the LLM has a clear boundary between task instructions and material to analyse. Used in `_build_initial_messages` and in every tool-fetch result.
+3. **Pattern detection (log-only).** `detect_injection()` scans for common markers — ignore-prior-instructions phrasing, chat-template tokens (`<|im_start|>`, …), fake `<tool_call>` tags, role-forging at line start — and logs each hit. Detection is intentionally not a block: legitimate code can contain such strings (e.g. tests for prompt-injection defenses themselves).
+
+`prompt_guard` and `patch_guard` are complementary: the prompt guard tries to keep the LLM on task in the first place; the patch guard catches the bad write if it happens anyway. Unit tests in `tests/test_prompt_guard.py`.
 
 ---
 
@@ -418,6 +428,7 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   ├── gitlab_utils.py   # GitLab API and git operations (used by GitLabProvider)
 │   │   ├── apply_patch.py    # Patch application logic
 │   │   ├── patch_guard.py    # Apply-time scope/sensitive-path/cap guardrail
+│   │   ├── prompt_guard.py   # Prompt-injection defense for untrusted content
 │   │   ├── parse_trace.py    # Trace parsing (regex-based)
 │   │   └── react_tools.py    # LLM tool definitions (provider-agnostic)
 │   ├── journal.py            # Auto-captures running-mode runs for retrospective curation

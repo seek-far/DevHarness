@@ -11,6 +11,8 @@ Public API:
 from __future__ import annotations
 import logging
 
+from services.prompt_guard import sanitize_untrusted
+
 logger = logging.getLogger(__name__)
 
 # Maximum characters returned for a single file fetch.
@@ -210,7 +212,9 @@ def _fetch_full_file(provider, path: str) -> str:
 
     logger.info("fetch_additional_file: %s (%d chars%s)", path, len(content),
                 ", truncated" if truncated else "")
-    return f"# File: {path}\n```python\n{content}\n```{truncated}"
+    body = f"# File: {path}\n```python\n{content}\n```{truncated}"
+    wrapped, _ = sanitize_untrusted(body, f"fetched:{path}")
+    return wrapped
 
 
 def _fetch_segment(provider, path: str, start: int, end: int) -> str:
@@ -228,7 +232,9 @@ def _fetch_segment(provider, path: str, start: int, end: int) -> str:
 
     segment = "\n".join(lines[start0 : end0 + 1])
     logger.info("fetch_file_segment: %s lines %d-%d", path, start, end)
-    return (
+    body = (
         f"# File: {path}  (lines {start}–{end} of {total})\n"
         f"```python\n{segment}\n```"
     )
+    wrapped, _ = sanitize_untrusted(body, f"fetched:{path}:{start}-{end}")
+    return wrapped
