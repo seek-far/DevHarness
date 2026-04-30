@@ -13,6 +13,9 @@ class BugFixState(TypedDict, total=False):
     # ── hook registry (LangGraphAgent-only; absent for other agents) ──────────
     hooks: Any     # enhancements.hooks.HookRegistry — present only when enhancements are wired
 
+    # ── per-run cost budget (services.budget.RunBudget) ───────────────────────
+    budget: Any    # checked before each LLM call; debited from usage_metadata
+
     # ── inputs ────────────────────────────────────────────────────────────────
     bug_id: str
     project_id: str

@@ -274,6 +274,29 @@ Everything the LLM reads at runtime — CI traces, suspect-file content, files f
 
 `prompt_guard` and `patch_guard` are complementary: the prompt guard tries to keep the LLM on task in the first place; the patch guard catches the bad write if it happens anyway. Unit tests in `tests/test_prompt_guard.py`.
 
+#### Fetch-path containment (`bf_worker/services/fetch_guard.py`)
+
+The mirror of `patch_guard` for the *read* path. The LLM's `fetch_additional_file` and `fetch_file_segment` tools accept a path argument; without validation, a hijacked LLM could ask for `/etc/passwd`, `.env`, or a path that traverses out of the repo, and the provider would happily return its content. The LLM could then leak that content via `error_reason` or stash it inside a patch.
+
+`validate_fetch_path` runs before the provider is touched and rejects:
+
+- empty paths, absolute paths, and any path containing a `..` segment,
+- repo-relative paths that match the same sensitive denylist `patch_guard` uses (`.env*`, `.git/**`, `.ssh/**`, `*.pem`, `*.key`, `*credentials*`, `*secrets*`, …) — re-exported from `patch_guard.DENY_GLOBS` so the read and write surfaces share one source of truth.
+
+On rejection, the tool returns `[fetch rejected: <reason>]` to the LLM, which sees the error on the next loop turn and can revise. Tests in `tests/test_fetch_guard.py`.
+
+#### Run budget (`bf_worker/services/budget.py`)
+
+A per-`agent.fix()` hard cap on three dimensions, so a hijacked or pathological run cannot rack up unbounded cost:
+
+| Dimension | Default | Why |
+|---|---|---|
+| LLM calls | 30 | One honest fix uses 2–8; 30 covers retries with headroom. |
+| Total tokens | 200 000 | One honest fix uses 5–20k; 200k catches runaway loops. |
+| Wall-clock seconds | 300 | One honest fix is well under a minute; 5 min is the abort line. |
+
+`RunBudget` is instantiated in `LangGraphAgent.fix()` and threaded into `state["budget"]`. `react_loop` calls `budget.check()` before every LLM call (skips and ends the loop with `llm_result=None` if exhausted) and `budget.record_call(input_tokens, output_tokens)` after, using LangChain's `usage_metadata`. The exhaustion reason is logged and surfaced in the run record. Tests in `tests/test_budget.py`.
+
 ---
 
 ## Requirements
@@ -429,6 +452,8 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   ├── apply_patch.py    # Patch application logic
 │   │   ├── patch_guard.py    # Apply-time scope/sensitive-path/cap guardrail
 │   │   ├── prompt_guard.py   # Prompt-injection defense for untrusted content
+│   │   ├── fetch_guard.py    # Read-path containment for fetch_additional_file
+│   │   ├── budget.py         # Per-run cap on LLM calls / tokens / wall-clock
 │   │   ├── parse_trace.py    # Trace parsing (regex-based)
 │   │   └── react_tools.py    # LLM tool definitions (provider-agnostic)
 │   ├── journal.py            # Auto-captures running-mode runs for retrospective curation

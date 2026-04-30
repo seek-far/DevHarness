@@ -11,6 +11,7 @@ Public API:
 from __future__ import annotations
 import logging
 
+from services.fetch_guard import FetchScopeError, validate_fetch_path
 from services.prompt_guard import sanitize_untrusted
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,12 @@ def execute_tool(tool_name: str, tool_input: dict, provider) -> str:
 
 def _fetch_full_file(provider, path: str) -> str:
     try:
+        validate_fetch_path(path)
+    except FetchScopeError as exc:
+        logger.warning("fetch_guard rejected fetch_additional_file: %s", exc)
+        return f"[fetch rejected: {exc}]"
+
+    try:
         content = provider.fetch_file(path)
     except Exception as exc:
         logger.warning("fetch_additional_file failed for '%s': %s", path, exc)
@@ -218,6 +225,12 @@ def _fetch_full_file(provider, path: str) -> str:
 
 
 def _fetch_segment(provider, path: str, start: int, end: int) -> str:
+    try:
+        validate_fetch_path(path)
+    except FetchScopeError as exc:
+        logger.warning("fetch_guard rejected fetch_file_segment: %s", exc)
+        return f"[fetch rejected: {exc}]"
+
     try:
         content = provider.fetch_file(path)
     except Exception as exc:

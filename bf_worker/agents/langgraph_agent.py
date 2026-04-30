@@ -20,6 +20,7 @@ from agents.run_record import RunRecord
 from enhancements.hooks import HookName, HookRegistry
 from graph.builder import build_graph
 from graph.state import BugFixState
+from services.budget import RunBudget
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class LangGraphAgent(Agent):
         initial_state: BugFixState = {
             "provider":        bug_input.provider,
             "hooks":           hooks,
+            "budget":          RunBudget(),
             "bug_id":          bug_input.bug_id,
             "project_id":      bug_input.project_id,
             "project_web_url": bug_input.project_web_url,
@@ -129,7 +131,12 @@ class LangGraphAgent(Agent):
 
 
 def _sanitize_state(state: dict | None) -> dict | None:
-    """Drop non-serializable items (provider object, hook registry)."""
+    """Drop non-serializable items (provider object, hook registry); convert
+    the RunBudget into a serialisable snapshot for the journal."""
     if state is None:
         return None
-    return {k: v for k, v in state.items() if k not in ("provider", "hooks")}
+    out = {k: v for k, v in state.items() if k not in ("provider", "hooks")}
+    budget = out.get("budget")
+    if budget is not None and hasattr(budget, "to_dict"):
+        out["budget"] = budget.to_dict()
+    return out

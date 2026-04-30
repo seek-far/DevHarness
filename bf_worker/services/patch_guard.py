@@ -25,7 +25,7 @@ class PatchScopeError(Exception):
 
 # Sensitive path patterns. Matched against the repo-relative POSIX path.
 # Globs use fnmatch semantics; "**" is treated as "any path segments".
-_DENY_GLOBS: tuple[str, ...] = (
+DENY_GLOBS: tuple[str, ...] = (
     ".env",
     ".env.*",
     "*.env",
@@ -54,20 +54,20 @@ _DENY_GLOBS: tuple[str, ...] = (
 )
 
 
-def _matches_deny(rel_posix: str) -> str | None:
+def matches_deny(rel_posix: str) -> str | None:
     """Return the matching glob if `rel_posix` is denied, else None."""
     # Check the full path and every parent segment, so e.g. ".git/config"
     # is rejected via the ".git/*" rule and ".git" via the ".git" rule.
     parts = rel_posix.split("/")
     for i in range(len(parts)):
         candidate = "/".join(parts[: i + 1])
-        for glob in _DENY_GLOBS:
+        for glob in DENY_GLOBS:
             if fnmatch.fnmatchcase(candidate, glob):
                 return glob
     # Also match the basename as a convenience (e.g. "deep/nested/secrets.yml"
     # against "*secrets*").
     basename = parts[-1]
-    for glob in _DENY_GLOBS:
+    for glob in DENY_GLOBS:
         if "/" not in glob and fnmatch.fnmatchcase(basename, glob):
             return glob
     return None
@@ -121,7 +121,7 @@ def validate_patch_scope(
             )
 
         rel_posix = target.relative_to(repo_root).as_posix()
-        denied_by = _matches_deny(rel_posix)
+        denied_by = matches_deny(rel_posix)
         if denied_by is not None:
             raise PatchScopeError(
                 f"file_path matches sensitive deny glob '{denied_by}': {rel_posix}"

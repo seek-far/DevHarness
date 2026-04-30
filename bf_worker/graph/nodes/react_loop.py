@@ -33,6 +33,7 @@ from settings import worker_cfg as cfg
 
 from enhancements.hooks import HookName
 from graph.state import BugFixState
+from services.budget import extract_token_usage
 from services.prompt_guard import sanitize_untrusted
 from services.react_tools import TOOLS_SCHEMA, execute_tool
 
@@ -165,13 +166,26 @@ def react_loop(state: BugFixState) -> BugFixState:
     confidence    = None
     reasoning     = None
     tool_call_log: list[dict] = []
+    budget        = state.get("budget")
 
     while step_count < MAX_STEPS:
+
+        # ── budget check (per-run cap across all react_loop invocations) ──────
+        if budget is not None:
+            reason = budget.check()
+            if reason is not None:
+                logger.warning("react_loop: budget exhausted before step %d: %s",
+                               step_count + 1, reason)
+                break
 
         # ── call LLM ──────────────────────────────────────────────────────────
         logger.info("react_loop: step %d — calling LLM", step_count + 1)
         assistant_msg = _invoke_llm_with_retry(messages)
         step_count += 1
+
+        if budget is not None:
+            in_tok, out_tok = extract_token_usage(assistant_msg)
+            budget.record_call(in_tok, out_tok)
 
         # Append the full assistant message (including tool_calls field)
         # so the next LLM call has a valid conversation history.

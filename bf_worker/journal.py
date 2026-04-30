@@ -59,6 +59,11 @@ class JournalWriter:
                     json.dumps(state["llm_result"], indent=2, default=str),
                     encoding="utf-8",
                 )
+            if state.get("budget") is not None:
+                (run_dir / "budget.json").write_text(
+                    json.dumps(state["budget"], indent=2, default=str),
+                    encoding="utf-8",
+                )
 
             flag = _flag_reason(record)
             if flag:
