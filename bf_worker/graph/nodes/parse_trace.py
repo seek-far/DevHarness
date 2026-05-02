@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def parse_trace(state: BugFixState) -> BugFixState:
+    print(state["trace"])
     result = _parse_trace(state["trace"])
 
     if result["error_message"] is None or not result["suspect_files"]:
