@@ -54,7 +54,7 @@ from agents.base import BugInput
 from agents.langgraph_agent import LangGraphAgent
 from journal import JournalWriter
 from providers.local_provider import LocalGitProvider, LocalNoGitProvider
-from evaluation.runner import _build_enhancements
+from enhancements import build_enhancements
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ def main() -> None:
         if kind == "langgraph":
             enh_specs = agent_spec.get("enhancements", [])
             if enh_specs:
-                kwargs.setdefault("enhancements", _build_enhancements(enh_specs))
+                kwargs.setdefault("enhancements", build_enhancements(enh_specs))
             agent = LangGraphAgent(journal=JournalWriter(), agent_config=agent_spec, **kwargs)
         else:            
             raise ValueError(f"unknown agent kind: {kind!r}")    

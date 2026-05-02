@@ -12,5 +12,6 @@ is the unit of comparison; enhancements are an implementation detail.
 """
 
 from enhancements.hooks import HookRegistry, HookName
+from enhancements.build_enhancements import build_enhancements
 
-__all__ = ["HookRegistry", "HookName"]
+__all__ = ["HookRegistry", "HookName", "build_enhancements"]
