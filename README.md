@@ -70,6 +70,12 @@ python -m bf_worker.standalone \
   --source-dir /path/to/project \
   --trace-file error.log \
   --no-git --review --output-dir ./results
+
+# With an agent config (e.g. enable the memory enhancement):
+python -m bf_worker.standalone \
+  --source-dir /path/to/project \
+  --test-cmd "pytest" \
+  --no-git --config configs/memory.json
 ```
 
 **Standalone CLI options:**
@@ -83,6 +89,7 @@ python -m bf_worker.standalone \
 | `--no-git` | auto-detect | Force no-git mode |
 | `--output-dir` | fresh temp dir | Where to write patch file and report (default: `{tmp}/sdlcma_out/{bug_id}_XXXX/`) |
 | `--review` | off | Interactive review before applying (no-git mode) |
+| `--config` | | Path to an agent-spec JSON (same shape as `configs/*.json`). When given, the standalone runner uses the first spec in the file and instantiates any `enhancements` declared on it (e.g. `configs/memory.json`). When omitted, runs a plain `LangGraphAgent` with no enhancements. |
 
 ### GitLab Mode
 
@@ -165,6 +172,8 @@ Currently wired hook points: `agent.pre_fix`, `agent.post_fix` (called from `Lan
 #### Bundled enhancement: memory lookup
 
 `bf_worker/enhancements/memory.py` is a token-overlap memory of past fixes. It registers a `PRE_REACT_LOOP` callback (queries `evaluation/memory/store.json` using `error_info` + `suspect_file_path` and injects up to `top_k` matches as `state["memory_hint"]`, which the ReAct prompt appends as a "Prior similar fixes (reference only)" section) and an `AGENT_POST_FIX` callback (appends each run's outcome to the store). The store is pre-seeded with 10 category-keyed lessons so the first sweep has something to retrieve. Compare baseline vs memory with `configs/memory_vs_baseline.json`.
+
+Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) into `(hook_name, callback)` tuples by `bf_worker/enhancements/build_enhancements.py:build_enhancements`. The same factory is used by both the evaluation runner (`evaluation/runner.py:make_agent`) and the standalone CLI (`bf_worker/standalone.py` when `--config` is given), so the same agent spec file works in either mode — e.g. `configs/memory.json` enables the memory enhancement on a single standalone run via `--config configs/memory.json`.
 
 ### RunRecord (canonical telemetry schema)
 
@@ -437,7 +446,9 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   ├── run_record.py     #   Canonical RunRecord schema
 │   │   └── langgraph_agent.py  # default agent: wraps the LangGraph state machine + hooks
 │   ├── enhancements/         # LangGraphAgent-only extension layer
-│   │   └── hooks.py          #   HookRegistry, HookName (named extension points)
+│   │   ├── hooks.py          #   HookRegistry, HookName (named extension points)
+│   │   ├── build_enhancements.py  # Spec-dispatch factory: {kind:...} → (hook, callback) tuples
+│   │   └── memory.py         #   Bundled memory-lookup enhancement (PRE_REACT_LOOP + AGENT_POST_FIX)
 │   ├── providers/
 │   │   ├── base.py           # Provider ABCs (SourceProvider, VCSProvider, ReviewProvider)
 │   │   ├── gitlab_provider.py  # GitLab implementation
@@ -468,9 +479,10 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   ├── runner.py             # run_sweep(agent_specs, fixtures)
 │   ├── metrics.py            # Aggregate run records into comparison tables
 │   └── cli.py                # `bench` CLI: list / run / report / promote
-├── configs/                  # Agent specs for evaluation sweeps
+├── configs/                  # Agent specs (consumed by evaluation sweeps and `standalone --config`)
 │   ├── baseline.json         #   No-enhancements reference point
-│   └── memory_vs_baseline.json  # Baseline + memory enhancement, side by side
+│   ├── memory.json           #   Memory-only single spec — pass to `bf_worker.standalone --config`
+│   └── memory_vs_baseline.json  # Baseline + memory enhancement, side by side (eval sweep)
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender

@@ -33,11 +33,12 @@ python -m evaluation.cli report <run_id>
 | File | Purpose |
 |---|---|
 | `baseline.json` | LangGraphAgent with no enhancements — the reference point |
+| `memory.json` | LangGraphAgent + memory enhancement only (single spec; usable in both running mode via `bf_worker.standalone --config` and evaluation mode) |
 | `memory_vs_baseline.json` | Baseline + memory-enhanced agent in one sweep, for direct comparison |
 
 ## Enhancements
 
-A spec may include an `enhancements` array; each entry is `{"kind": "...", ...}` and is dispatched by `evaluation/runner.py:_build_enhancements`. Currently supported kinds:
+A spec may include an `enhancements` array; each entry is `{"kind": "...", ...}` and is dispatched by `bf_worker/enhancements/build_enhancements.py:build_enhancements` (re-exported from `bf_worker.enhancements`). The same factory is consumed by both `evaluation/runner.py:make_agent` (evaluation sweeps) and `bf_worker/standalone.py` (running-mode `--config`). Currently supported kinds:
 
 | Kind | Params | Effect |
 |---|---|---|
