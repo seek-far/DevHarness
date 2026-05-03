@@ -363,7 +363,7 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 
 ## Running (GitLab Mode Details)
 
-DevHarness supports two GitLab deployment modes, controlled by `settings/.env`:
+In GitLab mode, DevHarness can be deployed in two ways, controlled by `settings/.env`:
 
 ### Mode 1: Local Multi-Process (`ENV=local_multi_process`)
 
