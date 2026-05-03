@@ -123,6 +123,62 @@ Do not modify the test file itself unless the test is genuinely wrong.\
 
 # ── prompt builders ───────────────────────────────────────────────────────────
 
+# Tail size for retry test_output. pytest prints the failing assertion at the
+# bottom, so keeping the tail preserves the actionable signal while bounding
+# the prompt size.
+_TEST_OUTPUT_TAIL = 4000
+
+
+def _format_retry_feedback(state: BugFixState) -> str | None:
+    """Build a 'previous attempt failed, here's why' block for retries.
+
+    Returns None on the first cycle (fix_retry_count == 0). On retries, returns
+    a markdown section describing what was submitted last time and how it
+    failed, with each untrusted piece (prior patch, apply_error, test_output)
+    wrapped via sanitize_untrusted so a hostile pytest output cannot hijack the
+    LLM through the retry channel.
+    """
+    retry_n = state.get("fix_retry_count", 0) or 0
+    if retry_n <= 0:
+        return None
+
+    sections: list[str] = [
+        f"## Previous attempt #{retry_n} failed — revise based on the feedback below."
+    ]
+
+    prior = state.get("llm_result") or {}
+    fixes = prior.get("fixes") or []
+    if fixes:
+        suspect = state.get("suspect_file_path", "")
+        patch_lines: list[str] = []
+        for i, f in enumerate(fixes, 1):
+            target = f.get("file_path") or suspect
+            patch_lines.append(f"--- fix {i} in {target} ---")
+            patch_lines.append("- " + (f.get("original") or ""))
+            patch_lines.append("+ " + (f.get("replacement") or ""))
+        patch_block, _ = sanitize_untrusted("\n".join(patch_lines), "prior_patch")
+        sections.append("### What you submitted last time:")
+        sections.append(patch_block)
+
+    apply_err = state.get("apply_error")
+    if apply_err:
+        err_block, _ = sanitize_untrusted(str(apply_err), "apply_error")
+        sections.append("### Patch could not be applied:")
+        sections.append(err_block)
+
+    test_out = state.get("test_output") or ""
+    if test_out:
+        if len(test_out) > _TEST_OUTPUT_TAIL:
+            tail = "...[head truncated]\n" + test_out[-_TEST_OUTPUT_TAIL:]
+        else:
+            tail = test_out
+        out_block, _ = sanitize_untrusted(tail, "retry_test_output")
+        sections.append("### Test output from the previous attempt:")
+        sections.append(out_block)
+
+    return "\n".join(sections)
+
+
 def _build_initial_messages(state: BugFixState) -> list:
     suspect_path = state["suspect_file_path"]
     error_info_block, _ = sanitize_untrusted(state["error_info"], "ci_trace")
@@ -142,6 +198,9 @@ def _build_initial_messages(state: BugFixState) -> list:
     if hint:
         hint_block, _ = sanitize_untrusted(hint, "memory_hint")
         parts.extend(["", hint_block])
+    retry_feedback = _format_retry_feedback(state)
+    if retry_feedback:
+        parts.extend(["", retry_feedback])
     return [
         SystemMessage(content=_SYSTEM),
         HumanMessage(content="\n".join(parts)),

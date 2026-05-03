@@ -259,6 +259,8 @@ fetch_trace → parse_trace → fetch_source_file → react_loop
 
 The **ReAct loop** gives the LLM tools (`fetch_additional_file`, `fetch_file_segment`, `submit_fix`, `abort_fix`) and runs up to 8 reasoning steps. The patch is applied and tested in an isolated Python venv before being committed.
 
+When a fix fails its tests, the loop is re-entered (up to `MAX_FIX_RETRIES=2` times). On each retry the next prompt carries forward the previous attempt's patch, `apply_error`, and the tail of pytest's output (`test_output`, truncated to 4000 chars) — each wrapped in UNTRUSTED delimiters by `prompt_guard` so pytest output cannot hijack the LLM through the retry channel. Without this feedback channel a retry would simply resample the same prompt and likely produce the same wrong fix.
+
 ### Security & Guardrails
 
 DevHarness runs an autonomous LLM with write authority over your working tree, so a hallucinated path or prompt-injected trace could in principle target a sensitive file. To bound that blast radius, every patch is validated by `bf_worker/services/patch_guard.py` *before* anything is written to disk.

@@ -9,8 +9,11 @@ from __future__ import annotations
 from graph.state import BugFixState
 
 # ── tuneable limits ────────────────────────────────────────────────────────────
-MAX_FIX_RETRIES = 2      # test-failure → re-ask retries (kept for routing compat;
-                         # not triggered in practice since local tests are disabled)
+MAX_FIX_RETRIES = 2      # test-failure → re-ask retries. On each retry the
+                         # previous patch + truncated test_output + apply_error
+                         # are injected into the LLM's prompt by
+                         # react_loop._format_retry_feedback so it can revise
+                         # rather than blindly resample.
 
 
 # ── after react_loop ───────────────────────────────────────────────────────────
