@@ -316,8 +316,7 @@ class LocalNoGitProvider(SourceProvider, VCSProvider, ReviewProvider):
 
         # Write patch file
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        bug_id = repo_path.name  # bug_id was used as the dir name
-        patch_path = self._output_dir / f"{bug_id}.patch"
+        patch_path = self._output_dir / f"{self._bug_id}.patch"
         patch_path.write_text("".join(patch_lines), encoding="utf-8")
         logger.info("patch written to %s", patch_path)
 
