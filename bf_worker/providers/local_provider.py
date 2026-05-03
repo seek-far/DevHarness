@@ -25,6 +25,36 @@ logger = logging.getLogger(__name__)
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
+_VENV_EXCLUDE_PATTERNS = {".venv", ".venv/", "/.venv", "/.venv/"}
+
+
+def _ensure_venv_excluded_from_git(work_dir: Path) -> None:
+    """
+    For git repos, append `.venv/` to `.git/info/exclude` so the venv created
+    by `_ensure_venv` is not staged by `git add -A` during commit.
+
+    Uses `.git/info/exclude` (local, untracked) rather than `.gitignore`
+    (tracked) to avoid mutating the user's repo or polluting the fix commit.
+    No-op when work_dir is not a git repo (e.g. LocalNoGitProvider's temp copy).
+    """
+    git_dir = work_dir / ".git"
+    if not git_dir.is_dir():
+        return
+
+    exclude_file = git_dir / "info" / "exclude"
+    existing = exclude_file.read_text(encoding="utf-8") if exclude_file.exists() else ""
+    for line in existing.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and stripped in _VENV_EXCLUDE_PATTERNS:
+            return
+
+    exclude_file.parent.mkdir(parents=True, exist_ok=True)
+    prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+    with exclude_file.open("a", encoding="utf-8") as f:
+        f.write(f"{prefix}.venv/\n")
+    logger.info("added .venv/ to %s (local-only, not committed)", exclude_file)
+
+
 def _ensure_venv(work_dir: Path) -> Path | None:
     """
     Create `.venv` in `work_dir` (idempotent) and install `requirements.txt`
@@ -37,6 +67,7 @@ def _ensure_venv(work_dir: Path) -> Path | None:
     req_file = work_dir / "requirements.txt"
 
     if venv_python.exists():
+        _ensure_venv_excluded_from_git(work_dir)
         logger.debug("venv already exists at %s", venv_path)
         return bin_dir
 
@@ -44,6 +75,7 @@ def _ensure_venv(work_dir: Path) -> Path | None:
         logger.debug("no requirements.txt at %s, skipping venv creation", work_dir)
         return None
 
+    _ensure_venv_excluded_from_git(work_dir)
     logger.info("creating venv at %s", venv_path)
     subprocess.run(["python", "-m", "venv", str(venv_path)], check=True)
 
