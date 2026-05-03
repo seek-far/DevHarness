@@ -1,4 +1,5 @@
 fastapi
 uvicorn
+pydantic
 pydantic-settings
 redis[hiredis]>=5.0

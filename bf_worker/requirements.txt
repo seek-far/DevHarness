@@ -3,5 +3,6 @@ langchain-core>=0.2
 langchain-openai
 openai>=1.0
 redis[hiredis]>=5.0
-requests>=2.31
+requests[socks]>=2.31
+pydantic
 pydantic-settings
