@@ -181,7 +181,7 @@ Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) i
 
 ### Journal & Evaluation
 
-Every running-mode invocation writes a `RunRecord` to `evaluation/journal/<ts>_<bug_id>_<agent>/`. Auto-flagged candidates (failures, no-fix, high-iteration runs) can later be promoted into curated **fixtures** for the benchmark via `python -m evaluation.cli promote`.
+Every running-mode invocation writes a `RunRecord` to `evaluation/journal/<ts>_<bug_id>_<agent>_<model>/` — the model suffix lets you tell at a glance which LLM produced a given run, since model is a primary driver of bug-fix performance (slashes are slugified to dashes, length capped at 60). Auto-flagged candidates (failures, no-fix, high-iteration runs) can later be promoted into curated **fixtures** for the benchmark via `python -m evaluation.cli promote`.
 
 ```bash
 python -m evaluation.cli list-fixtures                               # what's in the benchmark

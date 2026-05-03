@@ -28,6 +28,7 @@ from agents.langgraph_agent import LangGraphAgent
 from agents.run_record import RunRecord
 from providers.local_provider import LocalNoGitProvider
 from enhancements import build_enhancements
+from settings import worker_cfg as cfg
 
 from evaluation.fixture import Fixture, discover
 
@@ -125,6 +126,7 @@ def run_sweep(
                 elapsed_s=round(elapsed, 3),
                 agent_config=spec,
                 run_id=run_id,
+                llm_model=spec.get("llm_model") or getattr(cfg, "llm_model", None),
             )
             cell_record = record.to_dict()
             cell_record.update({

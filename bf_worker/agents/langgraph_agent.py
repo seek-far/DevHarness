@@ -21,6 +21,7 @@ from enhancements.hooks import HookName, HookRegistry
 from graph.builder import build_graph
 from graph.state import BugFixState
 from services.budget import RunBudget
+from settings import worker_cfg as cfg
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class LangGraphAgent(Agent):
                 final_state=output.final_state,
                 elapsed_s=round(elapsed_s, 3),
                 agent_config=self._agent_config,
+                llm_model=self._agent_config.get("llm_model") or getattr(cfg, "llm_model", None),
             )
             self._journal.write(record, output.final_state)
         except Exception as exc:

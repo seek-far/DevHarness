@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from agents.run_record import RunRecord
@@ -30,6 +31,20 @@ logger = logging.getLogger(__name__)
 # bf_worker/journal.py → project root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DIR = _PROJECT_ROOT / "evaluation" / "journal"
+
+# Anything outside this set is replaced with `-` to keep directory names
+# filesystem-safe (slashes in vendor-prefixed model IDs like `mistralai/...`
+# would otherwise create a stray subdirectory).
+_MODEL_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]")
+_MODEL_SLUG_MAX = 60
+
+
+def _model_slug(model: str | None) -> str:
+    """Return a filesystem-safe slug for the model name, or '' if absent."""
+    if not model:
+        return ""
+    slug = _MODEL_SLUG_RE.sub("-", model).strip("-")
+    return slug[:_MODEL_SLUG_MAX]
 
 
 class JournalWriter:
@@ -44,7 +59,11 @@ class JournalWriter:
         self.journal_dir.mkdir(parents=True, exist_ok=True)
 
     def write(self, record: RunRecord, final_state: dict | None) -> Path | None:
-        run_dir = self.journal_dir / f"{record.timestamp}_{record.bug_id}_{record.agent_name}"
+        dir_name = f"{record.timestamp}_{record.bug_id}_{record.agent_name}"
+        slug = _model_slug(record.llm_model)
+        if slug:
+            dir_name = f"{dir_name}_{slug}"
+        run_dir = self.journal_dir / dir_name
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "record.json").write_text(record.to_json(), encoding="utf-8")

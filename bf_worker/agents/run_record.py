@@ -36,6 +36,7 @@ class RunRecord:
     job_id:            str            = ""
     agent_config:      dict           = field(default_factory=dict)
     run_id:            str | None     = None  # set by evaluation runner; None in journal mode
+    llm_model:         str | None     = None  # the LLM model used for this run (e.g. cfg.llm_model)
 
     # Telemetry pulled from the LangGraph state when present
     react_step_count:  int | None     = None
@@ -62,6 +63,7 @@ class RunRecord:
         elapsed_s: float | None = None,
         agent_config: dict | None = None,
         run_id: str | None = None,
+        llm_model: str | None = None,
     ) -> "RunRecord":
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         s = final_state or {}
@@ -78,6 +80,7 @@ class RunRecord:
             elapsed_s         = elapsed_s,
             agent_config      = agent_config or {},
             run_id            = run_id,
+            llm_model         = llm_model,
             timestamp         = ts,
             react_step_count  = s.get("react_step_count"),
             react_confidence  = s.get("react_confidence"),
