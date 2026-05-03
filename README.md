@@ -451,7 +451,7 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   └── memory.py         #   Bundled memory-lookup enhancement (PRE_REACT_LOOP + AGENT_POST_FIX)
 │   ├── providers/
 │   │   ├── base.py           # Provider ABCs (SourceProvider, VCSProvider, ReviewProvider)
-│   │   ├── gitlab_provider.py  # GitLab implementation
+│   │   ├── gitlab_provider.py  # GitLab implementation (owns the Repo helper for git CLI + GitLab REST)
 │   │   └── local_provider.py   # Local git + no-git implementations
 │   ├── graph/
 │   │   ├── nodes/            # LangGraph nodes (platform-agnostic via provider)
@@ -459,7 +459,6 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   ├── routing.py        # Conditional edge functions
 │   │   └── state.py          # BugFixState TypedDict (includes provider ref)
 │   ├── services/
-│   │   ├── gitlab_utils.py   # GitLab API and git operations (used by GitLabProvider)
 │   │   ├── apply_patch.py    # Patch application logic
 │   │   ├── patch_guard.py    # Apply-time scope/sensitive-path/cap guardrail
 │   │   ├── prompt_guard.py   # Prompt-injection defense for untrusted content
