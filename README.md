@@ -251,6 +251,8 @@ The same LangGraph state machine runs in all modes:
 
 ```
 fetch_trace → parse_trace → fetch_source_file → react_loop
+                       ↓ (parser found no path)
+                       └─────────────────→ react_loop (fallback)
     → create_fix_branch → apply_change_and_test → commit_change
     → wait_ci_result → create_mr → END
                                           ↓ (any failure)
@@ -260,6 +262,8 @@ fetch_trace → parse_trace → fetch_source_file → react_loop
 The **ReAct loop** gives the LLM tools (`fetch_additional_file`, `fetch_file_segment`, `submit_fix`, `abort_fix`) and runs up to 8 reasoning steps. The patch is applied and tested in an isolated Python venv before being committed.
 
 When a fix fails its tests, the loop is re-entered (up to `MAX_FIX_RETRIES=2` times). On each retry the next prompt carries forward the previous attempt's patch, `apply_error`, and the tail of pytest's output (`test_output`, truncated to 4000 chars) — each wrapped in UNTRUSTED delimiters by `prompt_guard` so pytest output cannot hijack the LLM through the retry channel. Without this feedback channel a retry would simply resample the same prompt and likely produce the same wrong fix.
+
+When the regex parser in `parse_trace` cannot extract a structured error/path from the CI trace (unusual format, plain log output, path the regex misses), the node falls back to *raw-trace mode* instead of aborting the run: it forwards the tail of the raw trace (capped at 8000 chars) as `error_info`, leaves `suspect_file_path=""`, and sets `parse_trace_fallback=True`. The graph then skips `fetch_source_file` and goes directly to `react_loop`, where the LLM works from the raw trace and uses `fetch_additional_file` to explore. In this mode every fix entry must set `file_path` explicitly — `apply_change_and_test` rejects entries that omit it via the existing `apply_error` channel. Empty / whitespace-only traces still hard-fail at `parse_trace`. Known limitation: there is no directory-listing tool, so the fallback is only effective when the trace itself mentions a path.
 
 ### Security & Guardrails
 

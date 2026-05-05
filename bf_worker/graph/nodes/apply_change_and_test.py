@@ -30,14 +30,32 @@ def apply_change_and_test(state: BugFixState) -> BugFixState:
 
     llm_result = state["llm_result"]
     change_infos = llm_result["fixes"]
-    suspect_file = state["suspect_file_path"]
+    suspect_file = state.get("suspect_file_path") or ""
 
     # Group fixes by target file. A fix entry's `file_path` (if present) wins;
     # otherwise the suspect file is used. This lets the LLM fix an imported
     # module when the suspect happens to be a test file.
+    #
+    # In parse_trace_fallback mode there is no suspect file to fall back to,
+    # so a fix entry without `file_path` would resolve to repo_path itself and
+    # corrupt apply. Reject it via the existing apply_error → retry channel so
+    # the LLM sees the error on the next loop turn and can revise.
     fixes_by_file: dict[str, list[dict]] = {}
     for f in change_infos:
         target = f.get("file_path") or suspect_file
+        if not target:
+            err = (
+                "fix entry is missing required `file_path`. No suspect file "
+                "was pre-identified, so every fix MUST set `file_path` "
+                "explicitly to a path within the repo."
+            )
+            logger.warning("apply_change_and_test rejected fix: %s", err)
+            return {
+                "apply_error": err,
+                "test_passed": False,
+                "test_output": f"[apply rejected]\n{err}",
+                "fix_retry_count": state.get("fix_retry_count", 0) + 1,
+            }
         fixes_by_file.setdefault(target, []).append(f)
 
     # ── 1. Apply patch ───────────────────────────────────────────────���────────

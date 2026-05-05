@@ -16,6 +16,19 @@ MAX_FIX_RETRIES = 2      # test-failure → re-ask retries. On each retry the
                          # rather than blindly resample.
 
 
+# ── after parse_trace ──────────────────────────────────────────────────────────
+
+def route_after_parse_trace(state: BugFixState) -> str:
+    """
+    Suspect file identified → fetch_source_file (normal path).
+    No suspect file → react_loop (fallback: LLM works from the raw trace and
+    must use fetch_additional_file to explore).
+    """
+    if state.get("suspect_file_path"):
+        return "fetch_source_file"
+    return "react_loop"
+
+
 # ── after react_loop ───────────────────────────────────────────────────────────
 
 def route_after_react_loop(state: BugFixState) -> str:

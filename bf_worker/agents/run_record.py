@@ -39,11 +39,12 @@ class RunRecord:
     llm_model:         str | None     = None  # the LLM model used for this run (e.g. cfg.llm_model)
 
     # Telemetry pulled from the LangGraph state when present
-    react_step_count:  int | None     = None
-    react_confidence:  str | None     = None
-    fix_branch_name:   str | None     = None
-    test_passed:       bool | None    = None
-    suspect_file_path: str | None     = None
+    react_step_count:     int | None     = None
+    react_confidence:     str | None     = None
+    fix_branch_name:      str | None     = None
+    test_passed:          bool | None    = None
+    suspect_file_path:    str | None     = None
+    parse_trace_fallback: bool | None    = None  # True when parser fell back to raw-trace mode (LLM saw trace, no suspect file)
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -82,11 +83,12 @@ class RunRecord:
             run_id            = run_id,
             llm_model         = llm_model,
             timestamp         = ts,
-            react_step_count  = s.get("react_step_count"),
-            react_confidence  = s.get("react_confidence"),
-            fix_branch_name   = s.get("fix_branch_name"),
-            test_passed       = s.get("test_passed"),
-            suspect_file_path = s.get("suspect_file_path"),
+            react_step_count     = s.get("react_step_count"),
+            react_confidence     = s.get("react_confidence"),
+            fix_branch_name      = s.get("fix_branch_name"),
+            test_passed          = s.get("test_passed"),
+            suspect_file_path    = s.get("suspect_file_path"),
+            parse_trace_fallback = s.get("parse_trace_fallback"),
         )
 
     def to_dict(self) -> dict[str, Any]:

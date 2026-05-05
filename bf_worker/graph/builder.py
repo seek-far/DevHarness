@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph, END
 
 from graph.state import BugFixState
 from graph.routing import (
+    route_after_parse_trace,
     route_after_react_loop,
     route_after_apply_and_test,
     route_after_ci,
@@ -49,7 +50,6 @@ def build_graph() -> StateGraph:
 
     # ── unconditional edges ───────────────────────────────────────────────────
     g.add_edge("fetch_trace",       "parse_trace")
-    g.add_edge("parse_trace",       "fetch_source_file")
     g.add_edge("fetch_source_file", "react_loop")
     g.add_edge("create_fix_branch", "apply_change_and_test")
     g.add_edge("commit_change",     "wait_ci_result")
@@ -57,6 +57,15 @@ def build_graph() -> StateGraph:
     g.add_edge("handle_failure",    END)
 
     # ── conditional edges ─────────────────────────────────────────────────────
+    g.add_conditional_edges(
+        "parse_trace",
+        route_after_parse_trace,
+        {
+            "fetch_source_file": "fetch_source_file",
+            "react_loop":        "react_loop",   # fallback: parser found no path
+        },
+    )
+
     g.add_conditional_edges(
         "react_loop",
         route_after_react_loop,
