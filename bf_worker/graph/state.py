@@ -48,6 +48,22 @@ class BugFixState(TypedDict, total=False):
 
     # ── branch / apply ────────────────────────────────────────────────────────
     fix_branch_name: str | None
+    branch_create_result: dict | None
+    branch_create_status: str | None
+    base_branch: str | None
+    base_commit: str | None
+    commit_result: dict | None
+    commit_status: str | None
+    commit_branch: str | None
+    commit_hash: str | None
+    review_result: dict | None
+    review_status: str | None
+    review_url: str | None
+    review_id: int | str | None
+    review_iid: int | str | None
+    review_branch: str | None
+    patch_file: str | None
+    report_file: str | None
     apply_error: str | None         # non-None when apply_patch itself crashed
 
     # ── test ──────────────────────────────────────────────────────────────────

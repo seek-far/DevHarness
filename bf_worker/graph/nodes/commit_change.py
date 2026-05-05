@@ -20,4 +20,9 @@ def commit_change(state: BugFixState) -> BugFixState:
         message=f"ci_agent: auto-fix bug {state['bug_id']}",
     )
     logger.info("commit_change result=%s", result)
-    return {}
+    return {
+        "commit_result": result,
+        "commit_status": result.get("status"),
+        "commit_branch": result.get("branch") or state.get("fix_branch_name"),
+        "commit_hash": result.get("commit"),
+    }

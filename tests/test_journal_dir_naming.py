@@ -153,3 +153,60 @@ def test_runrecord_from_dict_legacy_record_without_field():
     }
     record = RunRecord.from_dict(legacy)
     assert record.llm_model is None
+
+
+def test_runrecord_from_outputs_threads_git_telemetry():
+    final_state = {
+        "fix_branch_name": "auto/bug_BUG-X-patch_12_00_00_0",
+        "branch_create_status": "success",
+        "base_branch": "main",
+        "base_commit": "abc123",
+        "branch_create_result": {
+            "status": "success",
+            "branch_name": "auto/bug_BUG-X-patch_12_00_00_0",
+            "base_branch": "main",
+            "commit": "abc123",
+        },
+        "commit_status": "success",
+        "commit_branch": "auto/bug_BUG-X-patch_12_00_00_0",
+        "commit_hash": "def456",
+        "commit_result": {
+            "status": "success",
+            "branch": "auto/bug_BUG-X-patch_12_00_00_0",
+            "commit": "def456",
+        },
+        "review_status": "opened",
+        "review_url": "http://gitlab.local/project/-/merge_requests/1",
+        "review_id": 101,
+        "review_iid": 1,
+        "review_branch": "auto/bug_BUG-X-patch_12_00_00_0",
+        "review_result": {
+            "id": 101,
+            "iid": 1,
+            "url": "http://gitlab.local/project/-/merge_requests/1",
+            "state": "opened",
+        },
+    }
+    record = RunRecord.from_outputs(
+        agent_name="langgraph",
+        bug_id="BUG-X",
+        outcome="fixed",
+        error=None,
+        iterations=0,
+        final_state=final_state,
+    )
+
+    assert record.fix_branch_name == "auto/bug_BUG-X-patch_12_00_00_0"
+    assert record.branch_create_status == "success"
+    assert record.base_branch == "main"
+    assert record.base_commit == "abc123"
+    assert record.commit_status == "success"
+    assert record.commit_branch == "auto/bug_BUG-X-patch_12_00_00_0"
+    assert record.commit_hash == "def456"
+    assert record.review_status == "opened"
+    assert record.review_url == "http://gitlab.local/project/-/merge_requests/1"
+    assert record.review_id == 101
+    assert record.review_iid == 1
+    assert record.branch_create_result == final_state["branch_create_result"]
+    assert record.commit_result == final_state["commit_result"]
+    assert record.review_result == final_state["review_result"]

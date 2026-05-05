@@ -48,4 +48,10 @@ def create_fix_branch(state: BugFixState) -> BugFixState:
         raise RuntimeError("create_fix_branch returned None")
 
     logger.info("fix branch created: %s", result["branch_name"])
-    return {"fix_branch_name": result["branch_name"]}
+    return {
+        "fix_branch_name": result["branch_name"],
+        "branch_create_result": result,
+        "branch_create_status": result.get("status"),
+        "base_branch": result.get("base_branch"),
+        "base_commit": result.get("commit"),
+    }
