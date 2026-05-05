@@ -1,0 +1,73 @@
+❯ There are more than 200 cases in tests/. 请分类 (1)单元测试 （2）e2e，不使用mock data，(3)e2e rainy day
+  scenario很难触发in real world, 所以使用mock data
+==================  
+❯ 好像evaluation相关的测试比较少
+
+  Read 1 file, listed 1 directory (ctrl+o to expand)
+
+● 确实薄。来看一下覆盖现状：
+
+  evaluation/ 模块的覆盖矩阵
+
+  ┌───────────────┬─────┬───────────────────────────────┬───────────────────────────────────────────────────────────┐
+  │     模块      │ LOC │           直接测试            │                          覆盖度                           │
+  ├───────────────┼─────┼───────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ cli.py        │ 211 │ 0                             │ bench CLI 整个入口（list-fixtures / list-journal /        │
+  │               │     │                               │ promote / run / report）零覆盖                            │
+  ├───────────────┼─────┼───────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │               │     │                               │ 只测了 normalize_agent_ref、group_specs_by_agent_ref、_me │
+  │ coordinator.p │ 303 │ 3 case (in test_evaluation_co │ rge_summary —— 是 coordinator 里最纯的 3                  │
+  │ y             │     │ ordinator.py)                 │ 个工具函数；真正的 sweep 编排（subprocess 起              │
+  │               │     │                               │ worktree、合并 summaries、写入 runs/）零覆盖              │
+  ├───────────────┼─────┼───────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ fixture.py    │  72 │ 0                             │ 加载 meta.json、检测 source/、附 trace.txt 的 Fixture     │
+  │               │     │                               │ 类完全没测                                                │
+  ├───────────────┼─────┼───────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │ metrics.py    │  55 │ 0                             │ compute_metrics(records) —— per-agent fix_rate /          │
+  │               │     │                               │ avg_iterations / avg_elapsed_s 的聚合逻辑没测             │
+  ├───────────────┼─────┼───────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │               │     │                               │ 只测了 populate_source_from_git 的 happy path（找到       │
+  │ promote.py    │ 150 │ 2 case (in test_promote.py)   │ base_commit 并 checkout）；base_commit_from_record        │
+  │               │     │                               │ 字段回退、远程 URL 解析、不可达 commit、未合入到 fixture  │
+  │               │     │                               │ 等分支零覆盖                                              │
+  ├───────────────┼─────┼───────────────────────────────┼───────────────────────────────────────────────────────────┤
+  │               │     │                               │ run_sweep(agent_specs, fixtures) —— 这是 evaluation       │
+  │ runner.py     │ 155 │ 0                             │ 模式的核心循环，决定每个 cell 的 RunRecord 形状，完全靠   │
+  │               │     │                               │ integration_test.py 才能间接验证一部分                    │
+  └───────────────┴─────┴───────────────────────────────┴───────────────────────────────────────────────────────────┘
+
+  实际数字
+
+  evaluation 总共 ~955 LOC，5 个测试 case ——case 密度最低的一块。bf_worker 那边 ~3000 LOC 对应 200+ case。
+
+  风险排序（哪些缺失最该补）
+
+  🔴 metrics.compute_metrics —— 5 行就能写一个，但聚合逻辑里"outcome=fixed 的占比"、"avg over None elapsed_s"、"空
+  records 列表" 都是会出错的边界，目前如果指标数表错了，没人会发现。
+
+  🔴 runner.run_sweep —— 决定 RunRecord 形状的核心。我们这次几次改动都加了 RunRecord 字段（parse_trace_fallback /
+  source_fetch_failed / 5 个 retry counter），如果 runner 漏掉某个字段就只能等下一次跑完才发现。一个最小测试：用 stub
+  Agent + 1 个 fixture 跑一轮，验证生成的 RunRecord 字段集 = RunRecord dataclass 字段集。
+
+  🟡 fixture.Fixture loader —— 加载是简单的 JSON 读，但有"meta.json 缺字段"、"trace.txt 不存在"、"category 字段缺失"这些
+   schema 边界。
+
+  🟡 promote 剩下的分支 —— 当前的 2 case 只覆盖了 happy path。base_commit_from_record 在 branch_create_result /
+  commit_result 多重回退、URL 不存在、commit 在远端没找到等情况下的行为没测。
+
+  🟢 cli.py —— 是命令行壳子，主要工作 delegate 给上面这些模块。本身覆盖价值不高，靠 bash 烟测就够。
+
+  🟢 coordinator.py 的剩余部分（subprocess + worktree） —— 测起来麻烦（要 mock subprocess.run + git
+  worktree），收益相对有限。
+
+  建议的最小补丁
+
+  如果只补一组，我会建议这两个：
+
+  1. tests/test_metrics.py —— 直接构造若干 RunRecord dict 喂进 compute_metrics，验证
+  fix_rate、avg_iterations、avg_elapsed_s。也包括空 list、全 error、混合 outcome。约 6-8 个 case，纯单元，不需要 mock。
+  2. tests/test_runner_record_completeness.py —— 一个"防漏字段"的 smoke 测试：stub Agent + 临时 fixture 目录，跑
+  run_sweep 一格，断言生成的 RunRecord JSON 里包含 RunRecord.__dataclass_fields__ 的所有 key。这样以后再加 RunRecord
+  字段没接到 runner 时会立刻报红。1-2 个 case，归到 category 3（用 stub Agent）。
+
+  要不要我做这两个？还是先把 bf_worker 这边收尾，evaluation 留作下一个 issue？
