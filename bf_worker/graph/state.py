@@ -29,6 +29,7 @@ class BugFixState(TypedDict, total=False):
     source_file_content: str
     parse_trace_fallback: bool      # True when parser produced no structured info — error_info holds the raw trace tail and suspect_file_path is ""
     source_fetch_failed: bool       # True when parser produced a path but provider.fetch_file raised — suspect_file_path kept for telemetry, source_file_content is ""
+    fetch_trace_retries: int        # number of transient-retry loops fetch_trace took before succeeding (0 = first-attempt success)
 
     # ── llm ───────────────────────────────────────────────────────────────────
     llm_result: dict | None         # full JSON: {can_fix, error_reason, step_by_step_thinking, fixes}

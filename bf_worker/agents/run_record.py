@@ -46,6 +46,7 @@ class RunRecord:
     suspect_file_path:    str | None     = None
     parse_trace_fallback: bool | None    = None  # True when parser fell back to raw-trace mode (LLM saw trace, no suspect file)
     source_fetch_failed:  bool | None    = None  # True when parser produced a path but the file couldn't be read (LLM works from trace + parser's hint)
+    fetch_trace_retries:  int | None     = None  # number of transient-retry loops the fetch_trace node took (0 = first-attempt success; None = node didn't run / pre-existing record)
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ class RunRecord:
             suspect_file_path    = s.get("suspect_file_path"),
             parse_trace_fallback = s.get("parse_trace_fallback"),
             source_fetch_failed  = s.get("source_fetch_failed"),
+            fetch_trace_retries  = s.get("fetch_trace_retries"),
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -263,7 +263,11 @@ The **ReAct loop** gives the LLM tools (`fetch_additional_file`, `fetch_file_seg
 
 When a fix fails its tests, the loop is re-entered (up to `MAX_FIX_RETRIES=2` times). On each retry the next prompt carries forward the previous attempt's patch, `apply_error`, and the tail of pytest's output (`test_output`, truncated to 4000 chars) — each wrapped in UNTRUSTED delimiters by `prompt_guard` so pytest output cannot hijack the LLM through the retry channel. Without this feedback channel a retry would simply resample the same prompt and likely produce the same wrong fix.
 
-Two recoverable failure modes that used to abort the run now keep it alive by handing control to `react_loop` with the raw trace:
+Three recoverable failure modes that used to abort the run now keep it alive — the first via a narrow retry on the network/I-O call itself, the other two via fallback into `react_loop` with the raw trace:
+
+- **`fetch_trace` transient retry** — the entry node wraps `provider.fetch_trace()` in a narrow retry loop. Transient classes (HTTP `ConnectionError`/`Timeout`/`ChunkedEncodingError`, HTTPError 5xx, HTTPError 429 with `Retry-After`, `OSError` with errno in `{EAGAIN, EBUSY, EIO, ENFILE, EMFILE, ENOMEM, ETIMEDOUT}`) get up to 2 retries with `(1s, 2s)` backoff. Everything else — 4xx other than 429, `FileNotFoundError`, `PermissionError`, unrelated exceptions — propagates immediately so misconfiguration surfaces fast. Successful runs record `fetch_trace_retries` (0 = first-attempt success) into `RunRecord` for cost telemetry.
+
+
 
 - **`parse_trace_fallback`** — the regex parser in `parse_trace` couldn't extract both a structured error and a `<path>.py:<line>` reference (unusual traceback format, plain log output, path the regex missed). The node forwards the tail of the raw trace (capped at 8000 chars) as `error_info`, leaves `suspect_file_path=""`, and sets `parse_trace_fallback=True`. The graph skips `fetch_source_file` and goes directly to `react_loop`. Empty / whitespace-only traces still hard-fail.
 - **`source_fetch_failed`** — the parser produced a path but `provider.fetch_file` raised (synthetic frame like `<frozen importlib._bootstrap>`, file moved/renamed since the trace, path outside the working tree, encoding error). `fetch_source_file` returns `source_file_content=""`, `source_fetch_failed=True`, and keeps `suspect_file_path` populated so the LLM gets the parser's path as a starting hint.
