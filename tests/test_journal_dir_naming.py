@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bf_worker"))
 
 from agents.run_record import RunRecord  # noqa: E402
+import agents.run_record as run_record_module  # noqa: E402
 from journal import JournalWriter, _model_slug  # noqa: E402
 
 
@@ -153,6 +154,48 @@ def test_runrecord_from_dict_legacy_record_without_field():
     }
     record = RunRecord.from_dict(legacy)
     assert record.llm_model is None
+
+
+def test_runrecord_from_outputs_threads_agent_code_git_info(monkeypatch):
+    monkeypatch.setattr(
+        run_record_module,
+        "_agent_code_git_info",
+        lambda: {
+            "agent_code_git_commit": "agentabc",
+            "agent_code_git_branch": "main",
+            "agent_code_git_dirty": True,
+            "agent_code_git_status": " M bf_worker/agents/run_record.py",
+        },
+    )
+
+    record = RunRecord.from_outputs(
+        agent_name="langgraph",
+        bug_id="BUG-X",
+        outcome="fixed",
+        error=None,
+        iterations=0,
+        final_state=None,
+    )
+
+    assert record.agent_code_git_commit == "agentabc"
+    assert record.agent_code_git_branch == "main"
+    assert record.agent_code_git_dirty is True
+    assert record.agent_code_git_status == " M bf_worker/agents/run_record.py"
+
+
+def test_runrecord_from_dict_legacy_record_without_agent_code_fields():
+    legacy = {
+        "schema_version": "1",
+        "agent_name": "langgraph",
+        "bug_id": "BUG-OLD",
+        "outcome": "fixed",
+        "timestamp": "20260101T000000Z",
+    }
+    record = RunRecord.from_dict(legacy)
+    assert record.agent_code_git_commit is None
+    assert record.agent_code_git_branch is None
+    assert record.agent_code_git_dirty is None
+    assert record.agent_code_git_status is None
 
 
 def test_runrecord_from_outputs_threads_git_telemetry():

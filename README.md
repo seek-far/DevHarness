@@ -181,11 +181,14 @@ Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) i
 
 `RunRecord` includes platform result telemetry when providers return it:
 
+- Agent code version: `agent_code_git_commit`, `agent_code_git_branch`, `agent_code_git_dirty`, `agent_code_git_status`
 - Branch creation: `fix_branch_name`, `branch_create_status`, `base_branch`, `base_commit`, `branch_create_result`
 - Commit/push: `commit_status`, `commit_branch`, `commit_hash`, `commit_result`
 - Review output: `review_status`, `review_url`, `review_id`, `review_iid`, `review_branch`, `patch_file`, `report_file`, `review_result`
 
 GitLab runs populate commit and merge-request fields, local-git runs populate local commit fields, and no-git runs populate patch/report fields.
+
+Project rule: when adding or changing `RunRecord` telemetry, update this documentation and the agent guidance files in the same change. Reproducibility depends on recording both the target repo state and the SDLCMA agent code version that produced the run.
 
 ### Journal & Evaluation
 

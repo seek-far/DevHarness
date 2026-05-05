@@ -12,11 +12,47 @@ making incompatible changes.
 
 from __future__ import annotations
 import json
+import subprocess
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "1"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_GIT_STATUS_MAX_CHARS = 4000
+
+
+def _git_output(*args: str) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(_PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _agent_code_git_info() -> dict[str, Any]:
+    """Best-effort git version snapshot for this SDLCMA checkout."""
+    status = _git_output("status", "--short")
+    if status is not None and len(status) > _GIT_STATUS_MAX_CHARS:
+        status = status[:_GIT_STATUS_MAX_CHARS] + "\n...[truncated]"
+
+    return {
+        "agent_code_git_commit": _git_output("rev-parse", "HEAD"),
+        "agent_code_git_branch": _git_output("branch", "--show-current")
+        or _git_output("rev-parse", "--abbrev-ref", "HEAD"),
+        "agent_code_git_dirty": bool(status) if status is not None else None,
+        "agent_code_git_status": status,
+    }
 
 
 @dataclass
@@ -37,6 +73,10 @@ class RunRecord:
     agent_config:      dict           = field(default_factory=dict)
     run_id:            str | None     = None  # set by evaluation runner; None in journal mode
     llm_model:         str | None     = None  # the LLM model used for this run (e.g. cfg.llm_model)
+    agent_code_git_commit: str | None = None  # git commit of this SDLCMA/agent checkout
+    agent_code_git_branch: str | None = None  # git branch of this SDLCMA/agent checkout
+    agent_code_git_dirty:  bool | None = None # True when this SDLCMA/agent checkout had local changes
+    agent_code_git_status: str | None = None  # compact `git status --short` for this SDLCMA/agent checkout
 
     # Telemetry pulled from the LangGraph state when present
     react_step_count:     int | None     = None
@@ -86,6 +126,7 @@ class RunRecord:
     ) -> "RunRecord":
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         s = final_state or {}
+        agent_git = _agent_code_git_info()
         return cls(
             schema_version    = SCHEMA_VERSION,
             agent_name        = agent_name,
@@ -100,6 +141,10 @@ class RunRecord:
             agent_config      = agent_config or {},
             run_id            = run_id,
             llm_model         = llm_model,
+            agent_code_git_commit = agent_git["agent_code_git_commit"],
+            agent_code_git_branch = agent_git["agent_code_git_branch"],
+            agent_code_git_dirty  = agent_git["agent_code_git_dirty"],
+            agent_code_git_status = agent_git["agent_code_git_status"],
             timestamp         = ts,
             react_step_count     = s.get("react_step_count"),
             react_confidence     = s.get("react_confidence"),
