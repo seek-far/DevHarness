@@ -28,6 +28,7 @@ class BugFixState(TypedDict, total=False):
     suspect_file_path: str          # e.g. "api/views.py"; "" when parse_trace_fallback is True
     source_file_content: str
     parse_trace_fallback: bool      # True when parser produced no structured info — error_info holds the raw trace tail and suspect_file_path is ""
+    source_fetch_failed: bool       # True when parser produced a path but provider.fetch_file raised — suspect_file_path kept for telemetry, source_file_content is ""
 
     # ── llm ───────────────────────────────────────────────────────────────────
     llm_result: dict | None         # full JSON: {can_fix, error_reason, step_by_step_thinking, fixes}

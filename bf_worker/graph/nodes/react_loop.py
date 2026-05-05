@@ -118,10 +118,12 @@ Rules:
 - If the suspect file is a test file but the bug is in an imported module, \
 fetch that module and set file_path on each fix to the module's path. \
 Do not modify the test file itself unless the test is genuinely wrong.
-- If the message says "No suspect file pre-identified", no source file has \
-been pre-loaded for you. Read the raw trace, identify any file paths it \
-mentions, use fetch_additional_file to read them, and set file_path \
-EXPLICITLY on every fix entry — there is no fallback target in this mode.\
+- If the message says "No suspect file pre-identified" (parser found nothing) \
+OR "Suspect file ... could not be read" (parser pointed at an unreachable \
+path), no source file has been pre-loaded for you. Read the raw trace, \
+identify file paths it mentions, use fetch_additional_file to read them, and \
+set file_path EXPLICITLY on every fix entry — there is no fallback target in \
+these modes.\
 """
 
 
@@ -185,7 +187,8 @@ def _format_retry_feedback(state: BugFixState) -> str | None:
 
 def _build_initial_messages(state: BugFixState) -> list:
     suspect_path = state.get("suspect_file_path") or ""
-    fallback = bool(state.get("parse_trace_fallback"))
+    parse_failed = bool(state.get("parse_trace_fallback"))
+    fetch_failed = bool(state.get("source_fetch_failed"))
     error_info_block, _ = sanitize_untrusted(state["error_info"], "ci_trace")
 
     parts = [
@@ -194,12 +197,25 @@ def _build_initial_messages(state: BugFixState) -> list:
         "",
     ]
 
-    if fallback or not suspect_path:
+    if parse_failed or not suspect_path:
+        # Parser produced nothing — LLM has only the raw trace.
         parts.append(
-            "## No suspect file pre-identified — the parser could not extract a "
-            "structured error/path. Analyse the raw trace above, identify any "
-            "file paths it mentions, and use fetch_additional_file to read them. "
-            "Every entry in `fixes` MUST set `file_path` explicitly."
+            "## No suspect file pre-identified — the parser could not extract "
+            "a structured error/path. Analyse the raw trace above, identify "
+            "any file paths it mentions, and use fetch_additional_file to read "
+            "them. Every entry in `fixes` MUST set `file_path` explicitly."
+        )
+    elif fetch_failed:
+        # Parser produced a path but the file couldn't be read. Pass the path
+        # to the LLM as a starting hint — it may be wrong, moved, or a
+        # synthetic frame (e.g. <frozen importlib._bootstrap>), so the LLM
+        # should treat it as a clue, not as ground truth.
+        parts.append(
+            f"## Suspect file `{suspect_path}` was identified by the parser "
+            f"but could NOT be read (file may be wrong, moved, or outside the "
+            f"working tree). Use this as a hint only. Analyse the trace above, "
+            f"use fetch_additional_file to find the correct file, and set "
+            f"`file_path` EXPLICITLY on every fix entry."
         )
     else:
         source_block, _ = sanitize_untrusted(

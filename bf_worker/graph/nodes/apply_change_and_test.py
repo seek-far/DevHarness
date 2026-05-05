@@ -31,23 +31,35 @@ def apply_change_and_test(state: BugFixState) -> BugFixState:
     llm_result = state["llm_result"]
     change_infos = llm_result["fixes"]
     suspect_file = state.get("suspect_file_path") or ""
+    source_fetch_failed = bool(state.get("source_fetch_failed"))
 
     # Group fixes by target file. A fix entry's `file_path` (if present) wins;
     # otherwise the suspect file is used. This lets the LLM fix an imported
     # module when the suspect happens to be a test file.
     #
-    # In parse_trace_fallback mode there is no suspect file to fall back to,
-    # so a fix entry without `file_path` would resolve to repo_path itself and
-    # corrupt apply. Reject it via the existing apply_error → retry channel so
+    # The suspect_file fallback is only safe when we actually have content for
+    # that suspect — i.e. parse_trace_fallback is False AND source_fetch_failed
+    # is False. In either fallback mode, a fix that omits `file_path` would
+    # resolve to either an empty string (corrupting apply) or a path we know
+    # is unreadable. Reject via the existing apply_error → retry channel so
     # the LLM sees the error on the next loop turn and can revise.
     fixes_by_file: dict[str, list[dict]] = {}
     for f in change_infos:
-        target = f.get("file_path") or suspect_file
-        if not target:
+        explicit = f.get("file_path")
+        if explicit:
+            target = explicit
+        elif suspect_file and not source_fetch_failed:
+            target = suspect_file
+        else:
             err = (
-                "fix entry is missing required `file_path`. No suspect file "
-                "was pre-identified, so every fix MUST set `file_path` "
-                "explicitly to a path within the repo."
+                "fix entry is missing required `file_path`. "
+                + (
+                    "No suspect file was pre-identified, "
+                    if not suspect_file
+                    else f"Suspect file `{suspect_file}` could not be read, "
+                )
+                + "so every fix MUST set `file_path` explicitly to a path "
+                "within the repo."
             )
             logger.warning("apply_change_and_test rejected fix: %s", err)
             return {
