@@ -1,0 +1,11 @@
+{
+  "name": "A_parse_fallback",
+  "scenario": "parse_trace fallback — trace has no `E ` line and no `<path>.py:<N>` reference; LLM must work from raw trace and find calc.py via fetch_additional_file",
+  "expected_outcome": "fixed",
+  "expected_flags": {
+    "parse_trace_fallback": true,
+    "source_fetch_failed": null
+  },
+  "buggy_file": "calc.py",
+  "verification_test": "test_calc.py::test_add"
+}

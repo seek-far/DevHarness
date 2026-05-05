@@ -1,0 +1,12 @@
+{
+  "name": "C_fetch_failed_moved",
+  "scenario": "source_fetch_failed — parser picks `old_layout/strings.py:1` (file moved to util/strings.py since the trace was captured); LLM must use trace + import path in test file to find the new location",
+  "expected_outcome": "fixed",
+  "expected_flags": {
+    "parse_trace_fallback": false,
+    "source_fetch_failed": true,
+    "suspect_file_path": "old_layout/strings.py"
+  },
+  "buggy_file": "util/strings.py",
+  "verification_test": "test_strings.py::test_reverse"
+}

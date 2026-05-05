@@ -1,0 +1,16 @@
+============================= test session starts ==============================
+collected 1 item
+
+test_strings.py F                                                          [100%]
+
+=================================== FAILURES ===================================
+___________________________________ test_reverse ___________________________________
+
+    def test_reverse():
+>       assert reverse("hello") == "olleh"
+E       AssertionError: assert 'hello' == 'olleh'
+E         - olleh
+E         + hello
+
+old_layout/strings.py:1: AssertionError
+============================= 1 failed in 0.04s ===============================

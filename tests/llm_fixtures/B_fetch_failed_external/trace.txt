@@ -1,0 +1,16 @@
+============================= test session starts ==============================
+collected 2 items
+
+tests/test_validator.py F.                                                 [100%]
+
+=================================== FAILURES ===================================
+___________________________ test_email_requires_dot_after_at ___________________________
+
+    def test_email_requires_dot_after_at():
+>       assert is_email("user@example") is False
+E       AssertionError: assert True is False
+
+/opt/external_libs/email_validator/checker.py:42: AssertionError
+
+The local implementation of `is_email` lives in validator.py at the project root.
+============================= 1 failed, 1 passed in 0.05s =====================

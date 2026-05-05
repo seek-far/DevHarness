@@ -1,0 +1,8 @@
+[2026-05-05 09:00:00] CI build #1234 status: FAILED
+[runner] python project_runner.py run-tests
+[summary] 1 of 1 tests failed
+   - test name: tests.test_calc.test_add
+   - failure detail: returned -1, but the assertion expected 5
+   - hint: the production module under test is calc.py (single-file project)
+   - reproduction: run `python project_runner.py test test_add` locally
+[exit] 1

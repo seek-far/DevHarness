@@ -1,0 +1,11 @@
+{
+  "name": "D_normal_regression",
+  "scenario": "Normal path — standard pytest output, parser picks calc.py:2, fetch succeeds. Sanity check that existing flow still works after the fallback changes.",
+  "expected_outcome": "fixed",
+  "expected_flags": {
+    "parse_trace_fallback": false,
+    "source_fetch_failed": false
+  },
+  "buggy_file": "calc.py",
+  "verification_test": "test_calc.py::test_divide"
+}

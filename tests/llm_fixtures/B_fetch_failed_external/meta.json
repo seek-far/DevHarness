@@ -1,0 +1,12 @@
+{
+  "name": "B_fetch_failed_external",
+  "scenario": "source_fetch_failed — parser picks /opt/external_libs/.../checker.py:42 (matches the regex but doesn't exist locally); LLM must use the trace's hint about validator.py and fetch it",
+  "expected_outcome": "fixed",
+  "expected_flags": {
+    "parse_trace_fallback": false,
+    "source_fetch_failed": true,
+    "suspect_file_path_contains": "external_libs"
+  },
+  "buggy_file": "validator.py",
+  "verification_test": "test_validator.py::test_email_requires_dot_after_at"
+}
