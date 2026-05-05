@@ -28,12 +28,12 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bf_worker"))
 
-from graph.nodes.fetch_trace import (  # noqa: E402
-    _RETRY_AFTER_CAP_S,
-    _RETRY_DELAYS,
-    _classify_transient,
-    _parse_retry_after,
-    fetch_trace,
+from graph.nodes.fetch_trace import fetch_trace  # noqa: E402
+from services.transient_retry import (  # noqa: E402
+    DEFAULT_RETRY_DELAYS as _RETRY_DELAYS,
+    RETRY_AFTER_CAP_S as _RETRY_AFTER_CAP_S,
+    classify_transient as _classify_transient,
+    parse_retry_after as _parse_retry_after,
 )
 
 
@@ -185,7 +185,7 @@ def test_classify_unrelated_exception_permanent():
 
 
 def test_first_attempt_success_zero_retries(monkeypatch):
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: None)
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: None)
     provider = _Provider(exceptions=[], success_value="hello trace")
     out = fetch_trace(_state(provider))
     assert out["trace"] == "hello trace"
@@ -195,7 +195,7 @@ def test_first_attempt_success_zero_retries(monkeypatch):
 
 def test_one_transient_then_success(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(
         exceptions=[requests.exceptions.ConnectionError("blip")],
         success_value="ok",
@@ -208,7 +208,7 @@ def test_one_transient_then_success(monkeypatch):
 
 def test_retry_after_overrides_default_backoff(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[_http_error(429, retry_after="4")])
     out = fetch_trace(_state(provider))
     assert out["fetch_trace_retries"] == 1
@@ -218,7 +218,7 @@ def test_retry_after_overrides_default_backoff(monkeypatch):
 
 def test_two_transients_then_success(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(
         exceptions=[
             requests.exceptions.Timeout("t1"),
@@ -232,7 +232,7 @@ def test_two_transients_then_success(monkeypatch):
 
 
 def test_retries_exhausted_propagates(monkeypatch):
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: None)
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: None)
     # Three transients = exhausts our 1 + 2 attempts.
     provider = _Provider(
         exceptions=[
@@ -248,7 +248,7 @@ def test_retries_exhausted_propagates(monkeypatch):
 
 def test_permanent_error_propagates_immediately(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[_http_error(404)])
     with pytest.raises(requests.exceptions.HTTPError):
         fetch_trace(_state(provider))
@@ -259,7 +259,7 @@ def test_permanent_error_propagates_immediately(monkeypatch):
 
 def test_filenotfound_propagates_immediately(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[FileNotFoundError("/no/such")])
     with pytest.raises(FileNotFoundError):
         fetch_trace(_state(provider))
@@ -268,7 +268,7 @@ def test_filenotfound_propagates_immediately(monkeypatch):
 
 
 def test_oserror_transient_then_success(monkeypatch):
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: None)
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: None)
     provider = _Provider(exceptions=[OSError(errno.EAGAIN, "try again")])
     out = fetch_trace(_state(provider))
     assert out["fetch_trace_retries"] == 1
@@ -276,7 +276,7 @@ def test_oserror_transient_then_success(monkeypatch):
 
 def test_unrelated_exception_propagates_immediately(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("graph.nodes.fetch_trace.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[ValueError("bad arg")])
     with pytest.raises(ValueError):
         fetch_trace(_state(provider))

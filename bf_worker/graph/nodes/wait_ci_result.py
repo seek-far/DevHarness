@@ -4,12 +4,21 @@ Node: wait_ci_result
 Delegates to the provider's wait_ci_result method.
 For GitLab: blocks on Redis inbox stream for CI pipeline result.
 For local: returns success immediately (tests already ran locally).
+
+Wrapped in the shared transient-retry helper so a Redis disconnect mid-wait
+or a transient connection error retries instead of killing the run.
+A `None` return is *not* a transient — it's a deliberate "timeout reached"
+signal from the provider — and is passed through unchanged. Each retry is
+an independent call; the per-attempt timeout is not reduced, so a worst-case
+sequence of two transient drops with the default 300s timeout could spend
+up to 900s before either succeeding or giving up.
 """
 
 from __future__ import annotations
 import logging
 
 from graph.state import BugFixState
+from services.transient_retry import with_transient_retry
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +26,15 @@ logger = logging.getLogger(__name__)
 def wait_ci_result(state: BugFixState, timeout: int = 300) -> BugFixState:
     provider = state["provider"]
     logger.info("waiting for CI result (timeout=%ds) bug=%s", timeout, state["bug_id"])
-    status = provider.wait_ci_result(state["bug_id"], timeout)
+
+    status, retries = with_transient_retry(
+        lambda: provider.wait_ci_result(state["bug_id"], timeout),
+        op_name="wait_ci_result",
+    )
 
     if status is None:
-        logger.warning("CI wait timed out")
-        return {"ci_status": "timeout"}
+        logger.warning("CI wait timed out (retries=%d)", retries)
+        return {"ci_status": "timeout", "wait_ci_result_retries": retries}
 
-    logger.info("CI result: %s", status)
-    return {"ci_status": status}
+    logger.info("CI result: %s (retries=%d)", status, retries)
+    return {"ci_status": status, "wait_ci_result_retries": retries}

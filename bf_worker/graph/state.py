@@ -30,6 +30,7 @@ class BugFixState(TypedDict, total=False):
     parse_trace_fallback: bool      # True when parser produced no structured info — error_info holds the raw trace tail and suspect_file_path is ""
     source_fetch_failed: bool       # True when parser produced a path but provider.fetch_file raised — suspect_file_path kept for telemetry, source_file_content is ""
     fetch_trace_retries: int        # number of transient-retry loops fetch_trace took before succeeding (0 = first-attempt success)
+    fetch_source_file_retries: int  # transient retries for provider.fetch_file in fetch_source_file (only when the fetch eventually succeeded)
 
     # ── llm ───────────────────────────────────────────────────────────────────
     llm_result: dict | None         # full JSON: {can_fix, error_reason, step_by_step_thinking, fixes}
@@ -65,6 +66,8 @@ class BugFixState(TypedDict, total=False):
     patch_file: str | None
     report_file: str | None
     apply_error: str | None         # non-None when apply_patch itself crashed
+    commit_change_retries: int      # transient retries for provider.commit_and_push in commit_change
+    create_mr_retries: int          # transient retries for provider.create_review in create_mr
 
     # ── test ──────────────────────────────────────────────────────────────────
     test_passed: bool | None
@@ -72,6 +75,7 @@ class BugFixState(TypedDict, total=False):
 
     # ── ci / mr ───────────────────────────────────────────────────────────────
     ci_status: str | None           # "success" | "failed" | "timeout"
+    wait_ci_result_retries: int     # transient retries for provider.wait_ci_result in wait_ci_result (0 = first-attempt return; status=timeout still records 0)
 
     # ── generic error slot ────────────────────────────────────────────────────
     error: str | None

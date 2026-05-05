@@ -283,17 +283,19 @@ Three independently-running services communicate via **Redis Streams**:
 The same LangGraph state machine runs in all modes:
 
 ```
-fetch_trace → parse_trace → fetch_source_file → react_loop
-   ↺                  ↓                                ↑
-  (retries            └──(parser found no path)────────┘
-   transient I/O)        (skip fetch_source_file)
-    → create_fix_branch → apply_change_and_test → commit_change
-    → wait_ci_result → create_mr → END
+fetch_trace ↺ → parse_trace → fetch_source_file ↺ → react_loop
+                          ↓                                  ↑
+                          └──(parser found no path)──────────┘
+                             (skip fetch_source_file)
+    → create_fix_branch → apply_change_and_test → commit_change ↺
+    → wait_ci_result ↺ → create_mr ↺ → END
                                           ↓ (any failure)
                                      handle_failure
 ```
 
-(`fetch_source_file` itself always advances to `react_loop`; on read failure it returns empty `source_file_content` plus `source_fetch_failed=True`, and the `react_loop` prompt branches into a fallback shape that surfaces the parser's path as a hint.)
+(↺ = the node wraps its provider call in the shared narrow transient-retry layer in `services/transient_retry.py` — up to 2 retries with `(1s, 2s)` backoff on known-transient classes, `Retry-After` honored on 429/5xx, permanent errors propagate immediately.)
+
+(`fetch_source_file` always advances structurally to `react_loop`; on read failure it returns empty `source_file_content` plus `source_fetch_failed=True`, and the `react_loop` prompt branches into a fallback shape that surfaces the parser's path as a hint.)
 
 The **ReAct loop** gives the LLM tools (`fetch_additional_file`, `fetch_file_segment`, `submit_fix`, `abort_fix`) and runs up to 8 reasoning steps. The patch is applied and tested in an isolated Python venv before being committed.
 
@@ -301,7 +303,7 @@ When a fix fails its tests, the loop is re-entered (up to `MAX_FIX_RETRIES=2` ti
 
 Three recoverable failure modes that used to abort the run now keep it alive — the first via a narrow retry on the network/I-O call itself, the other two via fallback into `react_loop` with the raw trace:
 
-- **`fetch_trace` transient retry** — the entry node wraps `provider.fetch_trace()` in a narrow retry loop. Transient classes (HTTP `ConnectionError`/`Timeout`/`ChunkedEncodingError`, HTTPError 5xx, HTTPError 429 with `Retry-After`, `OSError` with errno in `{EAGAIN, EBUSY, EIO, ENFILE, EMFILE, ENOMEM, ETIMEDOUT}`) get up to 2 retries with `(1s, 2s)` backoff. Everything else — 4xx other than 429, `FileNotFoundError`, `PermissionError`, unrelated exceptions — propagates immediately so misconfiguration surfaces fast. Successful runs record `fetch_trace_retries` (0 = first-attempt success) into `RunRecord` for cost telemetry.
+- **Transient I/O retry across all five I/O-bound nodes** — `fetch_trace`, `fetch_source_file`, `commit_change`, `wait_ci_result`, and `create_mr` each wrap their provider call in the shared `services.transient_retry.with_transient_retry()` helper. Policy: up to 2 retries, `(1s, 2s)` backoff. Transient classes: HTTP `ConnectionError` / `Timeout` / `ChunkedEncodingError`, `HTTPError` 5xx, `HTTPError` 429 (with `Retry-After` honored, clamped at 30s), `OSError` with errno in `{EAGAIN, EBUSY, EIO, ENFILE, EMFILE, ENOMEM, ETIMEDOUT}`, `redis.exceptions.ConnectionError` / `TimeoutError` / `BusyLoadingError`. Everything else — 4xx other than 429, `FileNotFoundError`, `PermissionError`, `redis.ResponseError`, unrelated exceptions — propagates immediately so misconfiguration surfaces fast. Each node records its own retry counter (`fetch_trace_retries`, `fetch_source_file_retries`, `commit_change_retries`, `wait_ci_result_retries`, `create_mr_retries`) into `RunRecord` for cost telemetry. `fetch_source_file` additionally falls through to `source_fetch_failed=True` on exhausted transients; the other three propagate.
 
 
 

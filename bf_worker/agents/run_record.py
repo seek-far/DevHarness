@@ -102,7 +102,11 @@ class RunRecord:
     suspect_file_path:    str | None     = None
     parse_trace_fallback: bool | None    = None  # True when parser fell back to raw-trace mode (LLM saw trace, no suspect file)
     source_fetch_failed:  bool | None    = None  # True when parser produced a path but the file couldn't be read (LLM works from trace + parser's hint)
-    fetch_trace_retries:  int | None     = None  # number of transient-retry loops the fetch_trace node took (0 = first-attempt success; None = node didn't run / pre-existing record)
+    fetch_trace_retries:       int | None = None  # number of transient-retry loops the fetch_trace node took (0 = first-attempt success; None = node didn't run / pre-existing record)
+    fetch_source_file_retries: int | None = None  # transient retries inside fetch_source_file before the read succeeded (None when the run never reached the node or fell through to source_fetch_failed)
+    commit_change_retries:     int | None = None  # transient retries inside commit_change before commit_and_push succeeded
+    wait_ci_result_retries:    int | None = None  # transient retries inside wait_ci_result before the provider returned (0 even on timeout: timeouts are not transients)
+    create_mr_retries:         int | None = None  # transient retries inside create_mr before create_review succeeded
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -169,7 +173,11 @@ class RunRecord:
             suspect_file_path    = s.get("suspect_file_path"),
             parse_trace_fallback = s.get("parse_trace_fallback"),
             source_fetch_failed  = s.get("source_fetch_failed"),
-            fetch_trace_retries  = s.get("fetch_trace_retries"),
+            fetch_trace_retries       = s.get("fetch_trace_retries"),
+            fetch_source_file_retries = s.get("fetch_source_file_retries"),
+            commit_change_retries     = s.get("commit_change_retries"),
+            wait_ci_result_retries    = s.get("wait_ci_result_retries"),
+            create_mr_retries         = s.get("create_mr_retries"),
         )
 
     def to_dict(self) -> dict[str, Any]:
