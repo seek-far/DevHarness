@@ -25,6 +25,7 @@ sys.path.insert(0, str(_ROOT / "bf_worker"))
 sys.path.insert(0, str(_ROOT))
 
 from evaluation.fixture import discover
+from evaluation.promote import populate_source_from_git
 
 # NOTE: evaluation.runner pulls in the agent stack (langgraph + LLM client +
 # settings) which is multi-second to import. We only need it inside `cmd_run`,
@@ -126,10 +127,13 @@ def cmd_promote(args) -> int:
     rec = json.loads((journal_dir / "record.json").read_text(encoding="utf-8"))
 
     fixture_dir.mkdir(parents=True)
-    # Source snapshot is not yet captured eagerly by the journal (running mode
-    # operates on a live repo). Until that's added, the promote step asks the
-    # user to populate source/ manually.
-    (fixture_dir / "source").mkdir()
+    source_dir = fixture_dir / "source"
+    source_dir.mkdir()
+    source_populated, source_msg = populate_source_from_git(
+        record=rec,
+        source_dir=source_dir,
+        explicit_repo=args.source_repo,
+    )
 
     if (journal_dir / "trace.txt").exists():
         shutil.copy2(journal_dir / "trace.txt", fixture_dir / "trace.txt")
@@ -146,8 +150,12 @@ def cmd_promote(args) -> int:
     (fixture_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     print(f"Created fixture: {fixture_dir}")
-    print(f"  Next: populate {fixture_dir / 'source'} with the buggy source tree")
-    print(f"        and edit {fixture_dir / 'meta.json'} as needed.")
+    if source_populated:
+        print(f"  Source: {source_msg}")
+    else:
+        print(f"  Source not auto-populated: {source_msg}")
+        print(f"  Next: populate {source_dir} with the buggy source tree")
+    print(f"  Edit {fixture_dir / 'meta.json'} as needed.")
     return 0
 
 
@@ -180,6 +188,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--fixture-id", help="Override fixture id (default: same as journal entry)")
     pr.add_argument("--category", help="e.g. off-by-one, race, type, recursion")
     pr.add_argument("--difficulty", help="easy | medium | hard")
+    pr.add_argument(
+        "--source-repo",
+        help="Optional git repo URL/path to reconstruct source from when the journal has no repo URL",
+    )
     pr.set_defaults(fn=cmd_promote)
 
     return p

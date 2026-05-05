@@ -210,12 +210,13 @@ Every running-mode invocation writes a `RunRecord` to `evaluation/journal/<ts>_<
 python -m evaluation.cli list-fixtures                               # what's in the benchmark
 python -m evaluation.cli list-journal --flagged                      # candidates worth promoting
 python -m evaluation.cli promote <journal_entry> --category off-by-one
+python -m evaluation.cli promote <journal_entry> --source-repo /path/or/url
 python -m evaluation.cli run --config configs/baseline.json          # sweep configured agents × fixtures
 python -m evaluation.cli run --fixture-id F01-off-by-one F03-missing-key  # subset
 python -m evaluation.cli report <run_id>                             # comparison table
 ```
 
-The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source.
+The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source. `list-journal --flagged` is only a review filter; `promote` can promote flagged or unflagged entries. Promotion tries to populate `fixtures/<id>/source/` automatically from the journal's buggy git commit (`base_commit`, falling back to `branch_create_result.commit`) and repo metadata (`project_web_url`, `source_repo_path`, or explicit `--source-repo`). If repo/commit information is missing, promotion still creates the fixture and leaves `source/` for manual population.
 
 #### Bundled fixtures
 
