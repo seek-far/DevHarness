@@ -179,6 +179,14 @@ Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) i
 
 `bf_worker/agents/run_record.py` defines the `RunRecord` dataclass — the single source of truth for the structured outcome of one `agent.fix()` invocation. Both the running-mode journal and the evaluation runner write the same shape, so downstream tooling (metrics, promotion, dashboards) only handles one schema. Bump `SCHEMA_VERSION` for incompatible changes.
 
+`RunRecord` includes platform result telemetry when providers return it:
+
+- Branch creation: `fix_branch_name`, `branch_create_status`, `base_branch`, `base_commit`, `branch_create_result`
+- Commit/push: `commit_status`, `commit_branch`, `commit_hash`, `commit_result`
+- Review output: `review_status`, `review_url`, `review_id`, `review_iid`, `review_branch`, `patch_file`, `report_file`, `review_result`
+
+GitLab runs populate commit and merge-request fields, local-git runs populate local commit fields, and no-git runs populate patch/report fields.
+
 ### Journal & Evaluation
 
 Every running-mode invocation writes a `RunRecord` to `evaluation/journal/<ts>_<bug_id>_<agent>_<model>/` — the model suffix lets you tell at a glance which LLM produced a given run, since model is a primary driver of bug-fix performance (slashes are slugified to dashes, length capped at 60). Auto-flagged candidates (failures, no-fix, high-iteration runs) can later be promoted into curated **fixtures** for the benchmark via `python -m evaluation.cli promote`.
