@@ -251,13 +251,16 @@ The same LangGraph state machine runs in all modes:
 
 ```
 fetch_trace → parse_trace → fetch_source_file → react_loop
-                       ↓ (parser found no path)
-                       └─────────────────→ react_loop (fallback)
+   ↺                  ↓                                ↑
+  (retries            └──(parser found no path)────────┘
+   transient I/O)        (skip fetch_source_file)
     → create_fix_branch → apply_change_and_test → commit_change
     → wait_ci_result → create_mr → END
                                           ↓ (any failure)
                                      handle_failure
 ```
+
+(`fetch_source_file` itself always advances to `react_loop`; on read failure it returns empty `source_file_content` plus `source_fetch_failed=True`, and the `react_loop` prompt branches into a fallback shape that surfaces the parser's path as a hint.)
 
 The **ReAct loop** gives the LLM tools (`fetch_additional_file`, `fetch_file_segment`, `submit_fix`, `abort_fix`) and runs up to 8 reasoning steps. The patch is applied and tested in an isolated Python venv before being committed.
 
