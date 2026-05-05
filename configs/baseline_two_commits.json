@@ -1,0 +1,16 @@
+[
+  {
+    "name": "baseline-agent-git-telemetry",
+    "agent": "langgraph",
+    "agent_ref": "a9d53e1172664d0bae05ed90b4196fd7f0f96827",
+    "kwargs": {},
+    "notes": "Baseline pinned to the commit that added agent-code git telemetry to RunRecord."
+  },
+  {
+    "name": "baseline-before-agent-git-telemetry",
+    "agent": "langgraph",
+    "agent_ref": "9789d32340e63b794bea1ddac3353fc25cee73de",
+    "kwargs": {},
+    "notes": "Baseline pinned to the parent commit before agent-code git telemetry was added."
+  }
+]

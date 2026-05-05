@@ -25,8 +25,7 @@ import redis.asyncio as aioredis
 logger = logging.getLogger(__name__)
 
 from agents.base import BugInput
-from agents.langgraph_agent import LangGraphAgent
-from journal import JournalWriter
+from agent_config import load_agent_spec, make_agent, maybe_reexec_for_agent_ref
 from providers.gitlab_provider import GitLabProvider
 
 from pathlib import Path
@@ -100,7 +99,8 @@ class BugFixWorker:
             job_id=os.environ["job_id"],
         )
 
-        agent = LangGraphAgent(journal=JournalWriter())
+        agent_spec = load_agent_spec(os.getenv("BF_AGENT_CONFIG"))
+        agent = make_agent(agent_spec)
         logger.info("invoking agent=%s ...", agent.name)
         fix_output = agent.fix(bug_input)
 
@@ -159,5 +159,12 @@ if __name__ == "__main__":
     )
     
     logger.debug("cfg=%s", cfg)
-        
+
+    _agent_ref_exit = maybe_reexec_for_agent_ref(
+        os.getenv("BF_AGENT_CONFIG"),
+        "bf_worker/bf_worker.py",
+    )
+    if _agent_ref_exit is not None:
+        raise SystemExit(_agent_ref_exit)
+
     asyncio.run(main())

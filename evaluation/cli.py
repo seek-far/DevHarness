@@ -72,7 +72,7 @@ def cmd_list_journal(args) -> int:
 
 def cmd_run(args) -> int:
     # Lazy import: only when actually running a sweep do we pay the agent-stack import cost.
-    from evaluation.runner import run_sweep
+    from evaluation.coordinator import run_coordinated_sweep
 
     fixtures = discover()
     if not fixtures:
@@ -92,7 +92,7 @@ def cmd_run(args) -> int:
             print(f"No matching fixtures: {args.fixture_id}", file=sys.stderr)
             return 2
 
-    run_dir = run_sweep(agent_specs=agent_specs, fixtures=fixtures, run_id=args.run_id)
+    run_dir = run_coordinated_sweep(agent_specs=agent_specs, fixtures=fixtures, run_id=args.run_id)
     print(f"\nDone. Run dir: {run_dir}")
     print(f"Report: python -m evaluation.cli report {run_dir.name}")
     return 0

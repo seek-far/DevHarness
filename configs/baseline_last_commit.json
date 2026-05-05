@@ -1,0 +1,9 @@
+[
+  {
+    "name": "baseline-last-commit",
+    "agent": "langgraph",
+    "agent_ref": "a9d53e1172664d0bae05ed90b4196fd7f0f96827",
+    "kwargs": {},
+    "notes": "Pinned baseline smoke/evaluation config for the 2026-05-05 18:05:20 +0200 commit that added agent-code git telemetry."
+  }
+]

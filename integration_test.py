@@ -90,10 +90,18 @@ async def main() -> None:
         help="Redis URL (default redis://127.0.0.1:6379/15, db=15 isolated for testing)",
     )
     parser.add_argument("--bug-id", default="BUG-IT-1")
+    parser.add_argument(
+        "--config",
+        default=os.getenv("BF_AGENT_CONFIG", ""),
+        help="Optional agent config JSON. When it contains agent_ref, the worker runs from that pinned ref.",
+    )
     args = parser.parse_args()
 
     redis_url: str = args.redis_url
     bug_id: str = args.bug_id
+    if args.config:
+        os.environ["BF_AGENT_CONFIG"] = str(Path(args.config).resolve())
+        logger.info("using agent config: %s", os.environ["BF_AGENT_CONFIG"])
 
     # ── 1. Build test-specific configuration ─────────────────────
 

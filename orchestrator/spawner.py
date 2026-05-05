@@ -56,6 +56,8 @@ class WorkerSpawner:
         env["project_id"] = project_id
         env["project_web_url"] = project_web_url
         env["job_id"] = job_id
+        if os.getenv("BF_AGENT_CONFIG"):
+            env["BF_AGENT_CONFIG"] = os.environ["BF_AGENT_CONFIG"]
         process = await asyncio.create_subprocess_exec(
             sys.executable, WORKER_SCRIPT, "--bug-id", bug_id,
             env=env,

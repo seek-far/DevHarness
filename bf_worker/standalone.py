@@ -51,10 +51,8 @@ sys.path.insert(0, str(_HERE.parent))            # project root
 sys.path.insert(0, str(_HERE))                   # bf_worker/
 
 from agents.base import BugInput
-from agents.langgraph_agent import LangGraphAgent
-from journal import JournalWriter
+from agent_config import load_agent_spec, make_agent, maybe_reexec_for_agent_ref
 from providers.local_provider import LocalGitProvider, LocalNoGitProvider
-from enhancements import build_enhancements
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +138,9 @@ def main() -> None:
         help="Path to JSON file: list of agent spec"
     )
     args = parser.parse_args()
+    agent_ref_exit = maybe_reexec_for_agent_ref(args.config, "bf_worker/standalone.py")
+    if agent_ref_exit is not None:
+        raise SystemExit(agent_ref_exit)
 
     source_dir = Path(args.source_dir).resolve()
     if not source_dir.is_dir():
@@ -172,28 +173,11 @@ def main() -> None:
             bug_id=args.bug_id,
         )
 
-    if args.config:
-        agent_spec = json.loads(Path(args.config).read_text(encoding="utf-8"))
-        if isinstance(agent_spec, list):
-            agent_spec = agent_spec[0]
-    else:
-        agent_spec = None #{"name": "langgraph", "agent": "langgraph", "kwargs": {}}
+    agent_spec = load_agent_spec(args.config)
         
     # Build agent + bug input
     bug_input = BugInput(bug_id=args.bug_id, provider=provider)
-    if agent_spec is None:
-        agent = LangGraphAgent(journal=JournalWriter())
-    else:
-        # almost copied from evaluation.runner.make_agent
-        kind = agent_spec.get("agent", "langgraph")
-        kwargs = dict(agent_spec.get("kwargs", {}))
-        if kind == "langgraph":
-            enh_specs = agent_spec.get("enhancements", [])
-            if enh_specs:
-                kwargs.setdefault("enhancements", build_enhancements(enh_specs))
-            agent = LangGraphAgent(journal=JournalWriter(), agent_config=agent_spec, **kwargs)
-        else:            
-            raise ValueError(f"unknown agent kind: {kind!r}")    
+    agent = make_agent(agent_spec)
 
     logger.info("invoking agent=%s ...", agent.name)
     fix_output = agent.fix(bug_input)

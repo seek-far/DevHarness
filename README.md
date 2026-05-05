@@ -101,6 +101,18 @@ uvicorn gateway.gateway:app --host 0.0.0.0 --port 8000
 python -m orchestrator.orchestrator
 ```
 
+The GitLab worker can also consume an agent config through `BF_AGENT_CONFIG`.
+When the first spec in that file declares `agent_ref`, the worker parent
+process creates a temporary detached worktree at that branch/tag/commit and
+re-executes `bf_worker/bf_worker.py` there. `BF_JOURNAL_DIR` is set to the
+parent checkout's `evaluation/journal/` so the running-mode journal persists
+after the temporary worktree is removed.
+
+```bash
+$env:BF_AGENT_CONFIG = "configs/baseline_last_commit.json"
+python -m orchestrator.orchestrator
+```
+
 Or use `dh_entry.py` to launch both together:
 
 ```bash
@@ -173,7 +185,7 @@ Currently wired hook points: `agent.pre_fix`, `agent.post_fix` (called from `Lan
 
 `bf_worker/enhancements/memory.py` is a token-overlap memory of past fixes. It registers a `PRE_REACT_LOOP` callback (queries `evaluation/memory/store.json` using `error_info` + `suspect_file_path` and injects up to `top_k` matches as `state["memory_hint"]`, which the ReAct prompt appends as a "Prior similar fixes (reference only)" section) and an `AGENT_POST_FIX` callback (appends each run's outcome to the store). The store is pre-seeded with 10 category-keyed lessons so the first sweep has something to retrieve. Compare baseline vs memory with `configs/memory_vs_baseline.json`.
 
-Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) into `(hook_name, callback)` tuples by `bf_worker/enhancements/build_enhancements.py:build_enhancements`. The same factory is used by both the evaluation runner (`evaluation/runner.py:make_agent`) and the standalone CLI (`bf_worker/standalone.py` when `--config` is given), so the same agent spec file works in either mode — e.g. `configs/memory.json` enables the memory enhancement on a single standalone run via `--config configs/memory.json`.
+Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) into `(hook_name, callback)` tuples by `bf_worker/enhancements/build_enhancements.py:build_enhancements`. The same factory is used by both the evaluation runner (`evaluation/runner.py:make_agent`) and the running-mode entry points (`bf_worker/standalone.py` when `--config` is given, and GitLab workers when `BF_AGENT_CONFIG` is set), so the same agent spec file works across modes — e.g. `configs/memory.json` enables the memory enhancement on a single standalone run via `--config configs/memory.json`.
 
 ### RunRecord (canonical telemetry schema)
 
@@ -211,7 +223,16 @@ The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs 
 
 #### Configs
 
-Agent specs live as JSON lists under `configs/`. The `baseline.json` config (no enhancements) is the reference point against which future enhancements are measured. To compare approaches, write a config listing both, run, and compare — `configs/memory_vs_baseline.json` is a worked example:
+Agent specs live as JSON lists under `configs/`. The `baseline.json` config (no enhancements) is the reference point against which future enhancements are measured. Evaluation consumes every spec in the list; running-mode entry points consume the first spec. To compare approaches, write a config listing both, run, and compare — `configs/memory_vs_baseline.json` is a worked example:
+
+Each agent spec may include optional `agent_ref` to pin that spec to a git branch, tag, or commit of the SDLCMA agent code. When omitted, null, or `"current"`, evaluation uses the current checkout in-process. When set, the evaluation coordinator creates a temporary detached git worktree at that ref, runs that subset of specs there, then copies the run records back into the parent `evaluation/runs/<run_id>/`. The same `agent_ref` field is honored by standalone and GitLab running-mode entry points for their first spec, using the same detached-worktree re-exec pattern. This lets one config compare agent behavior across code versions:
+
+```json
+[
+  {"name": "baseline-current", "agent": "langgraph", "kwargs": {}},
+  {"name": "baseline-old", "agent": "langgraph", "agent_ref": "a9d53e1172664d0bae05ed90b4196fd7f0f96827", "kwargs": {}}
+]
+```
 
 ```bash
 python -m evaluation.cli run --config configs/baseline.json            # baseline only
@@ -441,8 +462,12 @@ Trigger: **Pipeline events**
 Runs the full pipeline (gateway → orchestrator → worker) against an isolated Redis DB with a synthetic bug report:
 
 ```bash
-uv run python integration_test.py [--redis-url redis://...] [--bug-id BUG-IT-1]
+uv run python integration_test.py [--redis-url redis://...] [--bug-id BUG-IT-1] [--config configs/baseline_last_commit.json]
 ```
+
+Passing `--config` sets `BF_AGENT_CONFIG` for the spawned worker. If the first
+spec includes `agent_ref`, the integration test verifies the GitLab worker
+handoff into that pinned checkout.
 
 > Use `uv run python` rather than invoking a venv interpreter directly — `apply_change_and_test` shells out to `python -m venv` to set up an isolated test environment, and that requires `python` (not just `python3`) to be on PATH.
 
