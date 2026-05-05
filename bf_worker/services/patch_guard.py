@@ -54,6 +54,13 @@ DENY_GLOBS: tuple[str, ...] = (
 )
 
 
+def _is_absolute_path(path: str) -> bool:
+    """Return True for POSIX or Windows absolute path strings."""
+    return Path(path).is_absolute() or path.startswith(("/", "\\")) or (
+        len(path) >= 2 and path[1] == ":"
+    )
+
+
 def matches_deny(rel_posix: str) -> str | None:
     """Return the matching glob if `rel_posix` is denied, else None."""
     # Check the full path and every parent segment, so e.g. ".git/config"
@@ -105,7 +112,7 @@ def validate_patch_scope(
             raise PatchScopeError(f"invalid file_path: {rel_path!r}")
 
         # Reject absolute paths up front so the message is clear.
-        if Path(rel_path).is_absolute():
+        if _is_absolute_path(rel_path):
             raise PatchScopeError(
                 f"file_path must be repo-relative, got absolute: {rel_path!r}"
             )
