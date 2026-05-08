@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-Outcome = Literal["fixed", "no_fix", "error"]
+Outcome = Literal["fixed", "no_fix", "error", "already_fixed"]
 
 
 @dataclass

@@ -15,6 +15,7 @@ from graph.state import BugFixState
 from graph.routing import (
     route_after_parse_trace,
     route_after_react_loop,
+    route_after_create_fix_branch,
     route_after_apply_and_test,
     route_after_ci,
 )
@@ -51,7 +52,6 @@ def build_graph() -> StateGraph:
     # ── unconditional edges ───────────────────────────────────────────────────
     g.add_edge("fetch_trace",       "parse_trace")
     g.add_edge("fetch_source_file", "react_loop")
-    g.add_edge("create_fix_branch", "apply_change_and_test")
     g.add_edge("commit_change",     "wait_ci_result")
     g.add_edge("create_mr",         END)
     g.add_edge("handle_failure",    END)
@@ -73,6 +73,15 @@ def build_graph() -> StateGraph:
             "create_fix_branch":     "create_fix_branch",
             "apply_change_and_test": "apply_change_and_test",   # branch-reuse path
             "handle_failure":        "handle_failure",
+        },
+    )
+
+    g.add_conditional_edges(
+        "create_fix_branch",
+        route_after_create_fix_branch,
+        {
+            "apply_change_and_test": "apply_change_and_test",
+            "already_fixed":         END,
         },
     )
 

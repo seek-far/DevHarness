@@ -44,6 +44,20 @@ def route_after_react_loop(state: BugFixState) -> str:
     return "handle_failure"
 
 
+# ── after create_fix_branch ────────────────────────────────────────────────────
+
+def route_after_create_fix_branch(state: BugFixState) -> str:
+    """
+    R10 short-circuit: if create_fix_branch saw an already-merged MR for the
+    deterministic branch, the fix is shipped — skip apply/commit/MR.
+
+    Normal path → apply_change_and_test.
+    """
+    if state.get("already_fixed"):
+        return "already_fixed"
+    return "apply_change_and_test"
+
+
 # ── after apply_change_and_test ────────────────────────────────────────────────
 
 def route_after_apply_and_test(state: BugFixState) -> str:

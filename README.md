@@ -366,6 +366,41 @@ The mirror of `patch_guard` for the *read* path. The LLM's `fetch_additional_fil
 
 On rejection, the tool returns `[fetch rejected: <reason>]` to the LLM, which sees the error on the next loop turn and can revise. Tests in `tests/test_fetch_guard.py`.
 
+#### Side-effect idempotency (branches / commits / MRs)
+
+When a worker dies mid-run (network blip, OOM, redeploy) the orchestrator restarts it. Without idempotency, the second run would create a *second* branch, a *second* MR, and possibly push a duplicate commit — every restart bleeds noise into the project's history. The provider layer guarantees no duplicate side-effects across restarts:
+
+**Deterministic branch naming.** `auto/bf/{bug_id}-{base_commit[:8]}` — same bug, same base commit → same branch name. If the user's main branch advances, the dedup key changes, and a fresh branch is born. That's the right semantic, not a bug.
+
+**Three-state push** (`commit_status`):
+
+| Remote state | Action | `commit_status` |
+|---|---|---|
+| Branch absent on origin | regular push | `success` |
+| Remote tree == local tree (same content already there) | no push, no-op | `reused` |
+| Remote is ancestor of local (we'd fast-forward) | regular push | `success` |
+| Diverged history (stale fix on remote ≠ our fix) | force-push (overwrite) | `updated` |
+
+Equality is computed at the *git tree* level (`commit^{tree}`), so commit metadata differences (timestamp, author) don't trip the `reused` path. Divergence is detected via `git merge-base --is-ancestor`, not fragile `HEAD~` arithmetic.
+
+**MR lookup-then-create** (`review_status`):
+
+| Existing MR for branch | Action | `review_status` |
+|---|---|---|
+| open | return existing | `reused` |
+| merged | return existing, signal R10 short-circuit | `already_merged` |
+| closed | open new MR (closed = previous attempt rejected) | `opened` |
+| none | open new MR | `opened` |
+| 409 from POST (concurrent worker raced us) | re-lookup, return existing | `reused` |
+
+**R10 short-circuit.** When `create_fix_branch` discovers the deterministic branch already has a *merged* MR — i.e., the fix has already shipped — the graph routes directly to `END` with `outcome="already_fixed"`. `apply_change_and_test`, `commit_change`, and `create_mr` are all skipped. (LLM work earlier in the run is still spent; eliminating that is the next-tier optimization with a checkpoint store, tracked separately.)
+
+**Trade-off — the MR is a moving target.** Force-push (`updated`) rewrites the source branch when a previous run left a wrong fix. Reviewers' line-anchored comments on the open MR will become outdated when this happens. This matches the convention used by Renovate, Dependabot, and similar auto-fix bots, and is the right semantic for "the bot's current best attempt."
+
+**Out of scope: field-level correctness.** This implementation guarantees *no duplicate side-effects*, not *field-level correctness of pre-existing MRs*. If an existing MR has a stale title/body/labels because the bot's template changed between runs, we leave them alone — repairing those belongs to a separate "MR refresh" feature, not idempotency.
+
+Tests: `tests/test_idempotency.py` covers ten rainy-case scenarios (R1–R10) with a real local git "origin" and an in-memory MR registry — including the 409 race, force-push failure, and tree-equality reuse.
+
 #### Run budget (`bf_worker/services/budget.py`)
 
 A per-`agent.fix()` hard cap on three dimensions, so a hijacked or pathological run cannot rack up unbounded cost:

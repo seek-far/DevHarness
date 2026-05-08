@@ -77,5 +77,9 @@ class BugFixState(TypedDict, total=False):
     ci_status: str | None           # "success" | "failed" | "timeout"
     wait_ci_result_retries: int     # transient retries for provider.wait_ci_result in wait_ci_result (0 = first-attempt return; status=timeout still records 0)
 
+    # ── idempotency / R10 short-circuit ───────────────────────────────────────
+    already_fixed: bool             # True when create_fix_branch saw a merged MR for the deterministic branch
+                                    # — apply/commit/MR are skipped; review_status is set to "already_merged"
+
     # ── generic error slot ────────────────────────────────────────────────────
     error: str | None

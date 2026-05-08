@@ -60,7 +60,10 @@ class RunRecord:
     schema_version:    str
     agent_name:        str
     bug_id:            str
-    outcome:           str            # "fixed" | "no_fix" | "error"
+    outcome:           str            # "fixed" | "no_fix" | "error" | "already_fixed"
+                                      # "already_fixed" is the R10 short-circuit:
+                                      # the deterministic fix branch already had a merged MR,
+                                      # so the run skipped apply/commit/MR.
     timestamp:         str            # ISO8601 UTC, e.g. 20260427T161524Z
     error:             str | None     = None
     iterations:        int            = 0
@@ -82,13 +85,13 @@ class RunRecord:
     react_step_count:     int | None     = None
     react_confidence:     str | None     = None
     fix_branch_name:      str | None     = None
-    branch_create_status: str | None     = None
+    branch_create_status: str | None     = None  # "success" (created) | "reused" (already existed)
     base_branch:          str | None     = None
     base_commit:          str | None     = None
-    commit_status:        str | None     = None
+    commit_status:        str | None     = None  # "success" | "reused" (same tree on remote, no push) | "updated" (force-pushed over stale fix) | "no_changes"
     commit_branch:        str | None     = None
     commit_hash:          str | None     = None
-    review_status:        str | None     = None
+    review_status:        str | None     = None  # "opened" | "reused" (existing open MR) | "already_merged" (R10) | "local_commit" (LocalGit) | "report_generated" (no-git)
     review_url:           str | None     = None
     review_id:            int | str | None = None
     review_iid:           int | str | None = None

@@ -198,112 +198,276 @@ class Repo:
 
 
     # ---------------------------
-    # 🧩 3️⃣ Create fix branch
+    # 🧩 3️⃣ Create fix branch (idempotent)
     # ---------------------------
+    def deterministic_branch_name(self, bug_id: str, base_commit: str) -> str:
+        """Stable branch name keyed on (bug_id, base_commit).
+
+        Two runs of the same bug against the same base produce the same name —
+        which lets create_fix_branch reuse an existing branch instead of
+        forking a new one. If the user moves the base (rebase / new merge),
+        the name changes and a fresh branch is born; that's the right
+        semantic, not a bug.
+        """
+        return f"auto/bf/{bug_id}-{base_commit[:8]}"
+
     def create_fix_branch(self, bug_id=None, base_branch="main"):
-        """Create and push a fix branch."""
+        """Create or reuse a fix branch. Idempotent.
+
+        Returns:
+          status="success" — branch newly created locally
+          status="reused"  — local branch already pointed at base_commit
+        Caller should look up an existing remote MR separately (see
+        find_open_or_merged_mr_for_branch) for full R10 short-circuit.
+        """
         self.ensure_repo_ready()
         self.ensure_base_branch(base_branch)
 
-        #ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        #branch_name = f"fix/{issue_id}_{ts}" if issue_id else f"fix/auto_{ts}"
-        now = datetime.datetime.now()
-        branch_id = now.strftime("%H_%M_%S") + f"_{now.microsecond // 100000}"
-        branch_name = f"auto/bug_{bug_id}-patch_{branch_id}"
+        base_commit = self.run("rev-parse", "HEAD")
+        branch_name = self.deterministic_branch_name(bug_id, base_commit)
 
-        self.run("checkout", "-b", branch_name)
-        # self.run("push", "-u", "origin", branch_name)
-        current_commit = self.run("rev-parse", "HEAD")
+        # Local branch existence: `git rev-parse --verify <branch>` exits 0 if it exists.
+        local_exists = self._branch_exists_local(branch_name)
+        if local_exists:
+            self.run("checkout", branch_name)
+            status = "reused"
+            logger.debug(f"♻️ Reused local branch {branch_name} on base {base_commit[:8]}")
+        else:
+            self.run("checkout", "-b", branch_name)
+            status = "success"
+            logger.debug(f"✅ Created branch {branch_name} from {base_branch}")
 
-        logger.debug(f"✅ Created branch {branch_name} from {base_branch}")
         return {
-            "status": "success",
+            "status":      status,
             "branch_name": branch_name,
             "base_branch": base_branch,
-            "commit": current_commit,
+            "commit":      base_commit,
+        }
+
+    def _branch_exists_local(self, branch_name: str) -> bool:
+        try:
+            self.run("rev-parse", "--verify", "--quiet", f"refs/heads/{branch_name}")
+            return True
+        except RuntimeError:
+            return False
+
+    def _branch_exists_remote(self, branch_name: str) -> bool:
+        """Cheap remote check via REST: GET /projects/:id/repository/branches/:branch."""
+        m = re.match(r"(https?://[^/]+)/(.+?)(?:\.git)?$", self.repo_url)
+        if not m:
+            return False
+        host, project_path = m.groups()
+        project_id = requests.utils.quote(project_path, safe="")
+        url = f"{host}/api/v4/projects/{project_id}/repository/branches/{requests.utils.quote(branch_name, safe='')}"
+        headers = {"PRIVATE-TOKEN": self.token} if self.token else {}
+        try:
+            if cfg.env != "local_ts_host__aca":
+                resp = requests.get(url, headers=headers, timeout=15)
+            else:
+                proxies = {
+                    "http":  f"socks5://{cfg.socks5_proxy}",
+                    "https": f"socks5://{cfg.socks5_proxy}",
+                }
+                resp = requests.get(url, headers=headers, proxies=proxies, timeout=15)
+        except requests.RequestException as exc:
+            logger.warning("branch-exists check failed for %s: %s", branch_name, exc)
+            # On lookup failure we assume "not exists" so the caller falls into
+            # the regular create/push path; GitLab will surface a real error
+            # (e.g. 409 on create) which is the authoritative answer.
+            return False
+        return resp.status_code == 200
+
+    def find_open_or_merged_mr_for_branch(self, branch_name: str) -> dict | None:
+        """Return the most recent open/merged MR for source_branch, if any.
+
+        Open MRs win over merged MRs (we want the live review thread).
+        Returns None when no MR exists or the lookup itself failed (treat as
+        "no MR" — caller will create one and any duplicate would surface as
+        an explicit conflict from GitLab).
+        """
+        m = re.match(r"(https?://[^/]+)/(.+?)(?:\.git)?$", self.repo_url)
+        if not m:
+            return None
+        host, project_path = m.groups()
+        project_id = requests.utils.quote(project_path, safe="")
+        url = f"{host}/api/v4/projects/{project_id}/merge_requests"
+        params = {"source_branch": branch_name, "state": "all", "order_by": "created_at"}
+        headers = {"PRIVATE-TOKEN": self.token} if self.token else {}
+        try:
+            if cfg.env != "local_ts_host__aca":
+                resp = requests.get(url, headers=headers, params=params, timeout=15)
+            else:
+                proxies = {
+                    "http":  f"socks5://{cfg.socks5_proxy}",
+                    "https": f"socks5://{cfg.socks5_proxy}",
+                }
+                resp = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=15)
+        except requests.RequestException as exc:
+            logger.warning("MR lookup failed for %s: %s", branch_name, exc)
+            return None
+        if resp.status_code != 200:
+            return None
+        items = resp.json() or []
+        # Prefer open, then merged, then any (closed) — newest-first per GitLab default.
+        for state_filter in ("opened", "merged"):
+            for mr in items:
+                if mr.get("state") == state_filter:
+                    return self._mr_to_dict(mr)
+        return None
+
+    @staticmethod
+    def _mr_to_dict(mr: dict) -> dict:
+        return {
+            "id":    mr.get("id"),
+            "iid":   mr.get("iid"),
+            "title": mr.get("title"),
+            "url":   mr.get("web_url"),
+            "state": mr.get("state"),  # opened | merged | closed | locked
         }
 
     def commit_changes(self, message: str = "ci_agent: auto commit changes"):
-        """Commit and push local changes."""
-        # 1️⃣ Ensure we are inside a git repository
+        """Commit and push local changes. Three-state idempotent push.
+
+        After staging+committing locally, compare the resulting tree to what
+        already exists on the remote branch:
+          - remote branch absent          → push, status="success"
+          - remote head == base_commit    → push, status="success"  (first fix on this branch)
+          - remote tree == our tree       → no push, status="reused" (same content already there)
+          - remote tree != our tree       → force-push, status="updated" (overwrite stale fix)
+
+        Equality is computed at the *tree* level (`commit^{tree}`), so commit
+        SHAs differing for metadata reasons (timestamps, author) don't trip
+        the "reused" path.
+        """
         if not (self.repo_path / ".git").exists():
             raise RuntimeError(f"Not a git repo: {self.repo_path}")
 
-        # 2️⃣ Check if there are any changes
         status = self.run("status", "--porcelain")
         if not status:
             logger.debug("ℹ️ No changes to commit.")
             return {"status": "no_changes"}
 
-        logger.debug("🪶 Changes detected, committing...")
-
-        # 3️⃣ Stage changes
+        logger.debug("🪶 Changes detected, committing locally...")
         self.run("add", "-A")
-
-        # 4️⃣ Create commit
         try:
             self.run("commit", "-m", message)
         except RuntimeError as e:
             if "nothing to commit" in str(e):
-                logger.debug("ℹ️ Nothing to commit.")
                 return {"status": "no_changes"}
             raise
 
-        # 5️⃣ Get current branch name
-        branch = self.run("rev-parse", "--abbrev-ref", "HEAD")
+        branch       = self.run("rev-parse", "--abbrev-ref", "HEAD")
+        local_commit = self.run("rev-parse", "HEAD")
+        local_tree   = self.run("rev-parse", "HEAD^{tree}")
 
-        # 6️⃣ Push
-        logger.debug(f"🚀 Pushing to origin/{branch} ...")
-        self.run("push", "origin", branch)
+        push_status = self._idempotent_push(branch, local_tree)
 
-        # 7️⃣ Return info
-        commit_hash = self.run("rev-parse", "HEAD")
-        logger.debug(f"✅ Pushed commit {commit_hash[:8]} to {branch}")
+        logger.debug(f"✅ Push status={push_status} commit={local_commit[:8]} branch={branch}")
         return {
-            "status": "success",
+            "status": push_status,
             "branch": branch,
-            "commit": commit_hash,
+            "commit": local_commit,
         }
+
+    def _idempotent_push(self, branch: str, local_tree: str) -> str:
+        """Push local HEAD to origin/<branch> with content-aware idempotency.
+
+        Decision tree:
+          remote branch absent                                       → push, "success"
+          remote tree == local tree                                  → no-op, "reused"
+          remote is ancestor of local (we'd fast-forward — R4 case)  → push, "success"
+          diverged                                                   → force-push, "updated"
+
+        Equality is at the *tree* level so commit metadata (timestamp/author)
+        differences don't trip the reused path. Divergence detection uses
+        `merge-base --is-ancestor` rather than fragile HEAD~ arithmetic, so it
+        works whether the branch has 1 or many commits ahead of base.
+        """
+        if not self._branch_exists_remote(branch):
+            self.run("push", "origin", branch)
+            return "success"
+
+        try:
+            self.run("fetch", "origin", branch)
+        except RuntimeError as exc:
+            logger.warning("fetch failed for %s: %s — falling back to force-push", branch, exc)
+            self.run("push", "--force-with-lease", "origin", branch)
+            return "updated"
+
+        # tree equality short-circuits everything else
+        try:
+            remote_tree = self.run("rev-parse", f"origin/{branch}^{{tree}}")
+        except RuntimeError:
+            remote_tree = ""
+        if remote_tree and remote_tree == local_tree:
+            return "reused"
+
+        # is_ancestor returns exit-code 0 when origin/branch is an ancestor of HEAD,
+        # 1 otherwise. Repo.run raises on non-zero exit — we use that as the signal.
+        try:
+            self.run("merge-base", "--is-ancestor", f"origin/{branch}", "HEAD")
+            is_fast_forward = True
+        except RuntimeError:
+            is_fast_forward = False
+
+        if is_fast_forward:
+            self.run("push", "origin", branch)
+            return "success"
+
+        # Diverged: stale fix on remote that we want to overwrite.
+        self.run("push", "--force-with-lease", "origin", branch)
+        return "updated"
 
     def gitlab_create_merge_request(self, source_branch: str, target_branch: str = "main", title: str = None, description: str = None):
         """
-        Create a merge request in GitLab using REST API.
+        Create-or-reuse a merge request in GitLab. Idempotent.
 
-        Args:
-            repo_url: e.g. "http://localhost:8080/root/order_be.git"
-            source_branch: feature or fix branch name
-            target_branch: usually 'main'
-            title: merge request title
-            description: optional description text
+        Lookup → reuse rules:
+          existing open MR     → return it, status="reused"
+          existing merged MR   → return it, status="already_merged"
+                                 (the fix is already on target_branch; caller
+                                  must NOT push more commits to source_branch)
+          existing closed MR   → open a new MR, status="opened"
+                                 (closed = previous attempt was rejected; we
+                                  need a fresh review thread)
+          no existing MR       → open new, status="opened"
+
+        Field-level correctness of the existing MR (title/body/labels) is
+        explicitly OUT OF SCOPE — fixing stale fields belongs to a separate
+        "MR refresh" feature, not idempotency. See README idempotency section.
         """
         if not self.token:
             raise EnvironmentError("❌ Missing GITLAB_TOKEN environment variable")
 
-        # 1️⃣ Extract GitLab host and project path from repo_url
-        # e.g. http://localhost:8080/root/order_be.git → host=http://localhost:8080, path=root/order_be
-        #m = re.match(r"(https?://[^/]+)/(.+)\.git", self.repo_url)
+        # 1) Lookup first — cheaper than POST→409.
+        existing = self.find_open_or_merged_mr_for_branch(source_branch)
+        if existing is not None:
+            if existing["state"] == "opened":
+                logger.debug(f"♻️ Reused open MR !{existing['iid']} → {existing['url']}")
+                return {**existing, "status": "reused"}
+            if existing["state"] == "merged":
+                logger.debug(f"⏭️ MR already merged !{existing['iid']} → {existing['url']}")
+                return {**existing, "status": "already_merged"}
+            # Closed (or any other terminal state): fall through to create new.
+
+        # 2) Create.
         m = re.match(r"(https?://[^/]+)/(.+?)(?:\.git)?$", self.repo_url)
         if not m:
             raise ValueError(f"Invalid repo_url format: {self.repo_url}")
-
         host, project_path = m.groups()
-
-        # GitLab API requires project_id = URL-encoded path (e.g. root%2Forder_be)
         project_id = project_path.replace("/", "%2F")
-
         api_url = f"{host}/api/v4/projects/{project_id}/merge_requests"
-
         headers = {"PRIVATE-TOKEN": self.token}
         data = {
             "source_branch": source_branch,
             "target_branch": target_branch,
             "title": title or f"Merge {source_branch} into {target_branch}",
             "description": description or "Auto-created by ci_agent",
-            "remove_source_branch": True,  # optional: delete source branch after merge
+            "remove_source_branch": True,
         }
 
         logger.debug(f"📤 Creating Merge Request at {api_url}")
-        if cfg.env != "local_ts_host__aca" :
+        if cfg.env != "local_ts_host__aca":
             resp = requests.post(api_url, headers=headers, data=data)
         else:
             proxies = {
@@ -312,18 +476,21 @@ class Repo:
             }
             resp = requests.post(api_url, headers=headers, data=data, proxies=proxies)
 
+        # GitLab returns 409 when an open MR already exists for the same
+        # source/target. Race protection: re-do the lookup and reuse it.
+        if resp.status_code == 409:
+            logger.info("MR POST got 409 — racing with another worker; re-looking up")
+            again = self.find_open_or_merged_mr_for_branch(source_branch)
+            if again is not None and again["state"] == "opened":
+                return {**again, "status": "reused"}
+            raise RuntimeError(f"GitLab 409 but no MR found post-race: {resp.text}")
+
         if resp.status_code != 201:
             raise RuntimeError(f"GitLab API error {resp.status_code}: {resp.text}")
 
         mr = resp.json()
         logger.debug(f"✅ Merge Request created: !{mr['iid']} → {mr['web_url']}")
-        return {
-            "id": mr["id"],
-            "iid": mr["iid"],
-            "title": mr["title"],
-            "url": mr["web_url"],
-            "state": mr["state"],
-        }
+        return {**self._mr_to_dict(mr), "status": "opened"}
 
     def gitlab_fetch_file(
         self,
@@ -420,21 +587,24 @@ class GitLabProvider(SourceProvider, VCSProvider, ReviewProvider):
         return repo_path
 
     def create_fix_branch(self, bug_id: str, repo_path: Path) -> dict:
+        """Idempotent. Also probes for an existing open/merged MR on the
+        deterministic branch and returns it under `existing_mr` so the graph
+        can short-circuit (R10) when the fix is already merged."""
         repo = Repo(repo_path=str(repo_path), repo_url=self._project_web_url)
-        # ensure_repo_ready already called by the node; just do base branch + create
-        repo.ensure_base_branch()
-        now = datetime.datetime.now()
-        branch_id = now.strftime("%H_%M_%S") + f"_{now.microsecond // 100000}"
-        branch_name = f"auto/bug_{bug_id}-patch_{branch_id}"
-        repo.run("checkout", "-b", branch_name)
-        current_commit = repo.run("rev-parse", "HEAD")
-        logger.info("created branch %s", branch_name)
-        return {
-            "status": "success",
-            "branch_name": branch_name,
-            "base_branch": "main",
-            "commit": current_commit,
-        }
+        result = repo.create_fix_branch(bug_id=bug_id)
+
+        # R10 probe: if a remote branch already exists, look up its MR. Only
+        # a remote branch (not a local-only one) can have an MR attached, so
+        # this skips the lookup on the cheap "first run" path.
+        existing_mr = None
+        if repo._branch_exists_remote(result["branch_name"]):
+            existing_mr = repo.find_open_or_merged_mr_for_branch(result["branch_name"])
+        if existing_mr is not None:
+            result["existing_mr"] = existing_mr
+        logger.info("create_fix_branch: status=%s branch=%s existing_mr=%s",
+                    result["status"], result["branch_name"],
+                    existing_mr["state"] if existing_mr else None)
+        return result
 
     def commit_and_push(self, repo_path: Path, message: str) -> dict:
         repo = Repo(repo_path=str(repo_path), repo_url=self._project_web_url)

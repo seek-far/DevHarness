@@ -82,7 +82,15 @@ class LangGraphAgent(Agent):
         # Agent-boundary post-fix hook (e.g. write outcome to memory store)
         final_state = hooks.run(HookName.AGENT_POST_FIX, dict(final_state))
 
-        outcome: Outcome = "error" if final_state.get("error") else "fixed"
+        if final_state.get("error"):
+            outcome: Outcome = "error"
+        elif final_state.get("already_fixed"):
+            # R10: a merged MR was found for the deterministic fix branch.
+            # No commit / MR was made this run — distinguishing this from
+            # "fixed" lets evaluation tooling spot the short-circuit.
+            outcome = "already_fixed"
+        else:
+            outcome = "fixed"
 
         output = FixOutput(
             outcome=outcome,

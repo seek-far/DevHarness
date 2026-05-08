@@ -168,34 +168,90 @@ class LocalGitProvider(SourceProvider, VCSProvider, ReviewProvider):
         return self._source_dir
 
     def create_fix_branch(self, bug_id: str, repo_path: Path) -> dict:
-        now = datetime.datetime.now()
-        branch_id = now.strftime("%H_%M_%S") + f"_{now.microsecond // 100000}"
-        branch_name = f"auto/bug_{bug_id}-patch_{branch_id}"
+        """Idempotent: deterministic branch name keyed on (bug_id, base_commit).
 
-        self._git("checkout", "-b", branch_name, cwd=str(repo_path))
-        current_commit = self._git("rev-parse", "HEAD", cwd=str(repo_path))
+        No remote concept here — there's no MR to look up, so `existing_mr` is
+        never returned and R10 short-circuit doesn't apply to LocalGit.
+        """
+        base_commit = self._git("rev-parse", "HEAD", cwd=str(repo_path))
+        branch_name = f"auto/bf/{bug_id}-{base_commit[:8]}"
 
-        logger.info("created local fix branch: %s", branch_name)
+        local_exists = self._branch_exists(branch_name, repo_path)
+        if local_exists:
+            self._git("checkout", branch_name, cwd=str(repo_path))
+            status = "reused"
+            logger.info("reused local fix branch: %s", branch_name)
+        else:
+            self._git("checkout", "-b", branch_name, cwd=str(repo_path))
+            status = "success"
+            logger.info("created local fix branch: %s", branch_name)
+
         return {
-            "status": "success",
+            "status":      status,
             "branch_name": branch_name,
             "base_branch": "HEAD",
-            "commit": current_commit,
+            "commit":      base_commit,
         }
 
+    def _branch_exists(self, branch_name: str, repo_path: Path) -> bool:
+        try:
+            self._git("rev-parse", "--verify", "--quiet",
+                      f"refs/heads/{branch_name}", cwd=str(repo_path))
+            return True
+        except RuntimeError:
+            return False
+
     def commit_and_push(self, repo_path: Path, message: str) -> dict:
+        """Three-state commit (no push — local mode).
+
+          no working-tree changes        → status="no_changes"
+          fresh commit on top of base    → status="success"
+          existing commit, same tree     → status="reused" (no-op, no new commit)
+          existing commit, diff tree     → status="updated" (reset + commit afresh)
+
+        For LocalGit we have no remote, so "force-push" maps to
+        `git reset --hard` followed by re-commit. This keeps the branch's HEAD
+        pointing at exactly one commit ahead of base — same invariant the
+        GitLab path enforces via force-push.
+        """
         status = self._git("status", "--porcelain", cwd=str(repo_path))
-        if not status:
-            logger.info("no changes to commit")
+        branch = self._git("rev-parse", "--abbrev-ref", "HEAD", cwd=str(repo_path))
+
+        # Identify base = first parent of branch HEAD if there's a commit ahead, else HEAD itself.
+        try:
+            base_commit = self._git("rev-parse", f"{branch}~1", cwd=str(repo_path))
+            has_prior_commit = True
+        except RuntimeError:
+            base_commit = self._git("rev-parse", "HEAD", cwd=str(repo_path))
+            has_prior_commit = False
+
+        if has_prior_commit and not status:
+            # No new working-tree changes; check whether the existing commit's
+            # tree already matches what we'd have committed (R5b / R6 reuse).
+            current_tree = self._git("rev-parse", "HEAD^{tree}", cwd=str(repo_path))
+            commit_hash = self._git("rev-parse", "HEAD", cwd=str(repo_path))
+            logger.info("existing commit on branch, no working-tree changes — reused")
+            return {"status": "reused", "branch": branch, "commit": commit_hash,
+                    "tree": current_tree}
+
+        if not status and not has_prior_commit:
             return {"status": "no_changes"}
+
+        if has_prior_commit:
+            # Existing commit + new working-tree changes → reset to base, then commit fresh.
+            # This is the local-mode analog of force-push.
+            logger.info("stale commit on branch, resetting to base %s and re-committing",
+                        base_commit[:8])
+            self._git("reset", "--hard", base_commit, cwd=str(repo_path))
 
         self._git("add", "-A", cwd=str(repo_path))
         self._git("commit", "-m", message, cwd=str(repo_path))
         commit_hash = self._git("rev-parse", "HEAD", cwd=str(repo_path))
-        branch = self._git("rev-parse", "--abbrev-ref", "HEAD", cwd=str(repo_path))
 
-        logger.info("committed locally: %s on %s (no push)", commit_hash[:8], branch)
-        return {"status": "success", "branch": branch, "commit": commit_hash}
+        push_status = "updated" if has_prior_commit else "success"
+        logger.info("committed locally: %s on %s (status=%s)",
+                    commit_hash[:8], branch, push_status)
+        return {"status": push_status, "branch": branch, "commit": commit_hash}
 
     # ── ReviewProvider ────────────────────────────────────────────────────────
 
