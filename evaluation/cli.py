@@ -7,6 +7,7 @@ Subcommands:
     run    [--agents ...]      sweep agents × fixtures, write evaluation/runs/<run_id>/
     report <run_id>            aggregate metrics for a sweep
     promote <journal_entry>    promote a journal run into a fixture (curation step)
+    journal-prune              delete journal entries older than a retention window
 
 Run with: python -m evaluation.cli <subcommand> [args...]
 """
@@ -25,6 +26,7 @@ sys.path.insert(0, str(_ROOT / "bf_worker"))
 sys.path.insert(0, str(_ROOT))
 
 from evaluation.fixture import discover
+from evaluation.journal_prune import parse_duration, run_prune
 from evaluation.promote import populate_source_from_git
 
 # NOTE: evaluation.runner pulls in the agent stack (langgraph + LLM client +
@@ -159,6 +161,54 @@ def cmd_promote(args) -> int:
     return 0
 
 
+def cmd_journal_prune(args) -> int:
+    """Delete journal entries older than `--older-than`.
+
+    Defaults to dry-run; pass `--apply` to actually delete. Only directories
+    matching the journal naming pattern are considered — other files at the
+    top level are never touched.
+    """
+    journal_dir = Path(args.journal_dir) if args.journal_dir else _JOURNAL_ROOT
+    try:
+        older_than = parse_duration(args.older_than)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    summary = run_prune(
+        journal_dir,
+        older_than=older_than,
+        keep_flagged=args.keep_flagged,
+        apply=args.apply,
+    )
+
+    mode = "DRY-RUN" if summary["dry_run"] else "APPLY"
+    n_del = len(summary["candidates"])
+    n_keep = len(summary["kept"])
+
+    # Bucket the keep-reasons so cron output is scannable.
+    reason_counts: dict[str, int] = {}
+    for _, why in summary["kept"]:
+        reason_counts[why] = reason_counts.get(why, 0) + 1
+    reason_str = ", ".join(f"{k}={v}" for k, v in sorted(reason_counts.items()))
+
+    print(f"[{mode}] journal_dir={summary['journal_dir']}  "
+          f"older_than={args.older_than}  keep_flagged={args.keep_flagged}")
+    print(f"  candidates: {n_del}   kept: {n_keep}"
+          + (f"  ({reason_str})" if reason_str else ""))
+
+    if summary["dry_run"]:
+        for name in summary["candidates"]:
+            print(f"  would delete: {name}")
+    else:
+        for name in summary["deleted"]:
+            print(f"  deleted: {name}")
+        for name, err in summary["errors"]:
+            print(f"  error: {name}: {err}", file=sys.stderr)
+
+    return 1 if summary["errors"] else 0
+
+
 # ── argparse wiring ──────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -193,6 +243,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional git repo URL/path to reconstruct source from when the journal has no repo URL",
     )
     pr.set_defaults(fn=cmd_promote)
+
+    jp = sub.add_parser(
+        "journal-prune",
+        help="delete journal entries older than a retention window",
+    )
+    jp.add_argument("--older-than", required=True,
+                    help="retention window, e.g. '30d', '12h', '90m', '60s'")
+    jp.add_argument("--keep-flagged", action="store_true",
+                    help="never delete entries that have a FLAGGED marker")
+    jp.add_argument("--journal-dir", default=None,
+                    help=f"override journal directory (default: {_JOURNAL_ROOT})")
+    jp.add_argument("--apply", action="store_true",
+                    help="actually delete; without this flag the command is dry-run")
+    jp.set_defaults(fn=cmd_journal_prune)
 
     return p
 

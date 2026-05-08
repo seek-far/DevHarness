@@ -214,9 +214,28 @@ python -m evaluation.cli promote <journal_entry> --source-repo /path/or/url
 python -m evaluation.cli run --config configs/baseline.json          # sweep configured agents × fixtures
 python -m evaluation.cli run --fixture-id F01-off-by-one F03-missing-key  # subset
 python -m evaluation.cli report <run_id>                             # comparison table
+python -m evaluation.cli journal-prune --older-than 30d --keep-flagged  # dry-run retention
 ```
 
 The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source. `list-journal --flagged` is only a review filter; `promote` can promote flagged or unflagged entries. Promotion tries to populate `fixtures/<id>/source/` automatically from the journal's buggy git commit (`base_commit`, falling back to `branch_create_result.commit`) and repo metadata (`project_web_url`, `source_repo_path`, or explicit `--source-repo`). If repo/commit information is missing, promotion still creates the fixture and leaves `source/` for manual population.
+
+#### Journal retention (`bench journal-prune`)
+
+The journal grows one directory per running-mode run and never self-cleans — by design, since interesting candidates are only known after the fact. For long-lived deployments, run `journal-prune` from cron / a systemd timer / a k8s `CronJob` to bound disk use:
+
+```bash
+python -m evaluation.cli journal-prune --older-than 30d --keep-flagged           # dry-run, prints the plan
+python -m evaluation.cli journal-prune --older-than 30d --keep-flagged --apply   # actually delete
+python -m evaluation.cli journal-prune --older-than 7d  --apply                  # delete every entry >7d, FLAGGED included
+```
+
+Behavior:
+
+- **Dry-run is the default.** `--apply` is required to delete. The dry-run output lists what would go.
+- **Time is read from the directory name**, not file mtime — `cp`/`rsync`/edits won't perturb retention.
+- **Only directories matching the journal naming pattern (`YYYYMMDDTHHMMSSZ_…`) are eligible.** Hand-placed files / foreign directories are never touched.
+- `--keep-flagged` protects entries with a `FLAGGED` marker (failed runs, no-fix, high-iteration runs) so promotion candidates aren't lost.
+- `--journal-dir <path>` overrides the default `evaluation/journal/` (matches the runtime `BF_JOURNAL_DIR` override).
 
 #### Bundled fixtures
 
