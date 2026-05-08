@@ -18,13 +18,19 @@ from __future__ import annotations
 import logging
 
 from graph.state import BugFixState
+from typing import Optional
+from langchain_core.runnables import RunnableConfig
+from services.runtime_context import get_provider
 from services.transient_retry import with_transient_retry
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_CI_TIMEOUT_S = 300
 
-def wait_ci_result(state: BugFixState, timeout: int = 300) -> BugFixState:
-    provider = state["provider"]
+
+def wait_ci_result(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
+    provider = get_provider(config)
+    timeout = _DEFAULT_CI_TIMEOUT_S
     logger.info("waiting for CI result (timeout=%ds) bug=%s", timeout, state["bug_id"])
 
     status, retries = with_transient_retry(

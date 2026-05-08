@@ -393,13 +393,43 @@ Equality is computed at the *git tree* level (`commit^{tree}`), so commit metada
 | none | open new MR | `opened` |
 | 409 from POST (concurrent worker raced us) | re-lookup, return existing | `reused` |
 
-**R10 short-circuit.** When `create_fix_branch` discovers the deterministic branch already has a *merged* MR — i.e., the fix has already shipped — the graph routes directly to `END` with `outcome="already_fixed"`. `apply_change_and_test`, `commit_change`, and `create_mr` are all skipped. (LLM work earlier in the run is still spent; eliminating that is the next-tier optimization with a checkpoint store, tracked separately.)
+**R10 short-circuit (early).** A `precheck_already_fixed` node runs *before* `fetch_trace` — a single REST call (no clone, no LLM) that asks GitLab whether any merged MR exists for `auto/bf/{bug_id}-*`. If yes, the graph routes directly to `END` with `outcome="already_fixed"`. This saves the entire fetch + parse + ReAct loop's LLM cost when the fix has already shipped. A second (defensive) check inside `create_fix_branch` exact-matches the deterministic branch and short-circuits the same way if the precheck missed it (e.g. the merge happened mid-run).
 
 **Trade-off — the MR is a moving target.** Force-push (`updated`) rewrites the source branch when a previous run left a wrong fix. Reviewers' line-anchored comments on the open MR will become outdated when this happens. This matches the convention used by Renovate, Dependabot, and similar auto-fix bots, and is the right semantic for "the bot's current best attempt."
 
 **Out of scope: field-level correctness.** This implementation guarantees *no duplicate side-effects*, not *field-level correctness of pre-existing MRs*. If an existing MR has a stale title/body/labels because the bot's template changed between runs, we leave them alone — repairing those belongs to a separate "MR refresh" feature, not idempotency.
 
 Tests: `tests/test_idempotency.py` covers ten rainy-case scenarios (R1–R10) with a real local git "origin" and an in-memory MR registry — including the 409 race, force-push failure, and tree-equality reuse.
+
+#### Resume after crash (LangGraph checkpointing)
+
+When a worker dies mid-run (HealthMonitor expiry, OOM, deploy), the orchestrator restarts it. Without persistence, the new process re-runs `precheck → fetch_trace → react_loop` and **re-spends the LLM tokens** that were already burned. The checkpointer fixes that: every node-boundary state update is persisted; restart resumes at the next un-completed node.
+
+**Architectural relationship to idempotency** (they're complementary, not redundant):
+
+- **Idempotency layer** (provider) = *correctness*. Even if checkpoint is wrong / lost / a node ran but checkpoint write failed, the next run's side-effects are caught by the dedup logic and don't produce duplicates.
+- **Checkpointer** = *cost*. It skips the work already done, but trusts itself to do so. Without idempotency, a wrong checkpoint could cause data corruption.
+
+You want both. Checkpointer says "skip"; idempotency says "if you don't skip, do it safely."
+
+**Backend selection** (env var `BF_CHECKPOINT_BACKEND`):
+
+| Value | Use case | Storage |
+|---|---|---|
+| `sqlite` (default) | Single-host deployments, standalone mode | File at `~/.sdlcma/checkpoints/state.sqlite` (override via `BF_CHECKPOINT_PATH`) |
+| `redis` | Multi-host / centralized inspection | The same Redis the orchestrator uses (`redis_url`); needs `langgraph-checkpoint-redis` installed |
+| `memory` | Tests only | In-process; lost on exit |
+| `none` | Opt-out | No checkpoint; pre-checkpoint behavior |
+
+**Thread ID**: keyed on `bug_id` (same as the idempotency dedup key). Same bug across restarts shares one thread → resume works. Different bugs are independent.
+
+**Schema evolution**: when you change the graph (add/rename nodes, change `BugFixState` shape), old checkpoints become stale. Current behavior is fail-fast: an invalid resume raises rather than silently skipping. Operationally, bumping a graph node should pair with `rm ~/.sdlcma/checkpoints/state.sqlite` (or the equivalent for Redis).
+
+**State vs config**: `provider`, `hooks`, and `budget` are NOT in checkpointed state — they live in `config["configurable"]` (`bf_worker/services/runtime_context.py`). LangGraph passes config to nodes but doesn't persist it. This is what allows resume across processes: a fresh process supplies a fresh provider, and the checkpoint state has no stale connection handles to deserialize.
+
+**Trade-off — wallclock budget on resume**: when a run resumes, the `RunBudget` is fresh (its `wallclock_s` resets). The justification is that resume only happens after a non-graceful exit; the spent wallclock from the killed process is unrecoverable. If you need stricter accounting, override `BF_CHECKPOINT_BACKEND=none` or add a checkpoint-aware budget.
+
+Tests: `tests/test_checkpointer.py` covers the resume-from-crash semantics, thread isolation, and the property that provider isn't persisted across runs.
 
 #### Run budget (`bf_worker/services/budget.py`)
 

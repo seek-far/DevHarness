@@ -33,9 +33,12 @@ from settings import worker_cfg as cfg
 
 from enhancements.hooks import HookName
 from graph.state import BugFixState
+from typing import Optional
+from langchain_core.runnables import RunnableConfig
 from services.budget import extract_token_usage
 from services.prompt_guard import sanitize_untrusted
 from services.react_tools import TOOLS_SCHEMA, execute_tool
+from services.runtime_context import get_budget, get_hooks, get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -241,10 +244,13 @@ def _build_initial_messages(state: BugFixState) -> list:
 
 # ── main node ─────────────────────────────────────────────────────────────────
 
-def react_loop(state: BugFixState) -> BugFixState:
+def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
     logger.info("react_loop: start  bug_id=%s", state.get("bug_id"))
 
-    hooks = state.get("hooks")
+    provider = get_provider(config)
+    hooks = get_hooks(config)
+    budget = get_budget(config)
+
     if hooks is not None:
         update = hooks.run(HookName.PRE_REACT_LOOP, state)
         if update is not state:
@@ -257,7 +263,6 @@ def react_loop(state: BugFixState) -> BugFixState:
     confidence    = None
     reasoning     = None
     tool_call_log: list[dict] = []
-    budget        = state.get("budget")
 
     while step_count < MAX_STEPS:
 
@@ -340,7 +345,7 @@ def react_loop(state: BugFixState) -> BugFixState:
             break
 
         # ── handle fetch tools ────────────────────────────────────────────────
-        tool_result = execute_tool(tool_name, tool_input, state["provider"])
+        tool_result = execute_tool(tool_name, tool_input, provider)
 
         # Append tool result as a ToolMessage (LangChain format)
         messages.append(ToolMessage(

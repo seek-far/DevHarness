@@ -40,6 +40,11 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: None)
 
 
+def _cfg(provider):
+    """Provider now lives in runtime config, not state."""
+    return {"configurable": {"provider": provider}}
+
+
 def _make_queue(exceptions, success_value):
     """Return a callable that raises each queued exception once, then returns
     success_value on every subsequent call."""
@@ -66,7 +71,7 @@ def test_fetch_source_file_one_transient_then_success():
         [requests.exceptions.ConnectionError("blip")],
         content="def x(): return 42\n",
     )
-    out = fetch_source_file({"provider": provider, "suspect_file_path": "x.py"})
+    out = fetch_source_file({"suspect_file_path": "x.py"}, _cfg(provider))
     assert out["source_fetch_failed"] is False
     assert out["source_file_content"] == "def x(): return 42\n"
     assert out["fetch_source_file_retries"] == 1
@@ -79,7 +84,7 @@ def test_fetch_source_file_falls_back_after_exhausted_transients():
     provider = _FetchFileProvider(
         [requests.exceptions.Timeout("t")] * n,
     )
-    out = fetch_source_file({"provider": provider, "suspect_file_path": "y.py"})
+    out = fetch_source_file({"suspect_file_path": "y.py"}, _cfg(provider))
     assert out["source_fetch_failed"] is True
     assert out["source_file_content"] == ""
     # Best-effort count: when the failure is transient and the budget is
@@ -92,7 +97,7 @@ def test_fetch_source_file_permanent_falls_back_with_zero_retries():
     # falls through to source_fetch_failed mode (this is the path that lets
     # the LLM cope with a parser hint that points at a moved file).
     provider = _FetchFileProvider([FileNotFoundError("/no/such")])
-    out = fetch_source_file({"provider": provider, "suspect_file_path": "z.py"})
+    out = fetch_source_file({"suspect_file_path": "z.py"}, _cfg(provider))
     assert out["source_fetch_failed"] is True
     assert out["fetch_source_file_retries"] == 0
 
@@ -114,7 +119,7 @@ class _CommitProvider:
 
 def test_commit_change_one_transient_then_success():
     provider = _CommitProvider([requests.exceptions.ConnectionError("blip")])
-    out = commit_change({"provider": provider, "bug_id": "B"})
+    out = commit_change({"bug_id": "B"}, _cfg(provider))
     assert out["commit_status"] == "success"
     assert out["commit_hash"] == "deadbeef"
     assert out["commit_change_retries"] == 1
@@ -122,7 +127,7 @@ def test_commit_change_one_transient_then_success():
 
 def test_commit_change_zero_retries_on_clean_call():
     provider = _CommitProvider([])
-    out = commit_change({"provider": provider, "bug_id": "B"})
+    out = commit_change({"bug_id": "B"}, _cfg(provider))
     assert out["commit_change_retries"] == 0
 
 
@@ -132,7 +137,7 @@ def test_commit_change_permanent_propagates():
     err.response.status_code = 403
     provider = _CommitProvider([err])
     with pytest.raises(requests.exceptions.HTTPError):
-        commit_change({"provider": provider, "bug_id": "B"})
+        commit_change({"bug_id": "B"}, _cfg(provider))
 
 
 def test_commit_change_exhausted_transients_propagate():
@@ -141,7 +146,7 @@ def test_commit_change_exhausted_transients_propagate():
         [requests.exceptions.Timeout("t")] * n,
     )
     with pytest.raises(requests.exceptions.Timeout):
-        commit_change({"provider": provider, "bug_id": "B"})
+        commit_change({"bug_id": "B"}, _cfg(provider))
 
 
 # ── wait_ci_result ───────────────────────────────────────────────────────────
@@ -155,7 +160,7 @@ class _CIProvider:
 def test_wait_ci_result_one_transient_then_success():
     import redis.exceptions as redis_exc
     provider = _CIProvider([redis_exc.ConnectionError("disc")])
-    out = wait_ci_result({"provider": provider, "bug_id": "B"})
+    out = wait_ci_result({"bug_id": "B"}, _cfg(provider))
     assert out["ci_status"] == "success"
     assert out["wait_ci_result_retries"] == 1
 
@@ -165,7 +170,7 @@ def test_wait_ci_result_timeout_is_not_retried():
     # arrived" — that's a real result, not a transient. Must be passed
     # through with retries=0, no sleep, no extra call.
     provider = _CIProvider([], status=None)
-    out = wait_ci_result({"provider": provider, "bug_id": "B"})
+    out = wait_ci_result({"bug_id": "B"}, _cfg(provider))
     assert out["ci_status"] == "timeout"
     assert out["wait_ci_result_retries"] == 0
 
@@ -174,7 +179,7 @@ def test_wait_ci_result_permanent_propagates():
     import redis.exceptions as redis_exc
     provider = _CIProvider([redis_exc.ResponseError("WRONGTYPE")])
     with pytest.raises(redis_exc.ResponseError):
-        wait_ci_result({"provider": provider, "bug_id": "B"})
+        wait_ci_result({"bug_id": "B"}, _cfg(provider))
 
 
 # ── create_mr ────────────────────────────────────────────────────────────────
@@ -198,7 +203,7 @@ def test_create_mr_one_transient_then_success():
     err.response = requests.Response()
     err.response.status_code = 503
     provider = _ReviewProvider([err])
-    out = create_mr({"provider": provider, "bug_id": "B"})
+    out = create_mr({"bug_id": "B"}, _cfg(provider))
     assert out["review_status"] == "opened"
     assert out["review_url"].endswith("/mr/20")
     assert out["create_mr_retries"] == 1
@@ -210,10 +215,10 @@ def test_create_mr_permanent_propagates():
     err.response.status_code = 404
     provider = _ReviewProvider([err])
     with pytest.raises(requests.exceptions.HTTPError):
-        create_mr({"provider": provider, "bug_id": "B"})
+        create_mr({"bug_id": "B"}, _cfg(provider))
 
 
 def test_create_mr_zero_retries_on_clean_call():
     provider = _ReviewProvider([])
-    out = create_mr({"provider": provider, "bug_id": "B"})
+    out = create_mr({"bug_id": "B"}, _cfg(provider))
     assert out["create_mr_retries"] == 0

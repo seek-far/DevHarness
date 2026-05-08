@@ -7,14 +7,14 @@ from typing import Any, TypedDict
 
 
 class BugFixState(TypedDict, total=False):
-    # ── provider (injected at startup) ────────────────────────────────────────
-    provider: Any  # SourceProvider & VCSProvider & ReviewProvider instance
-
-    # ── hook registry (LangGraphAgent-only; absent for other agents) ──────────
-    hooks: Any     # enhancements.hooks.HookRegistry — present only when enhancements are wired
-
-    # ── per-run cost budget (services.budget.RunBudget) ───────────────────────
-    budget: Any    # checked before each LLM call; debited from usage_metadata
+    # NOTE: `provider`, `hooks`, and `budget` are intentionally NOT in state.
+    # They live in `config["configurable"]` (see services.runtime_context),
+    # because (a) state is checkpoint-serialized at every node boundary and
+    # those objects don't pickle, and (b) LangGraph's idiom is "state flows
+    # between nodes, config is run-scoped context". Nodes access them via
+    # `get_provider(config)` / `get_hooks(config)` / `get_budget(config)`.
+    # The journal sees a `budget` key (dict snapshot) injected by
+    # LangGraphAgent.fix() *after* the graph completes, for telemetry only.
 
     # ── inputs ────────────────────────────────────────────────────────────────
     bug_id: str

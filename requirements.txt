@@ -5,6 +5,7 @@ pydantic-settings
 httpx
 requests[socks]
 langgraph>=0.2
+langgraph-checkpoint-sqlite>=2.0
 langchain-core>=0.2
 openai>=1.0
 redis[hiredis]>=5.0

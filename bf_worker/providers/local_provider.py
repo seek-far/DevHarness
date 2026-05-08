@@ -265,6 +265,10 @@ class LocalGitProvider(SourceProvider, VCSProvider, ReviewProvider):
         logger.info("local mode: skipping CI wait, using local test result")
         return "success"
 
+    def find_merged_mr_by_bug_prefix(self, bug_id: str) -> dict | None:
+        # Local mode has no MR concept — R10 short-circuit not applicable.
+        return None
+
 
 # ── LocalNoGitProvider ────────────────────────────────────────────────────────
 
@@ -425,3 +429,7 @@ class LocalNoGitProvider(SourceProvider, VCSProvider, ReviewProvider):
         # In no-git mode, tests were already run locally.
         logger.info("no-git mode: skipping CI wait, using local test result")
         return "success"
+
+    def find_merged_mr_by_bug_prefix(self, bug_id: str) -> dict | None:
+        # No-git mode has no MR concept — R10 short-circuit not applicable.
+        return None

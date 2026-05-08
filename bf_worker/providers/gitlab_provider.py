@@ -277,6 +277,56 @@ class Repo:
             return False
         return resp.status_code == 200
 
+    def find_merged_mr_by_bug_prefix(self, bug_id: str) -> dict | None:
+        """Loose-match probe: any merged MR whose source_branch starts with
+        `auto/bf/{bug_id}-` (the deterministic-name prefix).
+
+        Used by precheck_already_fixed to short-circuit *before* clone+LLM.
+        Bug_id is anchored with a trailing dash so `BUG-1` doesn't match
+        `BUG-12`. Returns None on lookup failure (caller treats as "no MR
+        found, run normally") — better to do the work than to spuriously
+        skip a real bug.
+
+        Semantically: if any earlier fix attempt for this bug merged at
+        any base, the fix is in main now and a fresh run on a newer base
+        should still short-circuit. That's the correct R10 semantic.
+        """
+        m = re.match(r"(https?://[^/]+)/(.+?)(?:\.git)?$", self.repo_url)
+        if not m:
+            return None
+        host, project_path = m.groups()
+        project_id = requests.utils.quote(project_path, safe="")
+        url = f"{host}/api/v4/projects/{project_id}/merge_requests"
+        params = {
+            "source_branch_search": f"auto/bf/{bug_id}-",
+            "state": "merged",
+            "order_by": "updated_at",
+        }
+        headers = {"PRIVATE-TOKEN": self.token} if self.token else {}
+        try:
+            if cfg.env != "local_ts_host__aca":
+                resp = requests.get(url, headers=headers, params=params, timeout=15)
+            else:
+                proxies = {
+                    "http":  f"socks5://{cfg.socks5_proxy}",
+                    "https": f"socks5://{cfg.socks5_proxy}",
+                }
+                resp = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=15)
+        except requests.RequestException as exc:
+            logger.warning("merged-MR prefix probe failed for %s: %s", bug_id, exc)
+            return None
+        if resp.status_code != 200:
+            return None
+        items = resp.json() or []
+        prefix = f"auto/bf/{bug_id}-"
+        for mr in items:
+            sb = mr.get("source_branch") or ""
+            # Defense: GitLab's source_branch_search is substring; we want
+            # prefix + dash anchoring to prevent BUG-1 matching BUG-12.
+            if sb.startswith(prefix) and mr.get("state") == "merged":
+                return self._mr_to_dict(mr)
+        return None
+
     def find_open_or_merged_mr_for_branch(self, branch_name: str) -> dict | None:
         """Return the most recent open/merged MR for source_branch, if any.
 
@@ -625,6 +675,22 @@ class GitLabProvider(SourceProvider, VCSProvider, ReviewProvider):
 
     def wait_ci_result(self, bug_id: str, timeout: int = 300) -> str | None:
         return asyncio.run(_gitlab_wait_ci(bug_id, timeout))
+
+    # ── precheck (R10 early short-circuit) ────────────────────────────────────
+
+    def find_merged_mr_by_bug_prefix(self, bug_id: str) -> dict | None:
+        """Cheap pre-clone probe: any merged MR for `auto/bf/{bug_id}-*`?
+
+        No working tree needed — pure REST call. Used by precheck_already_fixed
+        before fetch_trace. Returns the MR dict or None.
+
+        We instantiate Repo with a placeholder repo_path because the
+        constructor only sets attributes (env-specific URL rewrites and
+        token) — no clone happens until ensure_repo_ready().
+        """
+        repo = Repo(repo_path=str(Path(cfg.repo_base_path) / "_precheck"),
+                    repo_url=self._project_web_url)
+        return repo.find_merged_mr_by_bug_prefix(bug_id)
 
 
 # ── CI wait helper (moved from nodes/wait_ci_result.py) ──────────────────────

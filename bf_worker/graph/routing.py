@@ -16,6 +16,18 @@ MAX_FIX_RETRIES = 2      # test-failure → re-ask retries. On each retry the
                          # rather than blindly resample.
 
 
+# ── after precheck_already_fixed ───────────────────────────────────────────────
+
+def route_after_precheck(state: BugFixState) -> str:
+    """
+    R10 early short-circuit — if a merged MR was already found, exit.
+    Otherwise proceed into the normal pipeline.
+    """
+    if state.get("already_fixed"):
+        return "already_fixed"
+    return "fetch_trace"
+
+
 # ── after parse_trace ──────────────────────────────────────────────────────────
 
 def route_after_parse_trace(state: BugFixState) -> str:

@@ -55,12 +55,14 @@ class _ProviderOk:
         return self._content
 
 
+def _cfg(provider):
+    return {"configurable": {"provider": provider}}
+
+
 def test_fetch_source_file_catches_filenotfound():
-    state = {
-        "provider": _ProviderRaises(FileNotFoundError("no such file")),
-        "suspect_file_path": "made/up/path.py",
-    }
-    out = fetch_source_file(state)
+    provider = _ProviderRaises(FileNotFoundError("no such file"))
+    out = fetch_source_file(
+        {"suspect_file_path": "made/up/path.py"}, _cfg(provider))
     assert out["source_fetch_failed"] is True
     assert out["source_file_content"] == ""
     # Must not raise — that was the whole point of this change.
@@ -69,20 +71,16 @@ def test_fetch_source_file_catches_filenotfound():
 def test_fetch_source_file_catches_unicode_decode_error():
     # Some providers raise UnicodeDecodeError on binary or wrong-encoding files.
     exc = UnicodeDecodeError("utf-8", b"\xff\xff", 0, 1, "invalid start byte")
-    state = {
-        "provider": _ProviderRaises(exc),
-        "suspect_file_path": "weird/file.py",
-    }
-    out = fetch_source_file(state)
+    provider = _ProviderRaises(exc)
+    out = fetch_source_file(
+        {"suspect_file_path": "weird/file.py"}, _cfg(provider))
     assert out["source_fetch_failed"] is True
 
 
 def test_fetch_source_file_success_marks_flag_false():
-    state = {
-        "provider": _ProviderOk("def f(): return 1\n"),
-        "suspect_file_path": "src/m.py",
-    }
-    out = fetch_source_file(state)
+    provider = _ProviderOk("def f(): return 1\n")
+    out = fetch_source_file(
+        {"suspect_file_path": "src/m.py"}, _cfg(provider))
     assert out["source_fetch_failed"] is False
     assert out["source_file_content"] == "def f(): return 1\n"
 
@@ -167,8 +165,8 @@ def test_apply_rejects_missing_file_path_when_source_fetch_failed():
         def ensure_repo_ready(self, bug_id):
             return Path("/tmp/does_not_matter_rejected_first")
 
+    provider = _StubProvider()
     state = {
-        "provider": _StubProvider(),
         "bug_id": "BUG-1",
         # Parser produced this path but fetch failed — falling back to suspect
         # would write to a path we know is unreachable.
@@ -181,7 +179,7 @@ def test_apply_rejects_missing_file_path_when_source_fetch_failed():
         },
         "fix_retry_count": 0,
     }
-    out = apply_change_and_test(state)
+    out = apply_change_and_test(state, _cfg(provider))
     assert out["test_passed"] is False
     # Error should reference the unreachable suspect (telemetry signal),
     # not just say "missing file_path".
@@ -233,8 +231,8 @@ def test_apply_accepts_explicit_file_path_even_when_source_fetch_failed(tmp_path
     target = tmp_path / "real_target.py"
     target.write_text("# placeholder\n")
 
+    provider = _StubProvider()
     state = {
-        "provider": _StubProvider(),
         "bug_id": "BUG-OK",
         "suspect_file_path": "models/user.py",
         "source_fetch_failed": True,
@@ -249,7 +247,7 @@ def test_apply_accepts_explicit_file_path_even_when_source_fetch_failed(tmp_path
         },
         "fix_retry_count": 0,
     }
-    out = mod.apply_change_and_test(state)
+    out = mod.apply_change_and_test(state, _cfg(provider))
     # Must not have been rejected.
     assert out.get("apply_error") is None
     assert out.get("test_passed") is True

@@ -16,12 +16,15 @@ import subprocess
 from pathlib import Path
 
 from graph.state import BugFixState
+from typing import Optional
+from langchain_core.runnables import RunnableConfig
+from services.runtime_context import get_provider
 
 logger = logging.getLogger(__name__)
 
 
-def create_fix_branch(state: BugFixState) -> BugFixState:
-    provider = state["provider"]
+def create_fix_branch(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
+    provider = get_provider(config)
     bug_id = state["bug_id"]
     existing_branch = state.get("fix_branch_name")
 

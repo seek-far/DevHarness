@@ -21,6 +21,9 @@ from __future__ import annotations
 import logging
 
 from graph.state import BugFixState
+from typing import Optional
+from langchain_core.runnables import RunnableConfig
+from services.runtime_context import get_provider
 from services.transient_retry import (
     DEFAULT_RETRY_DELAYS,
     classify_transient,
@@ -30,8 +33,8 @@ from services.transient_retry import (
 logger = logging.getLogger(__name__)
 
 
-def fetch_source_file(state: BugFixState) -> BugFixState:
-    provider = state["provider"]
+def fetch_source_file(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
+    provider = get_provider(config)
     path = state["suspect_file_path"]
     try:
         content, retries = with_transient_retry(

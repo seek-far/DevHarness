@@ -70,11 +70,12 @@ def _http_error(status_code: int, retry_after=None):
 
 
 def _state(provider):
-    return {
-        "provider": provider,
-        "project_id": "p",
-        "job_id": "j",
-    }
+    # Provider is now passed via runtime config, not state.
+    return {"project_id": "p", "job_id": "j"}
+
+
+def _cfg(provider):
+    return {"configurable": {"provider": provider}}
 
 
 # ── _parse_retry_after unit ──────────────────────────────────────────────────
@@ -187,7 +188,7 @@ def test_classify_unrelated_exception_permanent():
 def test_first_attempt_success_zero_retries(monkeypatch):
     monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: None)
     provider = _Provider(exceptions=[], success_value="hello trace")
-    out = fetch_trace(_state(provider))
+    out = fetch_trace(_state(provider), _cfg(provider))
     assert out["trace"] == "hello trace"
     assert out["fetch_trace_retries"] == 0
     assert provider.call_count == 1
@@ -200,7 +201,7 @@ def test_one_transient_then_success(monkeypatch):
         exceptions=[requests.exceptions.ConnectionError("blip")],
         success_value="ok",
     )
-    out = fetch_trace(_state(provider))
+    out = fetch_trace(_state(provider), _cfg(provider))
     assert out["fetch_trace_retries"] == 1
     assert provider.call_count == 2
     assert sleeps == [_RETRY_DELAYS[0]]
@@ -210,7 +211,7 @@ def test_retry_after_overrides_default_backoff(monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[_http_error(429, retry_after="4")])
-    out = fetch_trace(_state(provider))
+    out = fetch_trace(_state(provider), _cfg(provider))
     assert out["fetch_trace_retries"] == 1
     # Server said 4s — we slept 4s, not the default 1s.
     assert sleeps == [4.0]
@@ -225,7 +226,7 @@ def test_two_transients_then_success(monkeypatch):
             _http_error(503),
         ],
     )
-    out = fetch_trace(_state(provider))
+    out = fetch_trace(_state(provider), _cfg(provider))
     assert out["fetch_trace_retries"] == 2
     assert provider.call_count == 3
     assert sleeps == [_RETRY_DELAYS[0], _RETRY_DELAYS[1]]
@@ -242,7 +243,7 @@ def test_retries_exhausted_propagates(monkeypatch):
         ],
     )
     with pytest.raises(requests.exceptions.ConnectionError):
-        fetch_trace(_state(provider))
+        fetch_trace(_state(provider), _cfg(provider))
     assert provider.call_count == 3  # 1 initial + 2 retries
 
 
@@ -251,7 +252,7 @@ def test_permanent_error_propagates_immediately(monkeypatch):
     monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[_http_error(404)])
     with pytest.raises(requests.exceptions.HTTPError):
-        fetch_trace(_state(provider))
+        fetch_trace(_state(provider), _cfg(provider))
     # No sleep should ever happen — we propagate on the first attempt.
     assert provider.call_count == 1
     assert sleeps == []
@@ -262,7 +263,7 @@ def test_filenotfound_propagates_immediately(monkeypatch):
     monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[FileNotFoundError("/no/such")])
     with pytest.raises(FileNotFoundError):
-        fetch_trace(_state(provider))
+        fetch_trace(_state(provider), _cfg(provider))
     assert provider.call_count == 1
     assert sleeps == []
 
@@ -270,7 +271,7 @@ def test_filenotfound_propagates_immediately(monkeypatch):
 def test_oserror_transient_then_success(monkeypatch):
     monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: None)
     provider = _Provider(exceptions=[OSError(errno.EAGAIN, "try again")])
-    out = fetch_trace(_state(provider))
+    out = fetch_trace(_state(provider), _cfg(provider))
     assert out["fetch_trace_retries"] == 1
 
 
@@ -279,6 +280,6 @@ def test_unrelated_exception_propagates_immediately(monkeypatch):
     monkeypatch.setattr("services.transient_retry.time.sleep", lambda s: sleeps.append(s))
     provider = _Provider(exceptions=[ValueError("bad arg")])
     with pytest.raises(ValueError):
-        fetch_trace(_state(provider))
+        fetch_trace(_state(provider), _cfg(provider))
     assert provider.call_count == 1
     assert sleeps == []

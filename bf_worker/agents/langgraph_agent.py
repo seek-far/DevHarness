@@ -21,6 +21,7 @@ from enhancements.hooks import HookName, HookRegistry
 from graph.builder import build_graph
 from graph.state import BugFixState
 from services.budget import RunBudget
+from services.checkpointer import build_checkpointer
 from settings import worker_cfg as cfg
 
 logger = logging.getLogger(__name__)
@@ -34,28 +35,59 @@ class LangGraphAgent(Agent):
         journal: Any = None,
         enhancements: Iterable[tuple[str, Any]] | None = None,
         agent_config: dict | None = None,
+        checkpointer: Any = "auto",
     ):
-        # Compile the graph once per agent instance (callable many times via .fix()).
-        self._graph = build_graph()
+        """
+        checkpointer:
+          "auto"  — pick a backend per BF_CHECKPOINT_BACKEND (default: sqlite)
+          None    — disable checkpointing (graph compiled without one)
+          object  — use the given checkpointer instance (tests inject MemorySaver)
+        """
         self._journal = journal
         self._enhancements = list(enhancements or [])
         self._agent_config = agent_config or {}
+
+        if checkpointer == "auto":
+            self._checkpointer = build_checkpointer()
+        else:
+            self._checkpointer = checkpointer
+
+        # Compile the graph once per agent instance. The checkpointer is
+        # baked in here; thread_id is supplied per-run via config.
+        self._graph = build_graph(checkpointer=self._checkpointer)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def fix(self, bug_input: BugInput) -> FixOutput:
         hooks = self._build_hooks()
+        budget = RunBudget()
 
+        # State carries only serializable, flow-between-nodes data. Provider,
+        # hooks, and budget are run-scoped runtime context — they go into
+        # `config["configurable"]` instead, which LangGraph passes to nodes
+        # but does NOT include in checkpoints. This is what makes resume
+        # possible: the checkpoint stores state, the new process supplies
+        # config on resume.
         initial_state: BugFixState = {
-            "provider":        bug_input.provider,
-            "hooks":           hooks,
-            "budget":          RunBudget(),
             "bug_id":          bug_input.bug_id,
             "project_id":      bug_input.project_id,
             "project_web_url": bug_input.project_web_url,
             "job_id":          bug_input.job_id,
             "llm_retry_count": 0,
             "fix_retry_count": 0,
+        }
+        runtime_config = {
+            "configurable": {
+                "provider":  bug_input.provider,
+                "hooks":     hooks,
+                "budget":    budget,
+                # thread_id keys the checkpoint store. bug_id is the natural
+                # choice — same bug across restarts shares a thread, which is
+                # how resume works. Same key as the idempotency layer's dedup
+                # key (intentional: "this bug fix" is one logical unit
+                # everywhere in the system).
+                "thread_id": bug_input.bug_id,
+            }
         }
 
         # Agent-boundary pre-fix hook (e.g. memory lookup injects prior fix patterns)
@@ -66,7 +98,7 @@ class LangGraphAgent(Agent):
 
         t0 = time.monotonic()
         try:
-            final_state = self._graph.invoke(initial_state)
+            final_state = self._graph.invoke(initial_state, config=runtime_config)
         except Exception as exc:
             elapsed = time.monotonic() - t0
             logger.exception("agent=%s bug=%s crashed", self.name, bug_input.bug_id)
@@ -79,8 +111,13 @@ class LangGraphAgent(Agent):
             return output
         elapsed = time.monotonic() - t0
 
+        # Snapshot the budget into final_state so journal/RunRecord can record
+        # actual spend without keeping a non-serializable RunBudget in state.
+        final_state = dict(final_state)
+        final_state["budget"] = budget.to_dict()
+
         # Agent-boundary post-fix hook (e.g. write outcome to memory store)
-        final_state = hooks.run(HookName.AGENT_POST_FIX, dict(final_state))
+        final_state = hooks.run(HookName.AGENT_POST_FIX, final_state)
 
         if final_state.get("error"):
             outcome: Outcome = "error"
@@ -141,12 +178,13 @@ class LangGraphAgent(Agent):
 
 
 def _sanitize_state(state: dict | None) -> dict | None:
-    """Drop non-serializable items (provider object, hook registry); convert
-    the RunBudget into a serialisable snapshot for the journal."""
+    """Pass-through for the journal/FixOutput.
+
+    Provider/hooks no longer live in state (they're in config["configurable"]),
+    and budget is already a dict snapshot at this point — see fix() above.
+    Kept as a function rather than removed so callers don't change shape; if
+    we add a non-serializable state field in the future, sanitize it here.
+    """
     if state is None:
         return None
-    out = {k: v for k, v in state.items() if k not in ("provider", "hooks")}
-    budget = out.get("budget")
-    if budget is not None and hasattr(budget, "to_dict"):
-        out["budget"] = budget.to_dict()
-    return out
+    return dict(state)

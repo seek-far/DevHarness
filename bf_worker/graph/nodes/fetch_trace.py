@@ -12,13 +12,16 @@ from __future__ import annotations
 import logging
 
 from graph.state import BugFixState
+from typing import Optional
+from langchain_core.runnables import RunnableConfig
+from services.runtime_context import get_provider
 from services.transient_retry import with_transient_retry
 
 logger = logging.getLogger(__name__)
 
 
-def fetch_trace(state: BugFixState) -> BugFixState:
-    provider = state["provider"]
+def fetch_trace(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
+    provider = get_provider(config)
     project_id = state.get("project_id", "")
     job_id = state.get("job_id", "")
 

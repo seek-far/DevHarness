@@ -14,14 +14,17 @@ import sys
 from pathlib import Path
 
 from graph.state import BugFixState
+from typing import Optional
+from langchain_core.runnables import RunnableConfig
 from services.apply_patch import apply_change_infos
 from services.patch_guard import PatchScopeError, validate_patch_scope
+from services.runtime_context import get_provider
 
 logger = logging.getLogger(__name__)
 
 
-def apply_change_and_test(state: BugFixState) -> BugFixState:
-    provider = state["provider"]
+def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
+    provider = get_provider(config)
     bug_id = state["bug_id"]
 
     # Resolve repo path — provider.ensure_repo_ready was already called in

@@ -168,8 +168,8 @@ def test_apply_rejects_missing_file_path_when_no_suspect():
         def ensure_repo_ready(self, bug_id):
             return Path("/tmp/does_not_matter_rejected_first")
 
+    provider = _StubProvider()
     state = {
-        "provider": _StubProvider(),
         "bug_id": "BUG-1",
         "suspect_file_path": "",                    # fallback mode
         "llm_result": {
@@ -180,7 +180,7 @@ def test_apply_rejects_missing_file_path_when_no_suspect():
         },
         "fix_retry_count": 0,
     }
-    out = apply_change_and_test(state)
+    out = apply_change_and_test(state, {"configurable": {"provider": provider}})
     assert out["test_passed"] is False
     assert "missing required `file_path`" in out["apply_error"]
     assert out["fix_retry_count"] == 1
