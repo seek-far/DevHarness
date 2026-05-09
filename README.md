@@ -307,9 +307,9 @@ fetch_trace ↺ → parse_trace → fetch_source_file ↺ → react_loop
                           └──(parser found no path)──────────┘
                              (skip fetch_source_file)
     → create_fix_branch → apply_change_and_test → commit_change ↺
-    → wait_ci_result ↺ → create_mr ↺ → END
-                                          ↓ (any failure)
-                                     handle_failure
+    → wait_ci_result ↺ → create_mr ↺ ─────────────→ END
+                                                     ↑
+      [any node failure above] ──→ handle_failure ───┘
 ```
 
 (↺ = the node wraps its provider call in the shared narrow transient-retry layer in `services/transient_retry.py` — up to 2 retries with `(1s, 2s)` backoff on known-transient classes, `Retry-After` honored on 429/5xx, permanent errors propagate immediately.)
