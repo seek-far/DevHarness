@@ -1,0 +1,74 @@
+# Stage 1a.1: Gateway deployment.
+#
+# Apply:   kubectl apply -f infra/kind/manifests/gateway.yaml
+# Smoke:   kubectl port-forward svc/gateway 8000:8000 -n sdlcma  (then curl)
+#
+# Notes:
+#   - imagePullPolicy IfNotPresent so we use the kind-loaded image instead of
+#     hitting docker.io (the tag `latest` defaults to Always, which would fail).
+#   - ENV=local_k8s makes GatewaySettings load gateway/gateway_local_k8s.env
+#     (REDIS_URL=redis://redis:6379/0, baked into the image at build time).
+#   - Probes are TCP-only because the app has no /healthz endpoint yet.
+#     TCP-ready means uvicorn is listening; it does NOT guarantee Redis is
+#     reachable (that connection is lazily made on first /webhook POST).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: sdlcma
+  labels:
+    app: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: dh-gateway:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENV
+              value: local_k8s
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: sdlcma
+  labels:
+    app: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: gateway
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http

@@ -1,0 +1,72 @@
+# Stage 1a.1: minimal Redis (ephemeral, no PVC) — purpose is to smoke-test
+# manifest mechanics, not durability. 1a.2 will add a PVC and ConfigMap.
+#
+# Apply:    kubectl apply -f infra/kind/manifests/redis.yaml
+# Delete:   kubectl delete -f infra/kind/manifests/redis.yaml
+# Inspect:  kubectl get all -n sdlcma
+#
+# DNS: any pod in namespace `sdlcma` reaches Redis at `redis:6379`;
+# from other namespaces use the FQDN `redis.sdlcma.svc.cluster.local`.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdlcma
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: sdlcma
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: sdlcma
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
