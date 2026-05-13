@@ -1,17 +1,40 @@
-# Stage 1a.1: minimal Redis (ephemeral, no PVC) — purpose is to smoke-test
-# manifest mechanics, not durability. 1a.2 will add a PVC and ConfigMap.
+# Stage 1a.2: Redis with persistence.
+#
+# Adds a PVC mounted at /data so AOF/RDB survives pod restarts. kind ships
+# with the `local-path-provisioner` (kube-system → local-path-storage ns) as
+# the default StorageClass `standard` — no explicit `storageClassName` needed.
 #
 # Apply:    kubectl apply -f infra/kind/manifests/redis.yaml
 # Delete:   kubectl delete -f infra/kind/manifests/redis.yaml
-# Inspect:  kubectl get all -n sdlcma
+#           (PVC delete cascades; the underlying host path under
+#            /var/local-path-provisioner/ on the kind node is reclaimed)
+# Inspect:  kubectl get pvc,pv -n sdlcma
 #
 # DNS: any pod in namespace `sdlcma` reaches Redis at `redis:6379`;
 # from other namespaces use the FQDN `redis.sdlcma.svc.cluster.local`.
+#
+# `--appendonly yes` turns on AOF; without it Redis still writes RDB
+# snapshots every 60s/10k-write but loses up to 60s on crash. AOF gives
+# closer-to-zero RPO at the cost of slightly larger /data.
 
 apiVersion: v1
 kind: Namespace
 metadata:
   name: sdlcma
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: sdlcma
+  labels:
+    app: redis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,7 +44,12 @@ metadata:
   labels:
     app: redis
 spec:
+  # Single replica: writing AOF concurrently from two pods would corrupt it.
+  # Real HA needs Redis Sentinel / Cluster — out of scope for 1a.
   replicas: 1
+  strategy:
+    # Avoid two pods racing for the same RWO PVC during rollout.
+    type: Recreate
   selector:
     matchLabels:
       app: redis
@@ -34,9 +62,13 @@ spec:
         - name: redis
           image: redis:7-alpine
           imagePullPolicy: IfNotPresent
+          args: ["redis-server", "--appendonly", "yes"]
           ports:
             - containerPort: 6379
               name: redis
+          volumeMounts:
+            - name: data
+              mountPath: /data
           readinessProbe:
             tcpSocket:
               port: 6379
@@ -54,6 +86,10 @@ spec:
             limits:
               cpu: 200m
               memory: 256Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: redis-data
 ---
 apiVersion: v1
 kind: Service

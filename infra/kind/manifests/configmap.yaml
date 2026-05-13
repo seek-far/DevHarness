@@ -1,0 +1,70 @@
+# Stage 1a.2: externalized non-secret configuration.
+#
+# Each ConfigMap is consumed via `envFrom: configMapRef` in the corresponding
+# Deployment. Because Pydantic BaseSettings reads process env vars at a HIGHER
+# priority than .env files, the values below override anything baked into the
+# image's `gateway/gateway_local_k8s.env` / `settings/{orchestrator,worker}_local_k8s.env`.
+#
+# To roll a config change (no rebuild required):
+#   kubectl apply -f infra/kind/manifests/configmap.yaml
+#   kubectl rollout restart deployment/gateway      -n sdlcma
+#   kubectl rollout restart deployment/orchestrator -n sdlcma
+#
+# Three separate ConfigMaps (instead of one shared) so each service can roll
+# independently and the failure blast radius is smaller.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: sdlcma
+  labels:
+    app: gateway
+data:
+  ENV: local_k8s
+  USE_REDIS: "True"
+  REDIS_URL: redis://redis:6379/0
+  GATEWAY_STREAM: gateway:stream
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: sdlcma
+  labels:
+    app: orchestrator
+data:
+  ENV: local_k8s
+  REDIS_URL: redis://redis:6379/0
+  GATEWAY_STREAM: gateway:stream
+  GATEWAY_CONSUMER_GROUP: orchestrator-group
+  GATEWAY_CONSUMER_NAME: orchestrator-0
+  WORKER_HEARTBEAT_INTERVAL: "10"
+  WORKER_HEARTBEAT_TTL: "30"
+  HEALTH_CHECK_INTERVAL: "20"
+  STREAM_BLOCK_MS: "1000"
+  STREAM_COUNT: "20"
+  WORKER_IMAGE: dh-bf-worker:latest
+---
+# Worker config is here for symmetry / future 1a.3 use. In 1a.2 workers are
+# still spawned as subprocesses of the orchestrator pod and INHERIT its env
+# (so they pick up orchestrator-config values directly). 1a.3 will mount this
+# CM onto k8s Job pods.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: worker-config
+  namespace: sdlcma
+  labels:
+    app: worker
+data:
+  ENV: local_k8s
+  REDIS_URL: redis://redis:6379/0
+  WORKER_HEARTBEAT_INTERVAL: "10"
+  WORKER_HEARTBEAT_TTL: "30"
+  STREAM_BLOCK_MS: "1000"
+  GITLAB_API: http://gitlab:80/api/v4
+  GITLAB_USERNAME: lishu2016
+  GITLAB_SSH_PORT: "22"
+  LLM_API_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+  LLM_MODEL: qwen3-coder-480b-a35b-instruct

@@ -46,6 +46,15 @@ def override(cfg, redis_client):
     _redis_client = redis_client
 
 
+@app.get("/healthz")
+async def healthz():
+    # Liveness/readiness signal: process is up and FastAPI is serving.
+    # Intentionally does NOT touch Redis — Redis is lazily connected on the
+    # first /webhook call. A "Redis ready" check would belong to a separate
+    # /readyz endpoint if we ever want to gate traffic on that.
+    return {"status": "ok"}
+
+
 @app.post("/webhook")
 async def webhook(payload: dict):
     cfg, redis_client = _get_state()

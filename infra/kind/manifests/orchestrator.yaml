@@ -1,0 +1,97 @@
+# Stage 1a.2: Orchestrator deployment.
+#
+# In 1a.2 the orchestrator still uses the subprocess WorkerSpawner (see
+# orchestrator/spawner.py: `WorkerSpawner._start_process` calls
+# `asyncio.create_subprocess_exec(sys.executable, WORKER_SCRIPT, ...)`).
+# Each spawned worker is a child PROCESS of the orchestrator container.
+# Implication: this container's image (dh-orchestrator) currently lacks the
+# bf_worker runtime deps (git + openssh + langchain bundle) so end-to-end
+# webhook→fix-MR won't actually complete in 1a.2 — we only verify the
+# orchestrator boots, joins the consumer group, and tails gateway:stream.
+# 1a.3 replaces subprocess spawn with k8s Job spawn using `dh-bf-worker`,
+# fixing this for real.
+#
+# envFrom layering:
+#   1. orchestrator-config — ENV, REDIS_URL, consumer-group settings, etc.
+#   2. worker-config       — LLM/GitLab knobs that subprocess workers inherit.
+#   3. sdlcma-secrets      — LLM_API_KEY, GITLAB_PRIVATE_TOKEN, SSH_PRIVATE_KEY.
+# Later sources override earlier ones if keys overlap; today they don't.
+#
+# Apply order (first time):
+#   kubectl create secret generic sdlcma-secrets -n sdlcma \
+#     --from-literal=LLM_API_KEY=... \
+#     --from-literal=GITLAB_PRIVATE_TOKEN=... \
+#     --from-file=SSH_PRIVATE_KEY=$HOME/.ssh/id_ed25519
+#   kubectl apply -f infra/kind/manifests/configmap.yaml
+#   kubectl apply -f infra/kind/manifests/orchestrator.yaml
+#
+# No Service: orchestrator has no inbound traffic — it tails Redis streams.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator-repos
+  namespace: sdlcma
+  labels:
+    app: orchestrator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # Holds per-bug clones under /tmp/dh_repo/<bug_id>/. 5Gi covers a few
+      # mid-size projects; bump in 1a.6 once we have real data.
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: sdlcma
+  labels:
+    app: orchestrator
+spec:
+  replicas: 1
+  strategy:
+    # The orchestrator owns an in-memory WorkerRegistry and a Redis consumer-
+    # group identity (orchestrator-0). Two pods running simultaneously would
+    # split the stream — Recreate guarantees clean handover.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      containers:
+        - name: orchestrator
+          image: dh-orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: orchestrator-config
+            - configMapRef:
+                name: worker-config
+            - secretRef:
+                name: sdlcma-secrets
+          volumeMounts:
+            - name: repos
+              mountPath: /tmp/dh_repo
+          # No HTTP / TCP listener to probe. A liveness exec checking the
+          # python process exists is doable but noisy (Python startup is
+          # slow under cold cache). 1a.6 will add a tiny /healthz HTTP
+          # endpoint or wrap the consumer loop with a readiness file.
+          # For now we rely on container exit → restartPolicy: Always.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: orchestrator-repos

@@ -1,16 +1,23 @@
-# Stage 1a.1: Gateway deployment.
+# Stage 1a.2: Gateway with externalized config and HTTP healthz probe.
 #
-# Apply:   kubectl apply -f infra/kind/manifests/gateway.yaml
-# Smoke:   kubectl port-forward svc/gateway 8000:8000 -n sdlcma  (then curl)
+# Changes from 1a.1:
+#   - Hardcoded `env:` block removed; envFrom: configMapRef: gateway-config.
+#   - TCP probe → httpGet /healthz (added to gateway.py in 1a.2).
+#   - imagePullPolicy stays IfNotPresent (image is loaded via `kind load`).
 #
-# Notes:
-#   - imagePullPolicy IfNotPresent so we use the kind-loaded image instead of
-#     hitting docker.io (the tag `latest` defaults to Always, which would fail).
-#   - ENV=local_k8s makes GatewaySettings load gateway/gateway_local_k8s.env
-#     (REDIS_URL=redis://redis:6379/0, baked into the image at build time).
-#   - Probes are TCP-only because the app has no /healthz endpoint yet.
-#     TCP-ready means uvicorn is listening; it does NOT guarantee Redis is
-#     reachable (that connection is lazily made on first /webhook POST).
+# Apply order (first time):
+#   kubectl apply -f infra/kind/manifests/configmap.yaml
+#   kubectl apply -f infra/kind/manifests/gateway.yaml
+#
+# Rolling a config change (no image rebuild needed):
+#   kubectl apply -f infra/kind/manifests/configmap.yaml
+#   kubectl rollout restart deployment/gateway -n sdlcma
+#
+# Smoke:
+#   kubectl port-forward svc/gateway 8000:8000 -n sdlcma
+#   curl http://localhost:8000/healthz                              # → {"status":"ok"}
+#   curl -X POST http://localhost:8000/webhook \
+#        -H 'Content-Type: application/json' -d '{"k":"v"}'
 
 apiVersion: apps/v1
 kind: Deployment
@@ -33,19 +40,21 @@ spec:
         - name: gateway
           image: dh-gateway:latest
           imagePullPolicy: IfNotPresent
-          env:
-            - name: ENV
-              value: local_k8s
+          envFrom:
+            - configMapRef:
+                name: gateway-config
           ports:
             - containerPort: 8000
               name: http
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: 8000
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /healthz
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 10
