@@ -9,7 +9,7 @@ Roadmap follows `1a.1 → 1a.6` (see top-level conversation / task list):
 - `1a.2` — full native manifests (Deployment / Service / ConfigMap / Secret / PVC) ✅
 - `1a.3` — spawner → k8s Job refactor ✅
 - `1a.4` — Helm chart ✅
-- `1a.5` — Terraform `helm_release` orchestration
+- `1a.5` — Terraform `helm_release` orchestration ✅
 - `1a.6` — eval on k8s + observability + finishing touches
 
 ## Toolchain versions (verified on WSL2 / Ubuntu 22.04.5 / kernel 6.6.114)
@@ -37,17 +37,25 @@ infra/
 │       ├── gateway.yaml            # Gateway Deployment + Service (envFrom configmap, /healthz)
 │       ├── rbac.yaml               # 1a.3: orchestrator SA + namespaced Role/RoleBinding
 │       └── orchestrator.yaml       # Orchestrator Deployment + PVC + serviceAccountName
-└── helm/sdlcma/                    # 1a.4: Helm chart — drop-in for the raw manifests
-    ├── Chart.yaml                  # version 0.1.0 / appVersion 1a.4
-    ├── values.yaml                 # all knobs; defaults reproduce raw manifests 1:1
-    ├── .helmignore
-    └── templates/
-        ├── _helpers.tpl            # sdlcma.labels / sdlcma.namespace
-        ├── namespace.yaml          # gated on .Values.namespace.create
-        ├── configmap.yaml          # range → 3 CMs, data via toYaml
-        ├── rbac.yaml               # SA + Role + RoleBinding (1a.3 carried over)
-        ├── redis.yaml gateway.yaml orchestrator.yaml
-        └── NOTES.txt
+├── helm/sdlcma/                    # 1a.4: Helm chart — drop-in for the raw manifests
+│   ├── Chart.yaml                  # version 0.1.0 / appVersion 1a.4
+│   ├── values.yaml                 # all knobs; defaults reproduce raw manifests 1:1
+│   ├── .helmignore
+│   └── templates/
+│       ├── _helpers.tpl            # sdlcma.labels / sdlcma.namespace
+│       ├── namespace.yaml          # gated on .Values.namespace.create
+│       ├── configmap.yaml          # range → 3 CMs, data via toYaml
+│       ├── rbac.yaml               # SA + Role + RoleBinding (1a.3 carried over)
+│       ├── redis.yaml gateway.yaml orchestrator.yaml
+│       └── NOTES.txt
+└── terraform/                      # 1a.5: Terraform orchestrates the chart
+    ├── versions.tf                 # provider pins (helm ~>2.17, kubernetes ~>2.33)
+    ├── providers.tf                # kubernetes + helm via kubeconfig/context
+    ├── variables.tf                # kube_context, image tags, helm_wait (default false)
+    ├── main.tf                     # kubernetes_namespace + helm_release(../helm/sdlcma)
+    ├── outputs.tf
+    ├── terraform.tfvars.example
+    └── .terraform.lock.hcl         # tracked (pinned providers); state is NOT
 ```
 
 The raw `kind/manifests/` set is intentionally **kept** alongside the chart:
@@ -286,3 +294,65 @@ pytest tests/test_helm_chart.py          # 11 cases; skips if helm not on PATH
 - **Editing a template but `helm template` shows no change**: you edited
   `values.yaml`'s commented defaults vs. the actual key, or didn't re-run;
   `helm template --debug` prints the merged values.
+
+## Stage 1a.5: Terraform orchestrates the chart
+
+`infra/terraform/` wraps the 1a.4 chart in a reproducible, idempotent
+lifecycle. Terraform owns **two** resources: `kubernetes_namespace.sdlcma`
+and `helm_release.sdlcma` (chart = `../helm/sdlcma`). The `sdlcma-secrets`
+Secret is deliberately **not** Terraform-managed — same out-of-band stance as
+1a.2–1a.4 (no credentials in tfstate). Consequence: the orchestrator pod is
+intentionally not Ready until you create the Secret, so `helm_wait` defaults
+to **false** (apply returns once Helm reports `deployed`; pods self-heal once
+the Secret exists).
+
+### Usage
+
+```bash
+cd infra/terraform
+terraform init                 # downloads pinned providers, writes the lock file
+terraform apply                # creates namespace + helm release
+
+# Create the out-of-band Secret (TF never manages it)
+kubectl create secret generic sdlcma-secrets -n sdlcma \
+  --from-literal=LLM_API_KEY="$LLM_API_KEY" \
+  --from-literal=GITLAB_PRIVATE_TOKEN="$GITLAB_PRIVATE_TOKEN" \
+  --from-file=SSH_PRIVATE_KEY=$HOME/.ssh/id_ed25519
+
+terraform plan                 # idempotent: "No changes" after a clean apply
+terraform destroy              # removes release + namespace (cascades the Secret)
+
+# Pin images instead of :latest (NOTES §9 follow-up)
+terraform apply -var gateway_image_tag=$(git rev-parse --short HEAD) \
+                -var orchestrator_image_tag=$(git rev-parse --short HEAD)
+```
+
+### Converting an existing Helm-managed deployment
+
+Terraform won't adopt a release/namespace it didn't create. Tear the old one
+down first (back up the out-of-band Secret, it gets cascaded):
+`helm uninstall sdlcma -n sdlcma` → `kubectl delete ns sdlcma` →
+`terraform apply` → recreate the Secret.
+
+### Validate without a cluster
+
+```bash
+terraform -chdir=infra/terraform fmt -check -recursive
+terraform -chdir=infra/terraform validate     # needs `init` (providers)
+pytest tests/test_terraform_config.py          # 7 cases; skips if terraform absent
+```
+
+### Common pitfalls (1a.5)
+
+- **`namespaces "sdlcma" already exists`** on apply: a non-Terraform ns is
+  present. Either import it (`terraform import kubernetes_namespace.sdlcma
+  sdlcma`) or delete it first.
+- **`apply` hangs**: you set `helm_wait=true` without the Secret present —
+  the orchestrator never becomes Ready. Create the Secret, or keep
+  `helm_wait=false`.
+- **Lock file churn**: commit `.terraform.lock.hcl`; never commit
+  `.terraform/` or `*.tfstate*` (gitignored). Re-run `terraform init` after
+  changing provider pins.
+- **Three deploy paths now exist** (raw `kubectl apply`, `helm install`,
+  `terraform apply`) — they target the same namespace and are mutually
+  exclusive. Pick one per cluster; don't interleave.

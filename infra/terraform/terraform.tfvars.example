@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (gitignored) and override as needed.
+# All values have working defaults for the local kind cluster.
+
+# kube_config_path = "~/.kube/config"
+# kube_context     = "kind-sdlcma-dev"
+# namespace        = "sdlcma"
+# release_name     = "sdlcma"
+
+# Pin images to a build instead of :latest (NOTES §9 follow-up):
+# gateway_image_tag      = "abc1234"
+# orchestrator_image_tag = "abc1234"
+
+# Block apply until everything is Ready (only safe if the Secret already
+# exists, since the orchestrator won't become Ready without it):
+# helm_wait    = true
+# helm_timeout = 600
