@@ -1,0 +1,14 @@
+apiVersion: v2
+name: sdlcma
+description: |
+  SDLCMA local k8s deployment (Stage 1a.4). Helm-packaged equivalent of the
+  raw manifests under infra/kind/manifests/: Redis + Gateway + Orchestrator,
+  the three ConfigMaps, and the orchestrator Job-manager RBAC. The
+  `sdlcma-secrets` Secret is intentionally NOT part of this chart — it is
+  created out of band (kubectl create secret) and only referenced by name,
+  preserving the 1a.2/1a.3 "no real credentials in the repo" stance.
+type: application
+# Chart version — bump on chart structure changes.
+version: 0.1.0
+# Tracks the app/stage this chart targets.
+appVersion: "1a.4"

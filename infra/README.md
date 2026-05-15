@@ -8,7 +8,7 @@ Roadmap follows `1a.1 → 1a.6` (see top-level conversation / task list):
 - `1a.1` — manual kind deploy ✅
 - `1a.2` — full native manifests (Deployment / Service / ConfigMap / Secret / PVC) ✅
 - `1a.3` — spawner → k8s Job refactor ✅
-- `1a.4` — Helm chart
+- `1a.4` — Helm chart ✅
 - `1a.5` — Terraform `helm_release` orchestration
 - `1a.6` — eval on k8s + observability + finishing touches
 
@@ -27,16 +27,34 @@ systemd is enabled in `/etc/wsl.conf` (`[boot] systemd=true`).
 ## Layout (through 1a.3)
 
 ```
-infra/kind/
-├── cluster.yaml                    # kind 2-node cluster (1a.1)
-└── manifests/
-    ├── configmap.yaml              # gateway-config / orchestrator-config / worker-config
-    ├── secrets.yaml.example        # template for sdlcma-secrets (real values via kubectl create)
-    ├── redis.yaml                  # Redis + PVC (1Gi, AOF on)
-    ├── gateway.yaml                # Gateway Deployment + Service (envFrom configmap, /healthz HTTP probe)
-    ├── rbac.yaml                   # 1a.3: orchestrator SA + namespaced Role/RoleBinding (Job mgmt)
-    └── orchestrator.yaml           # Orchestrator Deployment + PVC + serviceAccountName (k8s Job spawner)
+infra/
+├── kind/
+│   ├── cluster.yaml                # kind 2-node cluster (1a.1; host ports 18080/18443)
+│   └── manifests/                  # raw manifests — kept; `kubectl apply` path + parity baseline
+│       ├── configmap.yaml          # gateway-config / orchestrator-config / worker-config
+│       ├── secrets.yaml.example    # template for sdlcma-secrets (real values via kubectl create)
+│       ├── redis.yaml              # Namespace + Redis + PVC (1Gi, AOF on)
+│       ├── gateway.yaml            # Gateway Deployment + Service (envFrom configmap, /healthz)
+│       ├── rbac.yaml               # 1a.3: orchestrator SA + namespaced Role/RoleBinding
+│       └── orchestrator.yaml       # Orchestrator Deployment + PVC + serviceAccountName
+└── helm/sdlcma/                    # 1a.4: Helm chart — drop-in for the raw manifests
+    ├── Chart.yaml                  # version 0.1.0 / appVersion 1a.4
+    ├── values.yaml                 # all knobs; defaults reproduce raw manifests 1:1
+    ├── .helmignore
+    └── templates/
+        ├── _helpers.tpl            # sdlcma.labels / sdlcma.namespace
+        ├── namespace.yaml          # gated on .Values.namespace.create
+        ├── configmap.yaml          # range → 3 CMs, data via toYaml
+        ├── rbac.yaml               # SA + Role + RoleBinding (1a.3 carried over)
+        ├── redis.yaml gateway.yaml orchestrator.yaml
+        └── NOTES.txt
 ```
+
+The raw `kind/manifests/` set is intentionally **kept** alongside the chart:
+it remains the `kubectl apply` path and the byte-parity baseline the chart is
+validated against (`tests/test_helm_chart.py`). The Secret is **not** in the
+chart — it is created out of band and only referenced by name, preserving the
+"no real credentials in the repo" stance from 1a.2/1a.3.
 
 Config injection style: every Deployment uses `envFrom: configMapRef:` + (for
 orchestrator) `secretRef:`. Because Pydantic BaseSettings reads process env at
@@ -201,3 +219,70 @@ kubectl describe job -n sdlcma bf-worker-<slug>  # why a pod didn't start
   orchestrator pod has an empty in-memory `WorkerRegistry` and will not
   re-adopt Jobs spawned by the previous pod (it relies on Redis heartbeat +
   the deterministic `bf-worker-<slug>` name / 409-adopt path).
+
+## Stage 1a.4: Helm chart
+
+`infra/helm/sdlcma/` packages the same Redis + Gateway + Orchestrator +
+ConfigMaps + RBAC as the raw manifests. `helm install` is a drop-in for
+`kubectl apply -f infra/kind/manifests/`; defaults in `values.yaml` reproduce
+the raw manifests 1:1. The `sdlcma-secrets` Secret stays out of band (chart
+references it by name only).
+
+### Install / upgrade
+
+```bash
+# Secret first (chart never templates it; idempotent to re-run)
+kubectl create secret generic sdlcma-secrets -n sdlcma \
+  --from-literal=LLM_API_KEY="$LLM_API_KEY" \
+  --from-literal=GITLAB_PRIVATE_TOKEN="$GITLAB_PRIVATE_TOKEN" \
+  --from-file=SSH_PRIVATE_KEY=$HOME/.ssh/id_ed25519
+
+# Fresh namespace: let the chart render it
+helm install sdlcma infra/helm/sdlcma -n sdlcma --create-namespace
+
+# Namespace already exists (e.g. converting from raw manifests): skip the
+# Namespace object so install doesn't collide
+helm install sdlcma infra/helm/sdlcma -n sdlcma --set namespace.create=false
+
+# Roll a config change without rebuilding an image
+helm upgrade sdlcma infra/helm/sdlcma -n sdlcma \
+  --set configMaps.orchestrator.HEALTH_CHECK_INTERVAL=15
+kubectl rollout restart deployment/orchestrator -n sdlcma
+
+# Pin images to a build instead of :latest (NOTES §9 follow-up)
+helm upgrade sdlcma infra/helm/sdlcma -n sdlcma \
+  --set gateway.image.tag=$(git rev-parse --short HEAD) \
+  --set orchestrator.image.tag=$(git rev-parse --short HEAD)
+
+helm list -n sdlcma
+helm uninstall sdlcma -n sdlcma          # leaves the out-of-band Secret + ns
+```
+
+### Converting an existing raw-manifest deployment
+
+Helm will not adopt resources it didn't create. Delete the raw-manifest
+objects first **but keep the namespace and the Secret** (don't
+`kubectl delete -f redis.yaml` — it declares the Namespace and would cascade
+the Secret; delete `deployment/redis svc/redis pvc/redis-data` by name
+instead), then `helm install ... --set namespace.create=false`.
+
+### Validate without a cluster
+
+```bash
+helm lint infra/helm/sdlcma
+helm template sdlcma infra/helm/sdlcma | kubectl apply --dry-run=client -f -
+pytest tests/test_helm_chart.py          # 11 cases; skips if helm not on PATH
+```
+
+### Common pitfalls (1a.4)
+
+- **`Namespace "sdlcma" already exists`** on install: pass
+  `--set namespace.create=false` when the ns is managed elsewhere.
+- **`rendered manifests contain a resource that already exists`**: a raw
+  manifest (or a previous non-Helm apply) still owns that object. Delete the
+  conflicting objects (preserving ns + Secret) before installing.
+- **Orchestrator `CreateContainerConfigError` / missing creds**: the Secret
+  wasn't created — the chart references `sdlcma-secrets` but never creates it.
+- **Editing a template but `helm template` shows no change**: you edited
+  `values.yaml`'s commented defaults vs. the actual key, or didn't re-run;
+  `helm template --debug` prints the merged values.

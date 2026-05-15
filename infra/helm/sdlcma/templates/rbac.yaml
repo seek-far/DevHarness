@@ -1,0 +1,53 @@
+{{- /*
+1a.3 RBAC: identity the orchestrator's K8sJobSpawner uses to create/poll/
+delete per-bug Jobs. Namespaced Role (not ClusterRole) → confined to this
+namespace. Least privilege: jobs CRUD + pods/pods-log read only.
+*/ -}}
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    {{- include "sdlcma.labels" . | nindent 4 }}
+{{- end }}
+{{- if .Values.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orchestrator-job-manager
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    {{- include "sdlcma.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator-job-manager
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    {{- include "sdlcma.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ include "sdlcma.namespace" . }}
+roleRef:
+  kind: Role
+  name: orchestrator-job-manager
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

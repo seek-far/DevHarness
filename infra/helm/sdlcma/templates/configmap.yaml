@@ -1,0 +1,19 @@
+{{- /*
+Three independent ConfigMaps (gateway / orchestrator / worker), one per
+service, so each rolls independently and the blast radius stays small —
+same rationale as the raw configmap.yaml. data: is rendered verbatim from
+.Values.configMaps.<svc> (UPPERCASE env-var keys).
+*/ -}}
+{{- range $svc := list "gateway" "orchestrator" "worker" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $svc }}-config
+  namespace: {{ include "sdlcma.namespace" $ }}
+  labels:
+    app: {{ $svc }}
+    {{- include "sdlcma.labels" $ | nindent 4 }}
+data:
+  {{- toYaml (index $.Values.configMaps $svc) | nindent 2 }}
+---
+{{- end }}

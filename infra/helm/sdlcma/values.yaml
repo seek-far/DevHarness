@@ -1,0 +1,114 @@
+# SDLCMA Helm values (Stage 1a.4).
+#
+# Defaults reproduce the raw kind manifests 1:1 so `helm install` is a drop-in
+# for `kubectl apply -f infra/kind/manifests/`. Override per-environment via
+# `-f my-values.yaml` or `--set`.
+
+namespace:
+  name: sdlcma
+  # When true the chart renders a Namespace object (parity with redis.yaml,
+  # which used to be what created the ns). Set false if you manage the ns
+  # out of band / via `helm install --create-namespace`.
+  create: true
+
+# Default image pull policy. IfNotPresent because images are `kind load`-ed,
+# not pulled from a registry (same trap documented since 1a.1).
+imagePullPolicy: IfNotPresent
+
+# The out-of-band Secret. The chart only references it by name in envFrom;
+# it is NEVER templated (no real credentials in the repo / in Helm values).
+#   kubectl create secret generic sdlcma-secrets -n sdlcma \
+#     --from-literal=LLM_API_KEY=... --from-literal=GITLAB_PRIVATE_TOKEN=... \
+#     --from-file=SSH_PRIVATE_KEY=$HOME/.ssh/id_ed25519
+secret:
+  name: sdlcma-secrets
+
+# ── ConfigMap data ────────────────────────────────────────────────
+# Rendered verbatim into the three ConfigMaps. Keys are UPPERCASE env-var
+# names (envFrom turns each into a process env var; Pydantic reads them at
+# higher priority than the image-baked *_local_k8s.env). Edit here, then
+# `helm upgrade` + rollout-restart the affected Deployment.
+configMaps:
+  gateway:
+    ENV: local_k8s
+    USE_REDIS: "True"
+    REDIS_URL: redis://redis:6379/0
+    GATEWAY_STREAM: gateway:stream
+  orchestrator:
+    ENV: local_k8s
+    REDIS_URL: redis://redis:6379/0
+    GATEWAY_STREAM: gateway:stream
+    GATEWAY_CONSUMER_GROUP: orchestrator-group
+    GATEWAY_CONSUMER_NAME: orchestrator-0
+    WORKER_HEARTBEAT_INTERVAL: "10"
+    WORKER_HEARTBEAT_TTL: "30"
+    HEALTH_CHECK_INTERVAL: "20"
+    STREAM_BLOCK_MS: "1000"
+    STREAM_COUNT: "20"
+    WORKER_IMAGE: dh-bf-worker:latest
+  worker:
+    ENV: local_k8s
+    REDIS_URL: redis://redis:6379/0
+    WORKER_HEARTBEAT_INTERVAL: "10"
+    WORKER_HEARTBEAT_TTL: "30"
+    STREAM_BLOCK_MS: "1000"
+    GITLAB_API: http://gitlab:80/api/v4
+    GITLAB_USERNAME: lishu2016
+    GITLAB_SSH_PORT: "22"
+    LLM_API_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+    LLM_MODEL: qwen3-coder-480b-a35b-instruct
+
+# ── RBAC (1a.3) ───────────────────────────────────────────────────
+rbac:
+  create: true
+serviceAccount:
+  create: true
+  name: orchestrator
+
+# ── Redis ─────────────────────────────────────────────────────────
+redis:
+  image: redis:7-alpine
+  replicas: 1
+  pvcSize: 1Gi
+  # storageClassName: ""   # empty → kind default StorageClass `standard`
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ── Gateway ───────────────────────────────────────────────────────
+gateway:
+  image:
+    repository: dh-gateway
+    # latest because images are kind-loaded. NOTES §9 follow-up: switch to a
+    # git short-SHA tag to defeat the rolling-update cache trap — wire that by
+    # overriding gateway.image.tag / orchestrator.image.tag at deploy time.
+    tag: latest
+  replicas: 1
+  service:
+    port: 8000
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ── Orchestrator ──────────────────────────────────────────────────
+orchestrator:
+  image:
+    repository: dh-orchestrator
+    tag: latest
+  replicas: 1
+  pvcSize: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi

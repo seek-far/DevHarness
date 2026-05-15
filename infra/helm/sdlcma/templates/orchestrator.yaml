@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator-repos
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.orchestrator.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.orchestrator.pvcSize }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.orchestrator.replicas }}
+  strategy:
+    # Orchestrator owns an in-memory WorkerRegistry + a Redis consumer-group
+    # identity (orchestrator-0). Two live pods would split the stream —
+    # Recreate guarantees clean handover.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      # Identity for K8sJobSpawner (env == local_k8s) to create/delete the
+      # per-bug worker Jobs; bound to orchestrator-job-manager Role (rbac.yaml).
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: orchestrator
+          image: "{{ .Values.orchestrator.image.repository }}:{{ .Values.orchestrator.image.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: orchestrator-config
+            - configMapRef:
+                name: worker-config
+            - secretRef:
+                name: {{ .Values.secret.name }}
+          volumeMounts:
+            - name: repos
+              mountPath: /tmp/dh_repo
+          resources:
+            {{- toYaml .Values.orchestrator.resources | nindent 12 }}
+      volumes:
+        - name: repos
+          persistentVolumeClaim:
+            claimName: orchestrator-repos

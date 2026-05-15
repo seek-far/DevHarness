@@ -1,0 +1,24 @@
+SDLCMA {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}"
+into namespace "{{ include "sdlcma.namespace" . }}".
+
+1. The Secret is NOT managed by this chart. Create it before the orchestrator
+   pod can read credentials (idempotent to re-run):
+
+     kubectl create secret generic {{ .Values.secret.name }} -n {{ include "sdlcma.namespace" . }} \
+       --from-literal=LLM_API_KEY=... \
+       --from-literal=GITLAB_PRIVATE_TOKEN=... \
+       --from-file=SSH_PRIVATE_KEY=$HOME/.ssh/id_ed25519
+
+2. Watch rollout:
+
+     kubectl get pods -n {{ include "sdlcma.namespace" . }} -w
+
+3. Smoke the gateway:
+
+     kubectl port-forward svc/gateway {{ .Values.gateway.service.port }}:{{ .Values.gateway.service.port }} -n {{ include "sdlcma.namespace" . }}
+     curl http://localhost:{{ .Values.gateway.service.port }}/healthz
+
+4. Roll a config change without rebuilding an image:
+
+     helm upgrade {{ .Release.Name }} infra/helm/sdlcma -n {{ include "sdlcma.namespace" . }} --set ...
+     kubectl rollout restart deployment/orchestrator -n {{ include "sdlcma.namespace" . }}
