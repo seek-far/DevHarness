@@ -1,0 +1,41 @@
+{{- /*
+1a.6 Ingress — finally uses the kind host-port mapping (18080/18443, set in
+infra/kind/cluster.yaml) and retires `kubectl port-forward` for the gateway.
+
+Prerequisite (NOT installed by this chart — a cluster add-on, like the
+Secret): ingress-nginx for kind, e.g.
+  kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+
+Default host is empty → a no-host rule that matches any Host header, so
+`curl http://localhost:18080/healthz` works without /etc/hosts edits. Set
+ingress.host to use a real hostname.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - {{- with .Values.ingress.host }}
+      host: {{ . }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: {{ .Values.gateway.service.port }}
+{{- end }}

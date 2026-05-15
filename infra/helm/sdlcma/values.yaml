@@ -98,6 +98,48 @@ gateway:
       cpu: 500m
       memory: 256Mi
 
+# ── NetworkPolicy (1a.6) ──────────────────────────────────────────
+# Ingress-only lockdown: default-deny inbound + explicit allows for the
+# gateway port and redis-from-app. Egress is left open on purpose (see
+# templates/networkpolicy.yaml header / NOTES §6e).
+networkPolicy:
+  enabled: true
+
+# ── Observability (1a.6) ──────────────────────────────────────────
+observability:
+  # Stamp prometheus.io/scrape annotations on the gateway pod. Does NOT
+  # install Prometheus — only wires the scrape contract.
+  prometheusAnnotations: true
+  # No real /metrics yet → scrape /healthz as an up/down signal.
+  scrapePath: /healthz
+
+# ── Ingress (1a.6) ────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  host: ""            # empty → no-host rule (any Host header)
+  annotations: {}
+
+# ── eval-on-k8s Indexed Job (1a.6) ────────────────────────────────
+# OFF by default — needs an image that bundles evaluation/ (the bf-worker
+# image does not). Template/render-only until that image exists.
+eval:
+  enabled: false
+  image:
+    repository: dh-bf-worker   # placeholder; replace with an eval-capable image
+    tag: latest
+  completions: 4
+  parallelism: 2
+  ttlSecondsAfterFinished: 600
+  args: ["-m", "evaluation.cli", "run"]
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
 # ── Orchestrator ──────────────────────────────────────────────────
 orchestrator:
   image:

@@ -1,0 +1,52 @@
+{{- /*
+1a.6 eval-on-k8s — an Indexed Job that fans the evaluation sweep across pods.
+
+OFF by default (eval.enabled=false): this is a deploy-shape deliverable, not
+a wired pipeline. Caveats, deliberately surfaced rather than hidden:
+  - The dh-bf-worker image does NOT carry evaluation/ (Dockerfile.bf-worker
+    copies only bf_worker/ + settings/). Running a real sweep needs an image
+    that bundles evaluation/ + fixtures — a separate build, out of 1a.6 scope.
+  - completionMode: Indexed gives each pod JOB_COMPLETION_INDEX (0..N-1).
+    Sharding agents×fixtures by that index needs runner support
+    (evaluation.runner does not read it yet). Until then this Job runs the
+    whole sweep N times — fine for a template/render test, not for real use.
+Enable + override image/args once an eval-capable image exists.
+*/ -}}
+{{- if .Values.eval.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sdlcma-eval
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: sdlcma-eval
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  completionMode: Indexed
+  completions: {{ .Values.eval.completions }}
+  parallelism: {{ .Values.eval.parallelism }}
+  # Orchestrator-style stance: failures are not auto-retried by the Job
+  # controller; inspect the failed pod and re-run deliberately.
+  backoffLimit: 0
+  ttlSecondsAfterFinished: {{ .Values.eval.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        app: sdlcma-eval
+    spec:
+      restartPolicy: Never
+      # Eval workloads call out only to the LLM/fixtures, never the k8s API.
+      automountServiceAccountToken: false
+      containers:
+        - name: eval
+          image: "{{ .Values.eval.image.repository }}:{{ .Values.eval.image.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args: {{ toJson .Values.eval.args }}
+          envFrom:
+            - configMapRef:
+                name: worker-config
+            - secretRef:
+                name: {{ .Values.secret.name }}
+          resources:
+            {{- toYaml .Values.eval.resources | nindent 12 }}
+{{- end }}

@@ -9,6 +9,9 @@ description: |
   preserving the 1a.2/1a.3 "no real credentials in the repo" stance.
 type: application
 # Chart version — bump on chart structure changes.
-version: 0.1.0
+# 0.2.0: 1a.6 added NetworkPolicy, Ingress, Prometheus scrape annotations,
+# and an opt-in eval Indexed Job. The version bump is also what makes the
+# Terraform helm_release (1a.5) detect the change and upgrade in place.
+version: 0.2.0
 # Tracks the app/stage this chart targets.
-appVersion: "1a.4"
+appVersion: "1a.6"

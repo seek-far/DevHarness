@@ -1,0 +1,77 @@
+{{- /*
+1a.6 NetworkPolicy — closes the gap flagged back in 1a.1 ("namespace is not
+a security boundary; NetworkPolicy comes in 1a.6").
+
+Scope decision: restrict INGRESS only, leave EGRESS open.
+A blanket default-deny egress in kind also blocks DNS (CoreDNS in
+kube-system) and every outbound the workers legitimately need (LLM API,
+GitLab, image pulls). Doing egress correctly means enumerating those with
+DNS + ipBlock rules — deferred (documented in NOTES §6e). Ingress lockdown
+is the high-value, low-risk half and is what we ship here.
+
+Pod labels this keys off (must stay in sync with the chart + spawner):
+  app=gateway / app=orchestrator / app=redis / app=bf-worker
+(the worker Job pods get app=bf-worker from K8sJobSpawner._build_job).
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  # Empty podSelector = every pod in the namespace.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  # No ingress rules → deny all inbound. The allow-* policies below are
+  # additive (NetworkPolicies are OR-combined).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-ingress
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    # Webhook traffic — reaches the gateway via ingress-nginx (a different
+    # namespace) or kubectl port-forward. Empty `from` = any source.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.gateway.service.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-from-app
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: redis
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: ["gateway", "orchestrator", "bf-worker"]
+      ports:
+        - protocol: TCP
+          port: 6379
+{{- end }}

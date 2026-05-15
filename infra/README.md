@@ -10,7 +10,7 @@ Roadmap follows `1a.1 → 1a.6` (see top-level conversation / task list):
 - `1a.3` — spawner → k8s Job refactor ✅
 - `1a.4` — Helm chart ✅
 - `1a.5` — Terraform `helm_release` orchestration ✅
-- `1a.6` — eval on k8s + observability + finishing touches
+- `1a.6` — eval on k8s + observability + finishing touches ✅
 
 ## Toolchain versions (verified on WSL2 / Ubuntu 22.04.5 / kernel 6.6.114)
 
@@ -47,6 +47,9 @@ infra/
 │       ├── configmap.yaml          # range → 3 CMs, data via toYaml
 │       ├── rbac.yaml               # SA + Role + RoleBinding (1a.3 carried over)
 │       ├── redis.yaml gateway.yaml orchestrator.yaml
+│       ├── networkpolicy.yaml      # 1a.6: deny-ingress + gateway/redis allows
+│       ├── ingress.yaml            # 1a.6: host→gateway (ingress-nginx)
+│       ├── eval-job.yaml           # 1a.6: opt-in Indexed Job (eval.enabled)
 │       └── NOTES.txt
 └── terraform/                      # 1a.5: Terraform orchestrates the chart
     ├── versions.tf                 # provider pins (helm ~>2.17, kubernetes ~>2.33)
@@ -58,11 +61,14 @@ infra/
     └── .terraform.lock.hcl         # tracked (pinned providers); state is NOT
 ```
 
-The raw `kind/manifests/` set is intentionally **kept** alongside the chart:
-it remains the `kubectl apply` path and the byte-parity baseline the chart is
-validated against (`tests/test_helm_chart.py`). The Secret is **not** in the
-chart — it is created out of band and only referenced by name, preserving the
-"no real credentials in the repo" stance from 1a.2/1a.3.
+The raw `kind/manifests/` set is **frozen at its 1a.3 shape** — it does NOT
+include the 1a.4 Helm-ization or the 1a.6 additions (NetworkPolicy, Ingress,
+Prometheus annotations, eval Job). **From 1a.4 on the Helm chart is the
+source of truth** (and 1a.5 Terraform drives the chart); the raw manifests
+survive only as the historical `kubectl apply` path and the 1a.3-era parity
+baseline. Do not assume they are equivalent to the chart. The Secret is
+**not** in the chart — created out of band, referenced by name only,
+preserving the "no real credentials in the repo" stance from 1a.2/1a.3.
 
 Config injection style: every Deployment uses `envFrom: configMapRef:` + (for
 orchestrator) `secretRef:`. Because Pydantic BaseSettings reads process env at
@@ -356,3 +362,58 @@ pytest tests/test_terraform_config.py          # 7 cases; skips if terraform abs
 - **Three deploy paths now exist** (raw `kubectl apply`, `helm install`,
   `terraform apply`) — they target the same namespace and are mutually
   exclusive. Pick one per cluster; don't interleave.
+
+## Stage 1a.6: NetworkPolicy / Ingress / observability / eval Job
+
+Four chart additions (chart bumped to `0.2.0`, appVersion `1a.6`), all
+toggled via `values.yaml`:
+
+| Feature | Default | Value |
+|---|---|---|
+| NetworkPolicy (ingress lockdown) | on | `networkPolicy.enabled` |
+| Ingress (host → gateway) | on | `ingress.enabled` / `ingress.host` |
+| Prometheus scrape annotations | on | `observability.prometheusAnnotations` |
+| eval Indexed Job | **off** | `eval.enabled` |
+
+**NetworkPolicy** is ingress-only: `default-deny-ingress` + `allow-gateway-ingress`
+(:8000 any source) + `allow-redis-from-app` (:6379 from `app in
+{gateway,orchestrator,bf-worker}`). Egress is left open on purpose — a
+default-deny egress in kind also kills DNS and the workers' LLM/GitLab/image
+pulls. The label set is a contract shared with `K8sJobSpawner._build_job`
+(worker Job pods carry `app=bf-worker`); changing one side requires the other.
+
+**Ingress** needs ingress-nginx in the cluster (a prerequisite, not chart-managed):
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
+kubectl wait -n ingress-nginx --for=condition=ready pod \
+  --selector=app.kubernetes.io/component=controller --timeout=120s
+# gateway now reachable on the kind host port — port-forward retired:
+curl http://localhost:18080/healthz
+```
+
+**eval Job** is template-only: the `dh-bf-worker` image doesn't bundle
+`evaluation/`, and the runner doesn't shard by `JOB_COMPLETION_INDEX` yet.
+Enable + point at an eval-capable image once one exists:
+`--set eval.enabled=true,eval.image.repository=<img>`.
+
+**Deploying via Terraform**: bump `Chart.yaml: version` for any chart change
+— the helm provider detects local-chart changes by **version**, not file
+content, so without a bump `terraform plan` is a no-op and new resources
+never deploy. After a bump, the first `plan` shows an output-only diff
+(`chart_version` lags one apply — a helm-provider v2 quirk); a second
+`apply` settles it and `plan` is then a true no-op.
+
+### Common pitfalls (1a.6)
+
+- **Wrong kubectl context**: more than one kind cluster may exist; Terraform
+  targets `kind-sdlcma-dev` explicitly but ad-hoc `kubectl` uses the current
+  context. Always `kubectl --context kind-sdlcma-dev …` when verifying.
+- **`curl localhost:18080` flaky during a deploy**: the gateway pod is
+  rolling; ingress-nginx briefly has no endpoint. Re-test after
+  `kubectl rollout status`.
+- **NetworkPolicy “broke” connectivity**: check pod `app=` labels match the
+  policy selectors (esp. worker Job pods = `app=bf-worker`); a typo there
+  silently drops traffic with no error.
+- **`terraform plan` shows perpetual `chart_version` diff**: expected once
+  after a chart version bump (computed metadata lags); re-`apply` to settle.

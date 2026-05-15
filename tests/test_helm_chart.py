@@ -71,9 +71,14 @@ def test_full_resource_set_renders(docs):
         "Role", "RoleBinding",
         "Service", "Service",
         "Deployment", "Deployment", "Deployment",
+        # 1a.6: NetworkPolicy ×3 + Ingress on by default; eval Job is NOT
+        # (eval.enabled=false) — see test_eval_job_off_by_default.
+        "NetworkPolicy", "NetworkPolicy", "NetworkPolicy",
+        "Ingress",
     ])
     # Secret is intentionally NOT in the chart (out-of-band).
     assert not _by_kind(docs, "Secret")
+    assert not _by_kind(docs, "Job")  # eval Job off by default
 
 
 def test_all_objects_in_target_namespace(docs):
@@ -149,3 +154,78 @@ def test_image_tag_override():
                if d and d["kind"] == "Deployment"
                and d["metadata"]["name"] == "gateway")
     assert dep["spec"]["template"]["spec"]["containers"][0]["image"] == "dh-gateway:abc123"
+
+
+# ── 1a.6: NetworkPolicy / Ingress / observability / eval ──────────
+
+def test_networkpolicy_deny_default_and_targeted_allows(docs):
+    deny = _named(docs, "NetworkPolicy", "default-deny-ingress")
+    assert deny["spec"]["podSelector"] == {}
+    assert deny["spec"]["policyTypes"] == ["Ingress"]
+    assert "ingress" not in deny["spec"]  # no rules → deny all inbound
+
+    gw = _named(docs, "NetworkPolicy", "allow-gateway-ingress")
+    assert gw["spec"]["podSelector"]["matchLabels"] == {"app": "gateway"}
+    assert gw["spec"]["ingress"][0]["ports"][0]["port"] == 8000
+
+    rd = _named(docs, "NetworkPolicy", "allow-redis-from-app")
+    assert rd["spec"]["podSelector"]["matchLabels"] == {"app": "redis"}
+    expr = rd["spec"]["ingress"][0]["from"][0]["podSelector"]["matchExpressions"][0]
+    assert expr["key"] == "app" and expr["operator"] == "In"
+    assert set(expr["values"]) == {"gateway", "orchestrator", "bf-worker"}
+    assert rd["spec"]["ingress"][0]["ports"][0]["port"] == 6379
+
+
+def test_networkpolicy_toggle_off():
+    out = _helm("template", "sdlcma", str(CHART),
+                "--set", "networkPolicy.enabled=false")
+    kinds = [d["kind"] for d in yaml.safe_load_all(out) if d]
+    assert "NetworkPolicy" not in kinds
+
+
+def test_ingress_routes_to_gateway(docs):
+    ing = _named(docs, "Ingress", "gateway")
+    assert ing["spec"]["ingressClassName"] == "nginx"
+    rule = ing["spec"]["rules"][0]
+    assert "host" not in rule  # empty host → no-host rule
+    backend = rule["http"]["paths"][0]["backend"]["service"]
+    assert backend["name"] == "gateway"
+    assert backend["port"]["number"] == 8000
+
+    out = _helm("template", "sdlcma", str(CHART),
+                "--set", "ingress.enabled=false")
+    assert "Ingress" not in [d["kind"] for d in yaml.safe_load_all(out) if d]
+
+
+def test_gateway_prometheus_annotations(docs):
+    dep = _named(docs, "Deployment", "gateway")
+    ann = dep["spec"]["template"]["metadata"]["annotations"]
+    assert ann["prometheus.io/scrape"] == "true"
+    assert ann["prometheus.io/port"] == "8000"
+    assert ann["prometheus.io/path"] == "/healthz"
+
+    out = _helm("template", "sdlcma", str(CHART),
+                "--set", "observability.prometheusAnnotations=false")
+    dep2 = next(d for d in yaml.safe_load_all(out)
+                if d and d["kind"] == "Deployment"
+                and d["metadata"]["name"] == "gateway")
+    assert "annotations" not in dep2["spec"]["template"]["metadata"]
+
+
+def test_eval_job_off_by_default(docs):
+    assert not _by_kind(docs, "Job")
+
+
+def test_eval_indexed_job_when_enabled():
+    out = _helm("template", "sdlcma", str(CHART),
+                "--set", "eval.enabled=true")
+    job = next(d for d in yaml.safe_load_all(out)
+               if d and d["kind"] == "Job"
+               and d["metadata"]["name"] == "sdlcma-eval")
+    assert job["spec"]["completionMode"] == "Indexed"
+    assert job["spec"]["completions"] == 4
+    assert job["spec"]["parallelism"] == 2
+    assert job["spec"]["backoffLimit"] == 0
+    pod = job["spec"]["template"]["spec"]
+    assert pod["restartPolicy"] == "Never"
+    assert pod["automountServiceAccountToken"] is False
