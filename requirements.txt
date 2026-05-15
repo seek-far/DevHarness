@@ -12,3 +12,4 @@ redis[hiredis]>=5.0
 langchain-openai
 pytest
 docker>=7.0
+kubernetes>=29.0

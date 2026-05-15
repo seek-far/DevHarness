@@ -1,15 +1,17 @@
-# Stage 1a.2: Orchestrator deployment.
+# Stage 1a.3: Orchestrator deployment.
 #
-# In 1a.2 the orchestrator still uses the subprocess WorkerSpawner (see
-# orchestrator/spawner.py: `WorkerSpawner._start_process` calls
-# `asyncio.create_subprocess_exec(sys.executable, WORKER_SCRIPT, ...)`).
-# Each spawned worker is a child PROCESS of the orchestrator container.
-# Implication: this container's image (dh-orchestrator) currently lacks the
-# bf_worker runtime deps (git + openssh + langchain bundle) so end-to-end
-# webhook→fix-MR won't actually complete in 1a.2 — we only verify the
-# orchestrator boots, joins the consumer group, and tails gateway:stream.
-# 1a.3 replaces subprocess spawn with k8s Job spawn using `dh-bf-worker`,
-# fixing this for real.
+# As of 1a.3, with env == "local_k8s" the orchestrator uses
+# orchestrator.spawner.K8sJobSpawner: instead of forking a subprocess inside
+# this container, it calls the k8s API to create one Job per bug running the
+# `dh-bf-worker` image (which DOES carry git + openssh + the langchain
+# bundle). This makes end-to-end webhook→fix-MR actually completable on k8s,
+# and the per-worker runtime no longer has to live in the dh-orchestrator
+# image. The Job-creating identity is the `orchestrator` ServiceAccount
+# (see rbac.yaml) — without serviceAccountName set, create_namespaced_job()
+# would 403 against the default SA.
+#
+# (The subprocess WorkerSpawner / DockerWorkerSpawner still exist for the
+# non-k8s envs; selection is by cfg.env in orchestrator.Orchestrator.)
 #
 # envFrom layering:
 #   1. orchestrator-config — ENV, REDIS_URL, consumer-group settings, etc.
@@ -23,6 +25,7 @@
 #     --from-literal=GITLAB_PRIVATE_TOKEN=... \
 #     --from-file=SSH_PRIVATE_KEY=$HOME/.ssh/id_ed25519
 #   kubectl apply -f infra/kind/manifests/configmap.yaml
+#   kubectl apply -f infra/kind/manifests/rbac.yaml          # SA + Role + binding
 #   kubectl apply -f infra/kind/manifests/orchestrator.yaml
 #
 # No Service: orchestrator has no inbound traffic — it tails Redis streams.
@@ -65,6 +68,9 @@ spec:
       labels:
         app: orchestrator
     spec:
+      # Identity used by K8sJobSpawner to create/delete bug-fix Jobs. Bound to
+      # the namespaced orchestrator-job-manager Role in rbac.yaml.
+      serviceAccountName: orchestrator
       containers:
         - name: orchestrator
           image: dh-orchestrator:latest

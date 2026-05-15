@@ -5,9 +5,9 @@ Local k8s, Helm chart, and Terraform setup for SDLCMA. Separate from app code
 
 Roadmap follows `1a.1 → 1a.6` (see top-level conversation / task list):
 
-- `1a.1` — manual kind deploy (this stage)
-- `1a.2` — full native manifests (Deployment / Service / ConfigMap / Secret / PVC)
-- `1a.3` — spawner → k8s Job refactor
+- `1a.1` — manual kind deploy ✅
+- `1a.2` — full native manifests (Deployment / Service / ConfigMap / Secret / PVC) ✅
+- `1a.3` — spawner → k8s Job refactor ✅
 - `1a.4` — Helm chart
 - `1a.5` — Terraform `helm_release` orchestration
 - `1a.6` — eval on k8s + observability + finishing touches
@@ -24,7 +24,7 @@ Roadmap follows `1a.1 → 1a.6` (see top-level conversation / task list):
 
 systemd is enabled in `/etc/wsl.conf` (`[boot] systemd=true`).
 
-## Stage 1a.2 layout
+## Layout (through 1a.3)
 
 ```
 infra/kind/
@@ -34,7 +34,8 @@ infra/kind/
     ├── secrets.yaml.example        # template for sdlcma-secrets (real values via kubectl create)
     ├── redis.yaml                  # Redis + PVC (1Gi, AOF on)
     ├── gateway.yaml                # Gateway Deployment + Service (envFrom configmap, /healthz HTTP probe)
-    └── orchestrator.yaml           # Orchestrator Deployment + PVC (no Service; subprocess spawner)
+    ├── rbac.yaml                   # 1a.3: orchestrator SA + namespaced Role/RoleBinding (Job mgmt)
+    └── orchestrator.yaml           # Orchestrator Deployment + PVC + serviceAccountName (k8s Job spawner)
 ```
 
 Config injection style: every Deployment uses `envFrom: configMapRef:` + (for
@@ -134,3 +135,69 @@ kubectl delete -f infra/kind/manifests/redis.yaml          # cascades the PVC
 - **`secrets.yaml` accidentally committed**: `.gitignore` excludes
   `infra/kind/manifests/secrets.yaml` (the suffix-less form). Only the
   `.example` template should ever be tracked.
+
+## Stage 1a.3: spawner → k8s Job
+
+With `env == "local_k8s"`, `orchestrator.Orchestrator` selects
+`orchestrator.spawner.K8sJobSpawner` instead of the subprocess
+`WorkerSpawner`. Per bug it creates one **Job** (image `dh-bf-worker:latest`,
+`backoffLimit: 0`, `ttlSecondsAfterFinished: 600`, pod `restartPolicy:
+Never`), pulling non-secret config from the `worker-config` ConfigMap and
+credentials from `sdlcma-secrets` via `envFrom`, with per-bug values
+(`BUG_ID`, `project_id`, `project_web_url`, `job_id`, `REDIS_URL`) injected
+as explicit env. Heartbeat is unchanged — the worker still writes the Redis
+TTL key and `HealthMonitor` still owns restart (Job retry is disabled on
+purpose: `backoffLimit: 0`). `K8sJobProxy` adapts the Job to the
+`asyncio.subprocess.Process`-shaped interface the registry/monitor expect
+(`pid` = Job name, `returncode` from `read_namespaced_job_status`,
+`terminate/kill` = `delete_namespaced_job`).
+
+The orchestrator pod now runs as the `orchestrator` ServiceAccount, bound by
+a **namespaced** Role (not ClusterRole) to: `batch/jobs`
+create/get/list/watch/delete and `pods` + `pods/log` read.
+
+### Bootstrap delta vs 1a.2
+
+```bash
+# dh-orchestrator gained the `kubernetes` client dep → MUST rebuild + reload
+docker build -f Dockerfile.orchestrator -t dh-orchestrator:latest .
+kind load docker-image dh-orchestrator:latest --name sdlcma-dev
+# dh-bf-worker is the image the Jobs run — ensure it is loaded into kind too
+docker build -f Dockerfile.bf-worker -t dh-bf-worker:latest .
+kind load docker-image dh-bf-worker:latest --name sdlcma-dev
+
+# RBAC must exist BEFORE the orchestrator pod starts (else create_job → 403)
+kubectl apply -f infra/kind/manifests/rbac.yaml
+kubectl apply -f infra/kind/manifests/orchestrator.yaml
+```
+
+### Inspecting worker Jobs
+
+```bash
+kubectl get jobs -n sdlcma                       # one bf-worker-<slug> per bug
+kubectl get pods -n sdlcma -l app=bf-worker
+kubectl logs -n sdlcma job/bf-worker-<slug> -f   # the worker's run output
+kubectl describe job -n sdlcma bf-worker-<slug>  # why a pod didn't start
+# Finished Jobs self-GC 600s after completion (ttlSecondsAfterFinished).
+```
+
+### Common pitfalls (1a.3)
+
+- **`Jobs.batch is forbidden` (403)**: `rbac.yaml` not applied, or applied
+  *after* the orchestrator pod started with the default ServiceAccount.
+  Apply RBAC, then `kubectl rollout restart deployment/orchestrator -n sdlcma`.
+- **Worker pod `ImagePullBackOff`**: `dh-bf-worker:latest` wasn't
+  `kind load`-ed. The Job sets `imagePullPolicy: IfNotPresent`; the image
+  must already be on the node (same trap as 1a.1).
+- **`bug_id` → Job name**: bug_ids contain `_` and `-` (e.g.
+  `2026_05_15-12_30_45_3`), illegal/length-bound for k8s names.
+  `_k8s_job_name` lowercases, collapses non-alnum to `-`, prefixes
+  `bf-worker-`, suffixes `-r<n>` on orchestrator restart, and caps at 63.
+- **Job journal is ephemeral**: the worker writes `evaluation/journal/`
+  inside the Job pod's own filesystem, which is gone after
+  `ttlSecondsAfterFinished`. Persisting it (PVC / sink) is deferred to a
+  later stage; capture `kubectl logs` if a run needs post-mortem.
+- **Stale Recreate handover**: orchestrator uses `strategy: Recreate`; a new
+  orchestrator pod has an empty in-memory `WorkerRegistry` and will not
+  re-adopt Jobs spawned by the previous pod (it relies on Redis heartbeat +
+  the deterministic `bf-worker-<slug>` name / 409-adopt path).

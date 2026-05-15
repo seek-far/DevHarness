@@ -9,9 +9,12 @@
 #   - 1 worker
 #
 # extraPortMappings expose 80/443 from the control-plane node to the WSL2 host
-# as 8080/8443 (non-privileged, avoids conflicts with anything Windows might
-# bind on :80). These are placeholders for the ingress controller in 1a.4+;
-# Stage 1a.1 still reaches the Gateway via `kubectl port-forward`.
+# as 18080/18443. NOT 8080/8443: the local dev GitLab binds host :8080
+# (see settings/worker_local_multi_process.env GITLAB_API=localhost:8080),
+# so kind grabbing 8080 would race GitLab for the port. 18080/18443 are
+# non-privileged and clear of it. These are still placeholders for the
+# ingress controller in 1a.4+; through 1a.3 the Gateway is reached via
+# `kubectl port-forward` and these mappings carry no traffic yet.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: sdlcma-dev
@@ -25,9 +28,9 @@ nodes:
             node-labels: "ingress-ready=true"
     extraPortMappings:
       - containerPort: 80
-        hostPort: 8080
+        hostPort: 18080
         protocol: TCP
       - containerPort: 443
-        hostPort: 8443
+        hostPort: 18443
         protocol: TCP
   - role: worker

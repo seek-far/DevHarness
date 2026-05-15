@@ -1,0 +1,63 @@
+# Stage 1a.3: RBAC for the orchestrator's K8sJobSpawner.
+#
+# In 1a.3 orchestrator.spawner.K8sJobSpawner replaces the subprocess
+# WorkerSpawner for env == "local_k8s": the orchestrator pod talks to the
+# k8s API to create one Job per bug, poll its status, and delete it on
+# restart. That requires a non-default identity with namespaced permissions.
+#
+# Scope is deliberately tight (principle of least privilege):
+#   - batch/jobs        create/get/list/watch/delete  → spawn + reload_status
+#                                                        + restart (delete)
+#   - core/pods         get/list/watch                → debugging / future
+#                                                        log collection
+#   - core/pods/log     get                           → `kubectl logs`-style
+#                                                        retrieval if added later
+# No cluster-scoped rights: a Role + RoleBinding (not ClusterRole) confines
+# the orchestrator to the `sdlcma` namespace.
+#
+# Apply BEFORE orchestrator.yaml (which now sets
+# spec.template.spec.serviceAccountName: orchestrator). The default
+# ServiceAccount cannot create Jobs, so without this the spawner's first
+# create_namespaced_job() returns 403 Forbidden.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: sdlcma
+  labels:
+    app: orchestrator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orchestrator-job-manager
+  namespace: sdlcma
+  labels:
+    app: orchestrator
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator-job-manager
+  namespace: sdlcma
+  labels:
+    app: orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: orchestrator
+    namespace: sdlcma
+roleRef:
+  kind: Role
+  name: orchestrator-job-manager
+  apiGroup: rbac.authorization.k8s.io

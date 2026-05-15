@@ -21,7 +21,7 @@ from orchestrator.monitor import HealthMonitor
 from orchestrator.parser import ParseError, parse_message
 from orchestrator.registry import WorkerRegistry
 from orchestrator.router import MessageRouter
-from orchestrator.spawner import WorkerSpawner, DockerWorkerSpawner
+from orchestrator.spawner import WorkerSpawner, DockerWorkerSpawner, K8sJobSpawner
 
 class Orchestrator:
     def __init__(self, settings=None):
@@ -40,6 +40,16 @@ class Orchestrator:
                 docker_network=self._cfg.docker_network,
                 ssh_private_key=self._cfg.ssh_private_key,
                 worker_env_file=worker_env_file,
+            )
+        elif self._cfg.env == "local_k8s":
+            self._spawner = K8sJobSpawner(
+                registry=self._registry,
+                redis_url=self._cfg.redis_url,
+                worker_image=self._cfg.worker_image,
+                namespace=self._cfg.k8s_namespace,
+                worker_config_map=self._cfg.k8s_worker_config_map,
+                secret_name=self._cfg.k8s_secret_name,
+                job_ttl_seconds=self._cfg.k8s_job_ttl_seconds,
             )
         else:
             self._spawner = WorkerSpawner(self._registry, self._cfg.redis_url)

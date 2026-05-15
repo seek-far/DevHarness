@@ -44,6 +44,19 @@ class OrchestratorSettings(BaseAppSettings):
       test                → orchestrator_test.env
       production          → orchestrator_production.env
     """
+    # ── k8s Job mode (local_k8s) ───────────────────────────────
+    # Read only by orchestrator.spawner.K8sJobSpawner when env == "local_k8s".
+    # Scoped here (not base_settings) because the orchestrator is the only
+    # component that spawns worker Jobs; gateway/worker never read these.
+    # Overridden by orchestrator_local_k8s.env / the orchestrator-config
+    # ConfigMap via the usual priority (process env > .env > default).
+    k8s_namespace: str = "sdlcma"
+    k8s_worker_config_map: str = "worker-config"
+    k8s_secret_name: str = "sdlcma-secrets"
+    # Finished Jobs are GC'd by the k8s TTL controller this many seconds after
+    # completion — keeps `kubectl get jobs` readable without an explicit reaper.
+    k8s_job_ttl_seconds: int = 600
+
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / f"orchestrator_{_probe.env}.env",
         env_file_encoding="utf-8",
