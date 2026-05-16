@@ -29,11 +29,32 @@ logger = logging.getLogger(__name__)
 class ParseError(Exception):
     pass
 
-# f"auto/bug_{bug_id}-patch_{branch_id}"
-def parse_branch(branch_name: str) -> bool:
+# A CI pipeline counts as an auto-fix validation run when its ref is one of
+# the fix-branch shapes below. Group 1 is always the bug_id.
+#
+#   1) auto/bug_{bug_id}-patch_{branch_id}
+#        legacy shape; still emitted by integration_test.py Step E. Kept FIRST
+#        so its match object / behaviour is byte-identical to before.
+#   2) auto/bf/{bug_id}-{base_commit[:8]}
+#        the REAL shape produced by every running mode via
+#        GitLabProvider/LocalGitProvider Repo.deterministic_branch_name
+#        (f"auto/bf/{bug_id}-{base_commit[:8]}"). Without this the fix-branch
+#        CI result was misclassified as OtherEvent and never routed back to
+#        the waiting worker (wait_ci_result timeout, no MR).
+_BUG_ID_RE = r"\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}_\d{1}"
+_FIX_BRANCH_PATTERNS = (
+    re.compile(rf"^auto/bug_({_BUG_ID_RE})-patch_(\d{{2}}_\d{{2}}_\d{{2}}_\d{{1}})$"),
+    re.compile(rf"^auto/bf/({_BUG_ID_RE})-[0-9a-f]{{8}}$"),
+)
+
+
+def parse_branch(branch_name: str):
     # branch_name = "auto/fix-{bug_id}-{branch_id}"
-    m = re.match(r"^auto/bug_(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}_\d{1})-patch_(\d{2}_\d{2}_\d{2}_\d{1})$", branch_name)
-    return m
+    for _rx in _FIX_BRANCH_PATTERNS:
+        m = _rx.match(branch_name)
+        if m:
+            return m
+    return None
     
 def parse_message(raw_bytes: bytes) -> ParsedEvent:
     payload = json.loads(raw_bytes)
