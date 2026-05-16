@@ -1,0 +1,18 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#   # then set ssh_public_key to the contents of your pubkey, e.g.:
+#   #   ssh-keygen -t ed25519 -f ~/.ssh/sdlcma_1b -N ''
+#   #   sed -i "s|REPLACE_ME|$(cat ~/.ssh/sdlcma_1b.pub)|" terraform.tfvars
+
+os_cloud       = "devstack-admin"
+ssh_public_key = "REPLACE_ME"
+
+# 1b.2 proof uses the defaults (cirros, m1.tiny).
+#
+# 1b.3 real k8s nodes — uncomment:
+#   image_name      = "ubuntu-22.04"               # glance image (see NOTES §6h)
+#   ssh_user        = "ubuntu"
+#   control_flavor  = "ds2G"                        # >=2 vCPU / 2 GB for kubeadm
+#   worker_flavor   = "ds2G"
+#   cloud_init_file = "../../k8s-bootstrap/cloud-init.yaml"  # kubeadm prereqs

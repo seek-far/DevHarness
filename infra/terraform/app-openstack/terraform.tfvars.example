@@ -1,0 +1,6 @@
+# Defaults target the 1b.3 cluster (~/.kube/sdlcma-1b.config) and need no
+# tfvars. Copy to terraform.tfvars (gitignored) only to override, e.g.:
+#
+#   kube_config_path = "~/.kube/sdlcma-1b.config"
+#   ingress_enabled  = false
+#   gateway_image_tag = "latest"

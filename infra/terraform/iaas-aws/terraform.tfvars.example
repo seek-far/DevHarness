@@ -1,0 +1,10 @@
+# PHASE-2 ONLY. Phase 1 never applies this root (no AWS account / no spend);
+# it exists so `terraform validate` can lock the contract in CI.
+#
+# When phase 2 starts:
+#   cp terraform.tfvars.example terraform.tfvars   # gitignored
+#   aws_region      = "us-east-1"
+#   ssh_public_key  = "<contents of ~/.ssh/sdlcma_1b.pub>"
+#   cloud_init_file = "../../k8s-bootstrap/cloud-init.yaml"   # SAME file as 1b.3
+# then: export AWS creds out-of-band, terraform apply, run the SAME
+# k8s-bootstrap/bootstrap.sh, then deploy the SAME Helm chart.

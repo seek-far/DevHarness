@@ -1,0 +1,45 @@
+#cloud-config
+# 1b.3 — kubeadm prerequisites, applied to every node at first boot.
+# Provider-neutral: passed through the IaaS module's `cloud_init` input.
+# Only prereqs here; the cross-node kubeadm init/join dance is orchestrated
+# afterwards by bootstrap.sh (needs the join token, which is runtime state).
+
+write_files:
+  - path: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+  - path: /etc/sysctl.d/k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+
+runcmd:
+  # --- kernel / swap ---
+  - modprobe overlay
+  - modprobe br_netfilter
+  - sysctl --system
+  - swapoff -a
+  - sed -ri '/\sswap\s/s/^/#/' /etc/fstab
+
+  # --- container runtime (distro containerd; enable CRI + systemd cgroups) ---
+  - DEBIAN_FRONTEND=noninteractive apt-get update -y
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y containerd apt-transport-https ca-certificates curl gpg
+  - mkdir -p /etc/containerd
+  - containerd config default | tee /etc/containerd/config.toml >/dev/null
+  - sed -ri 's/(SystemdCgroup = )false/\1true/' /etc/containerd/config.toml
+  - systemctl restart containerd
+  - systemctl enable containerd
+
+  # --- kube{adm,let,ctl} from pkgs.k8s.io (v1.30 line) ---
+  - mkdir -p /etc/apt/keyrings
+  - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  - echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+  - DEBIAN_FRONTEND=noninteractive apt-get update -y
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y kubelet kubeadm kubectl
+  - apt-mark hold kubelet kubeadm kubectl
+  - systemctl enable kubelet
+
+  # Sentinel: bootstrap.sh waits on this (in addition to `cloud-init status`).
+  - touch /var/lib/cloud-init-k8s-prereqs.done

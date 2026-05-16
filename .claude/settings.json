@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source .venv-linux/bin/activate)",
+      "Bash(source .venv-linux/bin/activate:*)",
+      "Bash(uv run python -m pytest:*)",
+      "Bash(uv run python -m evaluation.cli:*)",
+      "Bash(uv run python integration_test.py:*)"
+    ]
+  }
+}
