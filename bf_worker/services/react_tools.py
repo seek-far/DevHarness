@@ -85,7 +85,12 @@ TOOLS_SCHEMA = [
             "description": (
                 "Submit your fix plan. Call this when you are confident you have "
                 "identified the root cause and have a correct fix. "
-                "Each entry in 'fixes' is one line replacement."
+                "Each entry in 'fixes' anchors on ONE existing line "
+                "(original_line, matched by content) and replaces it with "
+                "new_line. To ADD code, set new_line to multiple lines "
+                "(real newlines) that include the original line plus the "
+                "additions — never use an empty original_line, and never "
+                "cram multiple statements onto one line with ';'."
             ),
             "parameters": {
                 "type": "object",
@@ -133,13 +138,21 @@ TOOLS_SCHEMA = [
                                 "original_line": {
                                     "type": "string",
                                     "description": (
-                                        "Verbatim content of the line to replace "
-                                        "(must match exactly)."
+                                        "Verbatim CURRENT content of the single "
+                                        "existing line to anchor on (matched by "
+                                        "content; line_number is only a hint). "
+                                        "Must be non-empty and present in the file."
                                     ),
                                 },
                                 "new_line": {
                                     "type": "string",
-                                    "description": "Replacement line content.",
+                                    "description": (
+                                        "Content that replaces the anchored line. "
+                                        "May contain multiple lines (real '\\n') "
+                                        "to insert code: include the original line "
+                                        "plus the added lines, each properly "
+                                        "indented as normal Python."
+                                    ),
                                 },
                             },
                             "required": ["line_number", "original_line", "new_line"],

@@ -104,8 +104,9 @@ def test_apply_crash_branch_is_deterministic_no_llm():
     assert budget.calls == 0         # no budget spend
     note = out["reflection_note"]
     assert "list assignment index out of range" in note   # apply_error echoed
-    assert "line_number" in note and "BY INDEX" in note    # mechanical contract
-    assert "cannot" in note.lower()                        # no-insert rule
+    assert "original_line" in note and "ANCHORED ON CONTENT" in note  # contract
+    assert "empty" in note.lower()                         # no-unanchored-write rule
+    assert "multiple lines" in note.lower()                # insert-via-multiline rule
 
 
 def test_test_failure_branch_tagged_mode_test():

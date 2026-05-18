@@ -17,7 +17,7 @@ from enhancements.hooks import HookName
 from graph.state import BugFixState
 from typing import Optional
 from langchain_core.runnables import RunnableConfig
-from services.apply_patch import apply_change_infos
+from services.apply_patch import PatchAnchorError, apply_change_infos
 from services.patch_guard import PatchScopeError, validate_patch_scope
 from services.runtime_context import get_budget, get_hooks, get_provider
 
@@ -120,6 +120,18 @@ def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] =
             "apply_error": f"patch rejected by guardrail: {exc}",
             "test_passed": False,
             "test_output": f"[patch_guard rejected]\n{exc}",
+            "fix_retry_count": state.get("fix_retry_count", 0) + 1,
+        })
+    except PatchAnchorError as exc:
+        # Anchor mismatch: original_line is not the verbatim current line.
+        # Bounded reject (advances fix_retry_count like patch_guard) so the
+        # LLM gets actionable feedback and the run still terminates at
+        # MAX_FIX_RETRIES instead of silently corrupting the file.
+        logger.warning("apply_patch anchor rejected fix: %s", exc)
+        return _finalize(state, config, {
+            "apply_error": f"patch anchor failed: {exc}",
+            "test_passed": False,
+            "test_output": f"[apply anchor rejected]\n{exc}",
             "fix_retry_count": state.get("fix_retry_count", 0) + 1,
         })
     except Exception as exc:
