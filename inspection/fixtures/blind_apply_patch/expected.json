@@ -1,0 +1,8 @@
+{
+  "note": "Ground-truth fixture: the pre-A `apply_change_infos`. It assigns src_lines[line_number-1]=new_line WITHOUT checking original_line, so a stale line_number silently corrupts an already-correct file. No test catches this (it surfaces only as a later, unrelated failure). This session's real defect — the canonical Phase-1 acceptance case.",
+  "must_find": {
+    "defect_class": "blind-index-or-unchecked-write",
+    "min_severity": "high",
+    "rationale_keywords_any": ["original_line", "index", "without checking", "silent", "corrupt", "stale"]
+  }
+}

@@ -91,6 +91,34 @@ python -m bf_worker.standalone \
 | `--review` | off | Interactive review before applying (no-git mode) |
 | `--config` | | Path to an agent-spec JSON (same shape as `configs/*.json`). When given, the standalone runner uses the first spec in the file and instantiates any `enhancements` declared on it (e.g. `configs/memory.json`). When omitted, runs a plain `LangGraphAgent` with no enhancements. |
 
+### Code Inspection (standalone, independent of bug fix)
+
+A separate code review agent that targets defects the bug-fix test oracle
+structurally misses — found by reading code, not running tests (cross-module
+contract mismatch, silent-empty/wrong-key, blind/unchecked index writes,
+doc↔implementation drift, eval/state contamination). It is **not** an `Agent`
+and does not depend on the bug-fix pipeline.
+
+```bash
+python -m inspection.standalone --path bf_worker/services/apply_patch.py
+python -m inspection.standalone --path bf_worker/ --json report.json
+python -m inspection.standalone --path X --fail-on high   # CI gate (exit 1)
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--path` | (required) | File or directory to inspect |
+| `--description` | | Optional free-text target description |
+| `--json` | | Write the structured JSON report to this file |
+| `--fail-on` | (never) | Exit non-zero if a finding at/above this severity exists (`high`/`medium`/`low`/`info`) |
+
+Phase 1 is standalone-only. The canonical acceptance fixture is the
+pre-anchored `apply_change_infos` blind-write
+(`inspection/fixtures/blind_apply_patch/`). Phase 2 (a graph node consuming
+the inspector on the test-passed branch, with a bounded fixer↔review round
+cap) and a "reviewer rescues a stuck fixer" enhancement are planned — see
+`/mnt/d/PL/sdlcma/code-review-agent-plan.md`.
+
 ### GitLab Mode
 
 ```bash
