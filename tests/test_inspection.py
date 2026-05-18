@@ -23,8 +23,13 @@ from inspection.base import (  # noqa: E402
     Finding,
     InspectionReport,
 )
+from inspection.acceptance import evaluate, score_fixture  # noqa: E402
 from inspection.inspector import LLMInspector, _build_user_prompt, _parse  # noqa: E402
 from inspection.loader import load_target  # noqa: E402
+
+
+def _report(*findings, error=None):
+    return InspectionReport("1", "t", "m", findings=list(findings), error=error)
 
 _FIXTURE = _ROOT / "inspection" / "fixtures" / "blind_apply_patch"
 
@@ -161,6 +166,59 @@ def test_review_unparseable_response_captured():
 
 
 # ── canonical acceptance: ground-truth fixture vs expected.json ───────────────
+
+
+# ── acceptance scorer (pure, no network) ──────────────────────────────────────
+
+
+_BUGGY_SPEC = {"kind": "buggy", "must_find": {
+    "defect_class": "blind-index-or-unchecked-write", "min_severity": "high",
+    "rationale_keywords_any": ["original_line", "silent"]}}
+_CLEAN_SPEC = {"kind": "clean", "must_not_find": {"max_severity_allowed": "low"}}
+
+
+def test_score_buggy_tp():
+    r = _report(Finding("high", "blind-index-or-unchecked-write", "a.py", 1,
+                         "t", "ignores original_line; silent corruption", "s"))
+    assert score_fixture(r, _BUGGY_SPEC)[0] == "TP"
+
+
+def test_score_buggy_fn_wrong_class_or_severity_or_kw():
+    assert score_fixture(_report(Finding("high", "other", "a", 1, "t", "silent original_line", "s")), _BUGGY_SPEC)[0] == "FN"
+    assert score_fixture(_report(Finding("low", "blind-index-or-unchecked-write", "a", 1, "t", "silent original_line", "s")), _BUGGY_SPEC)[0] == "FN"
+    assert score_fixture(_report(Finding("high", "blind-index-or-unchecked-write", "a", 1, "t", "unrelated reason", "s")), _BUGGY_SPEC)[0] == "FN"
+
+
+def test_score_clean_tn_and_fp():
+    assert score_fixture(_report(), _CLEAN_SPEC)[0] == "TN"
+    assert score_fixture(_report(Finding("low", "other", "a", 1, "t", "r", "s")), _CLEAN_SPEC)[0] == "TN"
+    assert score_fixture(_report(Finding("medium", "other", "a", 1, "t", "r", "s")), _CLEAN_SPEC)[0] == "FP"
+
+
+def test_score_error_report():
+    assert score_fixture(_report(error="llm down"), _BUGGY_SPEC)[0] == "ERROR"
+
+
+def test_evaluate_metrics_math(tmp_path):
+    # one buggy + one clean fixture; stub inspector returns canned reports.
+    (tmp_path / "bug").mkdir()
+    (tmp_path / "bug" / "m.py").write_text("x=1\n")
+    (tmp_path / "bug" / "expected.json").write_text(json.dumps(_BUGGY_SPEC))
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "ok" / "m.py").write_text("y=2\n")
+    (tmp_path / "ok" / "expected.json").write_text(json.dumps(_CLEAN_SPEC))
+
+    class _Stub:
+        def review(self, target):
+            if target.description == "bug":
+                return _report(Finding("high", "blind-index-or-unchecked-write",
+                                       "m.py", 1, "t", "silent original_line", "s"))
+            return _report()  # clean → no findings
+
+    m = evaluate(_Stub(), fixtures_dir=tmp_path)
+    assert m["counts"] == {"TP": 1, "FN": 0, "FP": 0, "TN": 1, "ERROR": 0}
+    assert m["recall"] == 1.0 and m["precision"] == 1.0
+    assert m["false_positive_rate"] == 0.0
 
 
 def test_blind_apply_patch_acceptance():

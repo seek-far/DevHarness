@@ -1,0 +1,9 @@
+{
+  "kind": "buggy",
+  "note": "Real session defect. thread_id = fixture_id is identical across every cell/agent/run, and the checkpoint DB is one shared file. Cells are documented as independent trials, but cell N silently RESUMES cell N-1's saved state, cross-contaminating outcomes. No test catches it; results just become wrong/non-reproducible.",
+  "must_find": {
+    "defect_class": "eval-or-state-contamination",
+    "min_severity": "high",
+    "rationale_keywords_any": ["thread_id", "shared", "resume", "across", "independent", "leak", "reproducib"]
+  }
+}

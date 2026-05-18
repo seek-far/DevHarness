@@ -1,0 +1,5 @@
+{
+  "kind": "clean",
+  "note": "Correct constants table + safe accessor with a sane default. No defect. Any high/medium finding is a false positive.",
+  "must_not_find": { "max_severity_allowed": "low" }
+}

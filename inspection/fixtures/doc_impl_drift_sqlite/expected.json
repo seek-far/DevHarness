@@ -1,0 +1,9 @@
+{
+  "kind": "buggy",
+  "note": "Real session defect. Docstring promises a per-<run_id> path AND a BF_CHECKPOINT_PATH override; the implementation returns a single constant 'state.sqlite' and never reads the env var. Callers trusting the docstring share one DB across runs. No test catches a docstring lie.",
+  "must_find": {
+    "defect_class": "doc-impl-drift",
+    "min_severity": "medium",
+    "rationale_keywords_any": ["run_id", "BF_CHECKPOINT_PATH", "constant", "docstring", "env", "ignored"]
+  }
+}

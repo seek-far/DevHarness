@@ -1,0 +1,9 @@
+{
+  "kind": "buggy",
+  "note": "Real session defect. format_prior_patch reads f['original']/f['replacement'], but make_fix produces 'original_line'/'new_line'. .get(...) returns None -> the retry block renders silently empty. No test catches it (the function still returns a string). Cross-file wrong-key.",
+  "must_find": {
+    "defect_class": "silent-empty-or-wrong-key",
+    "min_severity": "medium",
+    "rationale_keywords_any": ["original_line", "new_line", "wrong key", "does not exist", "empty", "None"]
+  }
+}

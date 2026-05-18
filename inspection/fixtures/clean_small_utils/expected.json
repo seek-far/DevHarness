@@ -1,0 +1,5 @@
+{
+  "kind": "clean",
+  "note": "Correct ceil-division (with zero guard) and correct symmetric clamp. No defect. Any high/medium finding is a false positive.",
+  "must_not_find": { "max_severity_allowed": "low" }
+}
