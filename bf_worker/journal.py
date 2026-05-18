@@ -84,6 +84,21 @@ class JournalWriter:
                     encoding="utf-8",
                 )
 
+            if state.get("code_review_findings") is not None:
+                # Phase-2 reviewer output — persisted for offline evaluation
+                # (shadow: never affected the run; acting: rounds>0 means it
+                # fed a fixer round back).
+                (run_dir / "code_review.json").write_text(
+                    json.dumps({
+                        "status": state.get("code_review_status"),
+                        "would_escalate": state.get("code_review_would_escalate"),
+                        "rounds": state.get("code_review_rounds"),
+                        "finding_count": state.get("code_review_finding_count"),
+                        "findings": state.get("code_review_findings"),
+                    }, indent=2, default=str),
+                    encoding="utf-8",
+                )
+
             flag = _flag_reason(record)
             if flag:
                 (run_dir / "FLAGGED").write_text(flag + "\n", encoding="utf-8")

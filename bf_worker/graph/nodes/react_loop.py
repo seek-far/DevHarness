@@ -186,6 +186,16 @@ def _format_retry_feedback(
         refl_block, _ = sanitize_untrusted(str(reflection), "reflection")
         sections.append(refl_block)
 
+    # Phase-2 code review, ACTING mode only: a test-passing patch was flagged
+    # for a high/high defect tests miss. `code_review_note` is set ONLY by the
+    # acting mode (shadow mode always leaves it None → block skipped → prompt
+    # unchanged). Wrapped untrusted: LLM text derived from the (untrusted)
+    # repo code.
+    code_review = state.get("code_review_note")
+    if code_review:
+        cr_block, _ = sanitize_untrusted(str(code_review), "code_review")
+        sections.append(cr_block)
+
     # Authoritative current file state. The patcher assigns by index and never
     # checks original_line, so line_number MUST be chosen against the file as
     # it is *now* (a prior attempt may already have rewritten lines).

@@ -127,11 +127,28 @@ Phase-2 gate. The gate is the **stable fixture set** (recall/precision/FPR
 1.00 across runs); 2 hardest boundary duals are accepted to flip ~20%
 single-pass and tracked separately (`boundary_flaky` in their
 `expected.json`), not counted in the gate. Each finding carries a
-self-rated `confidence`; Phase-2 wiring will be advisory by default and
-escalate a fixer round only on high severity **and** high confidence. Phase 2 (a graph node consuming
-the inspector on the test-passed branch, with a bounded fixer↔review round
-cap) and a "reviewer rescues a stuck fixer" enhancement are planned — see
-`/mnt/d/PL/sdlcma/code-review-agent-plan.md`.
+self-rated `confidence`. **Phase 2 is implemented**: the `code_review` graph
+node runs the inspector on the test-passed patch (before commit) with a
+config-selected **`mode`**:
+
+- **shadow** (default) — only records its findings; **never affects the
+  fix** (no feedback, no routing change; always proceeds to commit). Decouples
+  measurement from intervention: the would-be value is recorded
+  (`RunRecord.code_review_status` / `_finding_count` / `_would_escalate` /
+  `_findings`, plus `code_review.json` in the journal) and evaluated offline
+  at **zero fix-rate risk**. `fix_rate` is identical to baseline by
+  construction.
+- **acting** (explicit opt-in) — additionally feeds a high-severity &
+  high-confidence finding back into the fixer for a **bounded** extra round
+  (never blocks a green patch).
+
+Opt-in via `LangGraphAgent(code_review=...)` (default OFF → pure pass-through,
+baseline unchanged): `True` / `"kwargs": {"code_review": true}` → **shadow**;
+`{"code_review": {"mode": "acting", "max_rounds": N}}` → **acting**.
+`configs/code_review_vs_baseline.json` carries baseline + shadow + acting
+specs. Enable acting only after a shadow run shows `would_escalate` is precise
+enough. The "reviewer rescues a stuck fixer" enhancement remains planned —
+see `/mnt/d/PL/sdlcma/code-review-agent-plan.md`.
 
 ### GitLab Mode
 

@@ -18,6 +18,7 @@ from graph.routing import (
     route_after_react_loop,
     route_after_create_fix_branch,
     route_after_apply_and_test,
+    route_after_code_review,
     route_after_ci,
 )
 from graph.nodes.precheck_already_fixed import precheck_already_fixed
@@ -27,6 +28,7 @@ from graph.nodes.fetch_source_file     import fetch_source_file
 from graph.nodes.react_loop            import react_loop
 from graph.nodes.create_fix_branch     import create_fix_branch
 from graph.nodes.apply_change_and_test import apply_change_and_test
+from graph.nodes.code_review           import code_review
 from graph.nodes.commit_change         import commit_change
 from graph.nodes.wait_ci_result        import wait_ci_result
 from graph.nodes.create_mr             import create_mr
@@ -52,6 +54,7 @@ def build_graph(checkpointer=None) -> StateGraph:
     g.add_node("react_loop",             react_loop)
     g.add_node("create_fix_branch",      create_fix_branch)
     g.add_node("apply_change_and_test",  apply_change_and_test)
+    g.add_node("code_review",            code_review)
     g.add_node("commit_change",          commit_change)
     g.add_node("wait_ci_result",         wait_ci_result)
     g.add_node("create_mr",              create_mr)
@@ -110,9 +113,18 @@ def build_graph(checkpointer=None) -> StateGraph:
         "apply_change_and_test",
         route_after_apply_and_test,
         {
-            "commit_change":  "commit_change",
+            "code_review":    "code_review",
             "react_loop":     "react_loop",
             "handle_failure": "handle_failure",
+        },
+    )
+
+    g.add_conditional_edges(
+        "code_review",
+        route_after_code_review,
+        {
+            "react_loop":    "react_loop",     # acting mode only: escalated
+            "commit_change": "commit_change",  # shadow/disabled/clean/advisory/exhausted
         },
     )
 

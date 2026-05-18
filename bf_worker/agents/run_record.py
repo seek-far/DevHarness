@@ -112,6 +112,11 @@ class RunRecord:
     create_mr_retries:         int | None = None  # transient retries inside create_mr before create_review succeeded
     reflection_count:          int | None = None  # post-mortems the reflection enhancement produced this run (None when the enhancement is not wired; ≤ MAX_FIX_RETRIES otherwise)
     reflection_mode:           str | None = None  # last reflection lens: "apply" (deterministic patch-mechanics note, no LLM) | "test" (LLM causal post-mortem) | None (enhancement not wired / never fired)
+    code_review_status:         str | None = None  # Phase-2 reviewer: None=disabled | clean | advisory | would_escalate (shadow) | escalated/rounds_exhausted (acting) | skipped_budget | skipped_no_files | error
+    code_review_finding_count:  int | None = None  # findings the inspector returned
+    code_review_would_escalate: bool | None = None  # True iff a high-sev AND high-conf finding was present (shadow records it; acting acts on it)
+    code_review_findings:       list | None = None  # compact per-finding dicts for offline evaluation of the reviewer's value
+    code_review_rounds:         int | None = None  # acting mode only: fixer↔review rounds escalated (independent of fix_retry_count; None/0 in shadow)
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -185,6 +190,11 @@ class RunRecord:
             create_mr_retries         = s.get("create_mr_retries"),
             reflection_count          = s.get("reflection_count"),
             reflection_mode           = s.get("reflection_mode"),
+            code_review_status         = s.get("code_review_status"),
+            code_review_finding_count  = s.get("code_review_finding_count"),
+            code_review_would_escalate = s.get("code_review_would_escalate"),
+            code_review_findings       = s.get("code_review_findings"),
+            code_review_rounds         = s.get("code_review_rounds"),
         )
 
     def to_dict(self) -> dict[str, Any]:

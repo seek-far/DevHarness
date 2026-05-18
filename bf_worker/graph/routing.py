@@ -74,17 +74,33 @@ def route_after_create_fix_branch(state: BugFixState) -> str:
 
 def route_after_apply_and_test(state: BugFixState) -> str:
     """
-    Passed   → commit_change
+    Passed   → code_review (Phase-2 reviewer of the green patch; in shadow
+               mode / disabled it only records and falls through to
+               commit_change — see route_after_code_review)
     Failed   → react_loop (retry with test_output)  or  handle_failure
-
-"""
+    """
     if state.get("test_passed"):
-        return "commit_change"
+        return "code_review"
 
     if state.get("fix_retry_count", 0) < MAX_FIX_RETRIES:
         return "react_loop"
 
     return "handle_failure"
+
+
+# ── after code_review ──────────────────────────────────────────────────────────
+
+def route_after_code_review(state: BugFixState) -> str:
+    """
+    Only `escalated` branches back to react_loop — and ONLY the acting mode
+    ever sets that status (within its bounded round cap). Shadow mode,
+    disabled, clean, advisory, would_escalate, rounds_exhausted, skipped,
+    error → commit_change: the reviewer must never block shipping a
+    test-passing patch, and in shadow mode it can never branch at all.
+    """
+    if state.get("code_review_status") == "escalated":
+        return "react_loop"
+    return "commit_change"
 
 
 # ── after wait_ci_result ───────────────────────────────────────────────────────

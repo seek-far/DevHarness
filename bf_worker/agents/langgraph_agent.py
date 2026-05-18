@@ -19,12 +19,33 @@ from agents.base import Agent, BugInput, FixOutput, Outcome
 from agents.run_record import RunRecord
 from enhancements.hooks import HookName, HookRegistry
 from graph.builder import build_graph
+from graph.nodes.code_review import CodeReviewConfig
 from graph.state import BugFixState
 from services.budget import RunBudget
 from services.checkpointer import build_checkpointer
 from settings import worker_cfg as cfg
 
 logger = logging.getLogger(__name__)
+
+
+def _build_code_review_config(spec: Any) -> CodeReviewConfig:
+    """Normalize the `code_review` kwarg into a CodeReviewConfig.
+
+    Default (falsy) → disabled, so the code_review node is a pass-through and
+    baseline behaviour is byte-identical.
+    """
+    if isinstance(spec, CodeReviewConfig):
+        return spec
+    if spec is True:
+        return CodeReviewConfig(enabled=True)  # mode defaults to "shadow"
+    if isinstance(spec, dict):
+        return CodeReviewConfig(
+            enabled=bool(spec.get("enabled", True)),
+            mode=str(spec.get("mode", "shadow")),
+            max_rounds=int(spec.get("max_rounds", 1)),
+            inspector=spec.get("inspector"),
+        )
+    return CodeReviewConfig(enabled=False)
 
 
 class LangGraphAgent(Agent):
@@ -36,16 +57,27 @@ class LangGraphAgent(Agent):
         enhancements: Iterable[tuple[str, Any]] | None = None,
         agent_config: dict | None = None,
         checkpointer: Any = "auto",
+        code_review: Any = None,
     ):
         """
         checkpointer:
           "auto"  — pick a backend per BF_CHECKPOINT_BACKEND (default: sqlite)
           None    — disable checkpointing (graph compiled without one)
           object  — use the given checkpointer instance (tests inject MemorySaver)
+
+        code_review (Phase 2 reviewer, opt-in; default OFF → baseline
+        unchanged). Has a `mode`: "shadow" (default — records findings,
+        NEVER affects the fix) or "acting" (explicit — a would-escalate
+        finding feeds a bounded extra fixer round).
+          falsy           — disabled (code_review node is a pass-through)
+          True            — enabled, mode="shadow"
+          dict            — {"enabled","mode","max_rounds","inspector"}
+          CodeReviewConfig— used as-is (tests inject a fake inspector)
         """
         self._journal = journal
         self._enhancements = list(enhancements or [])
         self._agent_config = agent_config or {}
+        self._code_review = _build_code_review_config(code_review)
 
         if checkpointer == "auto":
             self._checkpointer = build_checkpointer()
@@ -81,6 +113,7 @@ class LangGraphAgent(Agent):
                 "provider":  bug_input.provider,
                 "hooks":     hooks,
                 "budget":    budget,
+                "code_review": self._code_review,
                 # thread_id keys the checkpoint store. bug_id is the natural
                 # choice — same bug across restarts shares a thread, which is
                 # how resume works. Same key as the idempotency layer's dedup

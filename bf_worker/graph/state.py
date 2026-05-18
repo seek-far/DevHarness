@@ -49,6 +49,17 @@ class BugFixState(TypedDict, total=False):
     reflection_note: str | None     # injected by reflection enhancement (POST_APPLY_TEST) — causal post-mortem of the last failed attempt, rendered first in the retry prompt
     reflection_count: int | None    # number of reflection post-mortems produced this run (≤ MAX_FIX_RETRIES)
     reflection_mode: str | None     # last reflection's lens: "apply" (deterministic patch-mechanics note, no LLM) | "test" (LLM causal post-mortem)
+    # Phase-2 reviewer has a `mode` (config-selected): "shadow" (default —
+    # records findings, NEVER affects the fix; decouples measurement from
+    # intervention at zero fix_rate risk) or "acting" (explicit opt-in — a
+    # would-escalate finding is fed back into react_loop for a bounded extra
+    # fixer round). Findings/telemetry are recorded in BOTH modes.
+    code_review_status: str | None  # None=disabled | clean | advisory | would_escalate (shadow) | escalated (acting, fed back) | rounds_exhausted (acting, cap hit) | skipped_budget | skipped_no_files | error
+    code_review_finding_count: int | None  # findings the inspector returned
+    code_review_would_escalate: bool | None  # True iff a high-severity AND high-confidence finding was present (it WOULD act in acting mode; recorded in shadow too)
+    code_review_findings: list | None  # compact per-finding dicts for offline evaluation
+    code_review_note: str | None    # acting mode only: advisory feedback fed into react_loop (rendered by _format_retry_feedback); None in shadow mode
+    code_review_rounds: int | None  # acting mode only: independent fixer↔review round counter (bounds the code_review→react_loop loop; separate from fix_retry_count)
 
     # ── branch / apply ────────────────────────────────────────────────────────
     fix_branch_name: str | None

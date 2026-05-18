@@ -1,0 +1,20 @@
+[
+  {
+    "name": "baseline",
+    "agent": "langgraph",
+    "kwargs": {},
+    "notes": "Reference: code review OFF. The code_review graph node is a pure pass-through, so this is byte-identical to the pre-Phase-2 pipeline."
+  },
+  {
+    "name": "code_review_shadow",
+    "agent": "langgraph",
+    "kwargs": { "code_review": true },
+    "notes": "Phase 2, mode=shadow (default). Runs the inspector on the test-passing patch (before commit) and ONLY RECORDS its findings — never affects the fix. RunRecord captures code_review_status / _finding_count / _would_escalate / _findings. fix_rate must be IDENTICAL to baseline; the value signal is the recorded would_escalate rate + findings, judged offline. Zero fix_rate risk."
+  },
+  {
+    "name": "code_review_acting",
+    "agent": "langgraph",
+    "kwargs": { "code_review": { "mode": "acting", "max_rounds": 1 } },
+    "notes": "Phase 2, mode=acting (explicit opt-in). Same recording PLUS: a would-escalate finding (severity=high AND confidence=high) feeds an advisory note back into react_loop for a bounded extra fixer round (code_review_rounds, independent of fix_retry_count, max_rounds=1). Never blocks a green patch (rounds_exhausted/clean/advisory/skipped/error -> commit). Use only after the shadow run shows would_escalate is precise enough — acting on a flaky would_escalate can regress fix_rate."
+  }
+]

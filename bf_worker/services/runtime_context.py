@@ -61,3 +61,13 @@ def get_budget(config: RunnableConfig | None) -> Any:
     nodes that don't exercise the budget path don't have to construct one.
     """
     return _config_value(config, "budget", required=False)
+
+
+def get_code_review(config: RunnableConfig | None) -> Any:
+    """Return the CodeReviewConfig, or None when code review is disabled.
+
+    Optional and disabled by default: the code_review node is a pure
+    pass-through when this is absent/None, so baseline runs are unchanged
+    (no inspector LLM call, telemetry fields stay None).
+    """
+    return _config_value(config, "code_review", required=False)
