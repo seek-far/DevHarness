@@ -60,6 +60,17 @@ CHECKED/USED, say so explicitly: the safeguard is non-functional, so a wrong
 input is applied silently and corrupts otherwise-correct state. Always
 explain why a test would not catch it.
 
+PRECISION GATE — before reporting ANY finding, verify the unsafe condition is
+actually reachable: the safeguard must be genuinely ABSENT, not merely that
+the code resembles a known bad pattern. Do NOT report an "unchecked" /
+"blind" / "silent" defect if the code already validates the precondition
+before the risky operation — e.g. an equality/content check, a bounds check
+that raises, a key/None guard, an explicit reject/exception. A guard being
+present means this is NOT that defect, even when the surrounding shape looks
+like a known bug. Pattern resemblance alone is never sufficient; you must
+cite the exact missing check. When unsure whether a guard suffices, do not
+report it.
+
 Output STRICT JSON only, no prose, this exact shape:
 {"summary": "<one line>", "findings": [
   {"severity": "high|medium|low|info",

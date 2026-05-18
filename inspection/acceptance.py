@@ -40,10 +40,17 @@ def score_fixture(report: InspectionReport, spec: dict) -> tuple[str, str]:
     kind = spec.get("kind")
     if kind == "buggy":
         mf = spec["must_find"]
+        # defect_class may be a single class or a list of acceptable classes
+        # — some real defects legitimately map to more than one niche class
+        # (e.g. a cross-file wrong-key bug is both silent-empty-or-wrong-key
+        # AND contract-mismatch). The scorer must not punish a correct
+        # detection for picking an equally-valid sibling class.
+        dc = mf["defect_class"]
+        ok_classes = {dc} if isinstance(dc, str) else set(dc)
         want_rank = _RANK[mf["min_severity"]]
         kws = [k.lower() for k in mf.get("rationale_keywords_any", [])]
         for f in report.findings:
-            if (f.defect_class == mf["defect_class"]
+            if (f.defect_class in ok_classes
                     and _RANK.get(f.severity, 0) >= want_rank
                     and (not kws or any(k in f.rationale.lower() for k in kws))):
                 return "TP", f"{f.severity}/{f.defect_class}: {f.title}"

@@ -189,6 +189,18 @@ def test_score_buggy_fn_wrong_class_or_severity_or_kw():
     assert score_fixture(_report(Finding("high", "blind-index-or-unchecked-write", "a", 1, "t", "unrelated reason", "s")), _BUGGY_SPEC)[0] == "FN"
 
 
+def test_score_buggy_defect_class_list_accepts_any():
+    spec = {"kind": "buggy", "must_find": {
+        "defect_class": ["silent-empty-or-wrong-key", "contract-mismatch"],
+        "min_severity": "medium", "rationale_keywords_any": ["original_line"]}}
+    r = _report(Finding("high", "contract-mismatch", "a.py", 8, "t",
+                         "wrong key, original_line missing", "s"))
+    assert score_fixture(r, spec)[0] == "TP"
+    r2 = _report(Finding("high", "other", "a.py", 8, "t",
+                          "original_line", "s"))
+    assert score_fixture(r2, spec)[0] == "FN"
+
+
 def test_score_clean_tn_and_fp():
     assert score_fixture(_report(), _CLEAN_SPEC)[0] == "TN"
     assert score_fixture(_report(Finding("low", "other", "a", 1, "t", "r", "s")), _CLEAN_SPEC)[0] == "TN"
