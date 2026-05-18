@@ -1,0 +1,5 @@
+{
+  "kind": "clean",
+  "note": "Correct guarded index write (explicit bounds-check-then-raise; 0-based contract stated in the docstring). Resembles blind-index-or-unchecked-write but the safeguard is genuinely present and sufficient. Precision stress for the blind-index class with a different correct idiom than clean_anchored_apply.",
+  "must_not_find": { "max_severity_allowed": "low" }
+}

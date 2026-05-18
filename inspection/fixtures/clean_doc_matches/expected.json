@@ -1,0 +1,5 @@
+{
+  "kind": "clean",
+  "note": "Docstring matches the implementation exactly (env override IS read; default path IS as documented). Resembles doc_impl_drift_sqlite but is correct. Precision stress for the doc-impl-drift class — the inspector must not hallucinate drift.",
+  "must_not_find": { "max_severity_allowed": "low" }
+}

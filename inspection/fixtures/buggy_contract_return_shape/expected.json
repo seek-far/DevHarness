@@ -1,0 +1,9 @@
+{
+  "kind": "buggy",
+  "note": "Cross-file return-shape contract mismatch (different shape than the wrong-key fixture). fetch() returns a (found, value) tuple; consumer does `if fetch(k):` — a non-empty tuple is ALWAYS truthy, even when found is False. So first_present always returns the first key, silently wrong, no error. Each file is correct in isolation.",
+  "must_find": {
+    "defect_class": ["contract-mismatch", "silent-empty-or-wrong-key"],
+    "min_severity": "high",
+    "rationale_keywords_any": ["tuple", "always truthy", "always true", "return shape", "(found", "first key"]
+  }
+}

@@ -18,11 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from inspection.base import SEVERITIES
+from inspection.base import CONFIDENCES, SEVERITIES
 from inspection.inspector import LLMInspector
 from inspection.loader import load_target
 
 _SEV_RANK = {s: i for i, s in enumerate(reversed(SEVERITIES))}  # high=3 .. info=0
+_CONF_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
 def _format(report) -> str:
@@ -34,7 +35,8 @@ def _format(report) -> str:
     for i, f in enumerate(report.findings, 1):
         loc = f"{f.file}:{f.line}" if f.line else f.file
         lines += [
-            f"{i}. [{f.severity}/{f.defect_class}] {f.title}  ({loc})",
+            f"{i}. [{f.severity}/{f.confidence}-conf/{f.defect_class}] "
+            f"{f.title}  ({loc})",
             f"   why: {f.rationale}",
             f"   fix: {f.suggestion}",
         ]
@@ -48,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", default="", help="write the JSON report to this file")
     ap.add_argument("--fail-on", choices=SEVERITIES, default=None,
                     help="exit non-zero if a finding at/above this severity exists")
+    ap.add_argument("--min-confidence", choices=CONFIDENCES, default="low",
+                    help="with --fail-on, only count findings at/above this "
+                         "confidence (tolerant gate; default: low = count all)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -62,8 +67,11 @@ def main(argv: list[str] | None = None) -> int:
     if report.error:
         return 2
     if args.fail_on:
-        threshold = _SEV_RANK[args.fail_on]
-        if any(_SEV_RANK.get(f.severity, 0) >= threshold for f in report.findings):
+        sev_t = _SEV_RANK[args.fail_on]
+        conf_t = _CONF_RANK[args.min_confidence]
+        if any(_SEV_RANK.get(f.severity, 0) >= sev_t
+               and _CONF_RANK.get(f.confidence, 0) >= conf_t
+               for f in report.findings):
             return 1
     return 0
 

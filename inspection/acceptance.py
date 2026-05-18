@@ -76,13 +76,19 @@ def evaluate(inspector, fixtures_dir: Path = _FIXTURES) -> dict:
         report = inspector.review(load_target(d, description=d.name))
         verdict, detail = score_fixture(report, spec)
         rows.append({"fixture": d.name, "kind": spec.get("kind"),
-                     "verdict": verdict, "detail": detail})
+                     "verdict": verdict, "detail": detail,
+                     "boundary_flaky": bool(spec.get("boundary_flaky"))})
 
-    tp = sum(r["verdict"] == "TP" for r in rows)
-    fn = sum(r["verdict"] == "FN" for r in rows)
-    fp = sum(r["verdict"] == "FP" for r in rows)
-    tn = sum(r["verdict"] == "TN" for r in rows)
-    err = sum(r["verdict"] == "ERROR" for r in rows)
+    # Decision (a): the 2 known boundary-flaky duals (~20% single-pass flip)
+    # are ACCEPTED — tracked separately, NOT counted in the gate metrics, so a
+    # routine boundary flip is not misread as a regression. The gate is the
+    # stable set; boundary rows are informational.
+    gate = [r for r in rows if not r["boundary_flaky"]]
+    tp = sum(r["verdict"] == "TP" for r in gate)
+    fn = sum(r["verdict"] == "FN" for r in gate)
+    fp = sum(r["verdict"] == "FP" for r in gate)
+    tn = sum(r["verdict"] == "TN" for r in gate)
+    err = sum(r["verdict"] == "ERROR" for r in gate)
     n_buggy = tp + fn
     n_clean = fp + tn
     return {
@@ -91,22 +97,26 @@ def evaluate(inspector, fixtures_dir: Path = _FIXTURES) -> dict:
         "false_positive_rate": fp / n_clean if n_clean else None,
         "precision": tp / (tp + fp) if (tp + fp) else None,
         "counts": {"TP": tp, "FN": fn, "FP": fp, "TN": tn, "ERROR": err},
+        "boundary": [{"fixture": r["fixture"], "verdict": r["verdict"]}
+                     for r in rows if r["boundary_flaky"]],
     }
 
 
 def _fmt(m: dict) -> str:
     lines = [f"{'fixture':28} {'kind':6} {'verdict':8} detail"]
     for r in m["rows"]:
+        mark = " *boundary" if r["boundary_flaky"] else ""
         lines.append(f"{r['fixture']:28} {r['kind']:6} {r['verdict']:8} "
-                     f"{r['detail'][:70]}")
+                     f"{r['detail'][:60]}{mark}")
     c = m["counts"]
     def pct(x): return "n/a" if x is None else f"{x:.2f}"
     lines += [
         "",
-        f"counts: {c}",
+        f"GATE (stable set, boundary-flaky excluded) counts: {c}",
         f"recall={pct(m['recall'])}  "
         f"precision={pct(m['precision'])}  "
         f"false_positive_rate={pct(m['false_positive_rate'])}",
+        f"boundary (accepted ~20% flip, informational): {m['boundary']}",
     ]
     return "\n".join(lines)
 

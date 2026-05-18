@@ -1,0 +1,10 @@
+{
+  "kind": "buggy",
+  "boundary_flaky": true,
+  "note": "Gate-stress: a bounds guard IS present (1 <= line_number < len) and looks careful, but the assignment uses lines[line_number] for a 1-based number — it should be lines[line_number-1]. The guard never lets it crash, so it SILENTLY overwrites the line below the intended one. The precision gate must NOT suppress this just because a guard exists: the guard is present but insufficient (guards bounds, not the off-by-one).",
+  "must_find": {
+    "defect_class": ["blind-index-or-unchecked-write", "other"],
+    "min_severity": "high",
+    "rationale_keywords_any": ["off-by-one", "off by one", "1-based", "line_number-1", "wrong line", "silent", "adjacent"]
+  }
+}

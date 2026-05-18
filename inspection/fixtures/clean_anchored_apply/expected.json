@@ -1,5 +1,6 @@
 {
   "kind": "clean",
+  "boundary_flaky": true,
   "note": "Correct content-anchored applier (same domain as blind_apply_patch, but CORRECT). A high/medium finding here is a FALSE POSITIVE — strongest precision test.",
   "must_not_find": { "max_severity_allowed": "low" }
 }

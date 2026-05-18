@@ -1,0 +1,5 @@
+{
+  "kind": "clean",
+  "note": "Resembles the silent-empty/wrong-key pattern (.get with a default) but is CORRECT: the key is documented optional and the default is the intended behavior. Flagging this is a false positive — precision stress for the silent-empty class.",
+  "must_not_find": { "max_severity_allowed": "low" }
+}

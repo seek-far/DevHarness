@@ -93,9 +93,29 @@ def test_loader_missing_path_raises():
 
 
 def test_finding_normalized_clamps_bad_values():
-    f = Finding("BOGUS", "not-a-class", "f.py", 1, "t", "r", "s").normalized()
+    f = Finding("BOGUS", "not-a-class", "f.py", 1, "t", "r", "s", "BOGUS").normalized()
     assert f.severity == "info"
     assert f.defect_class == "other"
+    assert f.confidence == "low"        # unknown/missing confidence → low (advisory)
+
+
+def test_finding_confidence_default_and_passthrough():
+    assert Finding("high", "other", "f", 1, "t", "r", "s").confidence == "low"
+    assert Finding("high", "other", "f", 1, "t", "r", "s", "high").normalized().confidence == "high"
+
+
+def test_parse_extracts_confidence_default_low():
+    j = json.dumps({"summary": "s", "findings": [
+        {"severity": "high", "defect_class": "other", "file": "a", "line": 1,
+         "title": "t", "rationale": "r", "suggestion": "s"}]})  # no confidence
+    _, fnd = _parse(j)
+    assert fnd[0].confidence == "low"
+    j2 = json.dumps({"summary": "s", "findings": [
+        {"severity": "high", "confidence": "high", "defect_class": "other",
+         "file": "a", "line": 1, "title": "t", "rationale": "r",
+         "suggestion": "s"}]})
+    _, fnd2 = _parse(j2)
+    assert fnd2[0].confidence == "high"
 
 
 def test_report_json_roundtrips():
@@ -231,6 +251,52 @@ def test_evaluate_metrics_math(tmp_path):
     assert m["counts"] == {"TP": 1, "FN": 0, "FP": 0, "TN": 1, "ERROR": 0}
     assert m["recall"] == 1.0 and m["precision"] == 1.0
     assert m["false_positive_rate"] == 0.0
+    assert m["boundary"] == []
+
+
+def test_evaluate_excludes_boundary_flaky_from_gate(tmp_path):
+    # a boundary-flaky buggy fixture that the inspector MISSES must not drag
+    # the gate recall down — it is tracked separately (decision (a)).
+    (tmp_path / "stable").mkdir()
+    (tmp_path / "stable" / "m.py").write_text("x=1\n")
+    (tmp_path / "stable" / "expected.json").write_text(json.dumps(_BUGGY_SPEC))
+    (tmp_path / "edge").mkdir()
+    (tmp_path / "edge" / "m.py").write_text("y=2\n")
+    edge_spec = dict(_BUGGY_SPEC, boundary_flaky=True)
+    (tmp_path / "edge" / "expected.json").write_text(json.dumps(edge_spec))
+
+    class _Stub:
+        def review(self, target):
+            if target.description == "stable":
+                return _report(Finding("high", "blind-index-or-unchecked-write",
+                                       "m.py", 1, "t", "silent original_line", "s"))
+            return _report()  # edge → missed (FN), but it's boundary-flaky
+
+    m = evaluate(_Stub(), fixtures_dir=tmp_path)
+    assert m["counts"] == {"TP": 1, "FN": 0, "FP": 0, "TN": 0, "ERROR": 0}
+    assert m["recall"] == 1.0                       # gate unaffected by the edge miss
+    assert m["boundary"] == [{"fixture": "edge", "verdict": "FN"}]
+
+
+def test_all_fixtures_have_valid_spec():
+    """Structural guard (no network): every fixture dir has a well-formed
+    expected.json and at least one .py, so a malformed fixture fails fast."""
+    from inspection.base import DEFECT_CLASSES, SEVERITIES
+    fx_root = _ROOT / "inspection" / "fixtures"
+    dirs = [p for p in fx_root.iterdir() if p.is_dir()]
+    assert len(dirs) >= 13, f"expected >=13 fixtures, found {len(dirs)}"
+    for d in dirs:
+        assert list(d.glob("*.py")), f"{d.name}: no .py files"
+        spec = json.loads((d / "expected.json").read_text())
+        assert spec.get("kind") in ("buggy", "clean"), d.name
+        if spec["kind"] == "buggy":
+            mf = spec["must_find"]
+            dc = mf["defect_class"]
+            classes = [dc] if isinstance(dc, str) else dc
+            assert classes and all(c in DEFECT_CLASSES for c in classes), d.name
+            assert mf["min_severity"] in SEVERITIES, d.name
+        else:
+            assert spec["must_not_find"]["max_severity_allowed"] in SEVERITIES, d.name
 
 
 def test_blind_apply_patch_acceptance():

@@ -27,6 +27,12 @@ DEFECT_CLASSES = (
 )
 
 SEVERITIES = ("high", "medium", "low", "info")
+# Per-finding self-rated confidence. Decision (a): findings are advisory by
+# default; downstream (Phase 2) escalates a fixer round only on
+# severity=high AND confidence=high. A fine/boundary judgment (e.g. "is this
+# present guard sufficient?") must be rated `low` — unknown/invalid clamps to
+# `low` so an under-specified finding never auto-escalates.
+CONFIDENCES = ("high", "medium", "low")
 
 
 @dataclass
@@ -55,12 +61,14 @@ class Finding:
     title: str
     rationale: str         # why this is a real defect tests would miss
     suggestion: str        # direction of fix — NOT a patch
+    confidence: str = "low"  # one of CONFIDENCES; unknown clamps to "low"
 
     def normalized(self) -> "Finding":
         sev = self.severity if self.severity in SEVERITIES else "info"
         dc = self.defect_class if self.defect_class in DEFECT_CLASSES else "other"
+        conf = self.confidence if self.confidence in CONFIDENCES else "low"
         return Finding(sev, dc, self.file, self.line, self.title,
-                        self.rationale, self.suggestion)
+                        self.rationale, self.suggestion, conf)
 
 
 @dataclass

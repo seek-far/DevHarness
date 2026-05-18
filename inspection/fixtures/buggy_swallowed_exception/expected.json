@@ -1,0 +1,9 @@
+{
+  "kind": "buggy",
+  "note": "Gate-stress: an except IS present, but it is the defect — any bad/garbage input silently becomes 0 cents, so callers bill $0 with no error. A try/except that hides the failure while producing a wrong value is NOT a valid guard. The precision gate must not treat the except as a legitimizing safeguard.",
+  "must_find": {
+    "defect_class": ["silent-empty-or-wrong-key", "other"],
+    "min_severity": "medium",
+    "rationale_keywords_any": ["silently", "returns 0", "swallow", "except", "wrong", "masks"]
+  }
+}

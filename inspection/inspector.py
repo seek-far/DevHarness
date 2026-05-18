@@ -71,9 +71,15 @@ like a known bug. Pattern resemblance alone is never sufficient; you must
 cite the exact missing check. When unsure whether a guard suffices, do not
 report it.
 
+Also rate `confidence` (high|medium|low) per finding: how sure you are this
+is a real defect. A fine/boundary judgment — especially whether a PRESENT
+guard is sufficient or insufficient — MUST be "low". Reserve "high" for
+unambiguous defects.
+
 Output STRICT JSON only, no prose, this exact shape:
 {"summary": "<one line>", "findings": [
   {"severity": "high|medium|low|info",
+   "confidence": "high|medium|low",
    "defect_class": "<one of the classes above>",
    "file": "<path>", "line": <int or null>,
    "title": "<short>",
@@ -126,6 +132,7 @@ def _parse(raw: str) -> tuple[str, list[Finding]]:
                 title=str(f.get("title", "")).strip(),
                 rationale=str(f.get("rationale", "")).strip(),
                 suggestion=str(f.get("suggestion", "")).strip(),
+                confidence=str(f.get("confidence", "low")),
             ).normalized()
         )
     return summary, findings
