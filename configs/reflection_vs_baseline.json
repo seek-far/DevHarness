@@ -1,0 +1,19 @@
+[
+  {
+    "name": "baseline",
+    "agent": "langgraph",
+    "kwargs": {},
+    "notes": "Reference: LangGraphAgent with no enhancements. Must stay enhancement-free so the reflection delta is attributable."
+  },
+  {
+    "name": "reflection",
+    "agent": "langgraph",
+    "kwargs": {},
+    "enhancements": [
+      {
+        "kind": "reflection"
+      }
+    ],
+    "notes": "LangGraphAgent + reflection enhancement. POST_APPLY_TEST fires on every failed apply+test cycle: one LLM call distils the failure into a causal post-mortem (WRONG_HYPOTHESIS / WHY_IT_FAILED / NEXT_FOCUS) that react_loop renders first in the retry prompt, ahead of the raw test_output. Breaks the pure-resample retry loop. Costs at most MAX_FIX_RETRIES extra LLM calls per run, accounted against the run budget."
+  }
+]

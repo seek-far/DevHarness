@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F17-span-firstchar",
+  "category": "multifile-error-not-bug-site",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Multi-file reflection candidate. The failing test exercises render.render(); the traceback points there. render() uses text[s:e] which is CORRECT for the documented exclusive-end span contract. The bug is upstream in tokens.spans(): the first token's start is hardcoded to 1 instead of 0 (`i if k>0 else 1`), so only the first word loses its first char. No uniform consumer-side slice tweak in render can recover a per-first-token offset (s-1 would corrupt every other token / go negative), so a local fix in the blamed file is WRONG and fails other cases. Only the one-line producer fix (`start = i`) works. Reflection's cross-attempt tell: 'render's slicing is correct for exclusive spans; spans() returns a wrong start for the first token'. Screen before use."
+}

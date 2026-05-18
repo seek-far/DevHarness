@@ -15,6 +15,9 @@ def build_enhancements(specs: list[dict]) -> list[tuple]:
                 top_k=int(spec.get("top_k", 2)),
                 write_back=bool(spec.get("write_back", True)),
             ))
+        elif kind == "reflection":
+            from enhancements.reflection import build_reflection_callbacks
+            out.extend(build_reflection_callbacks())
         else:
             raise ValueError(f"unknown enhancement kind: {kind!r}")
     return out

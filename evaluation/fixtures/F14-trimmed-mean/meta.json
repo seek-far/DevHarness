@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F14-trimmed-mean",
+  "category": "misleading-signal",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Reflection demonstrator candidate. trimmed_mean builds `rest` (list minus one min and one max) but the return line averages `nums`, not `rest` — a one-token reference bug on the return line. The failing assertions show wildly-off numbers (26.5 vs 2.5) that pull the model toward 'the averaging/arithmetic is wrong', so naive raw-output retries keep editing _avg / the formula — which cannot fix it because the wrong *input* (nums) is passed. Reflection's cross-attempt tell ('your formula edits don't change the result; the value being averaged is the untrimmed list') is the unlock. Must be screened: keep only if baseline stably fails clean (>=4/5) via a test-failure path (apply_error falsy)."
+}

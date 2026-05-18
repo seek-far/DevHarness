@@ -138,14 +138,34 @@ these modes.\
 _TEST_OUTPUT_TAIL = 4000
 
 
-def _format_retry_feedback(state: BugFixState) -> str | None:
+def _number_lines(content: str) -> str:
+    """Render file content with 1-based line numbers.
+
+    The patcher (`services.apply_patch.apply_change_infos`) is pure index
+    assignment — `src_lines[line_number - 1] = new_line` — it never matches
+    `original_line` and cannot insert lines. So the only way the LLM can pick
+    a valid `line_number` on a retry is to see the *current* file numbered.
+    """
+    lines = content.split("\n")
+    width = max(2, len(str(len(lines))))
+    return "\n".join(f"{i:>{width}}| {ln}" for i, ln in enumerate(lines, 1))
+
+
+def _format_retry_feedback(
+    state: BugFixState, current_files: dict[str, str] | None = None
+) -> str | None:
     """Build a 'previous attempt failed, here's why' block for retries.
 
     Returns None on the first cycle (fix_retry_count == 0). On retries, returns
     a markdown section describing what was submitted last time and how it
-    failed, with each untrusted piece (prior patch, apply_error, test_output)
-    wrapped via sanitize_untrusted so a hostile pytest output cannot hijack the
-    LLM through the retry channel.
+    failed, with each untrusted piece (prior patch, current file, apply_error,
+    test_output) wrapped via sanitize_untrusted so a hostile pytest output
+    cannot hijack the LLM through the retry channel.
+
+    `current_files` maps repo-relative path -> current on-disk content (fetched
+    fresh by react_loop after the failed apply). Without it the LLM anchors
+    against a stale mental model of the file and emits an out-of-range
+    `line_number` — the dominant observed retry failure.
     """
     retry_n = state.get("fix_retry_count", 0) or 0
     if retry_n <= 0:
@@ -155,6 +175,34 @@ def _format_retry_feedback(state: BugFixState) -> str | None:
         f"## Previous attempt #{retry_n} failed — revise based on the feedback below."
     ]
 
+    # Reflection enhancement (POST_APPLY_TEST) distils the failure into a
+    # causal post-mortem. When present it leads: the structured lesson is the
+    # signal, the raw test_output below is the appendix. Absent → this block
+    # is skipped and the feedback is byte-identical to the pre-reflection
+    # behaviour. Wrapped untrusted: it is LLM text derived from untrusted CI
+    # output, same discipline as every other block here.
+    reflection = state.get("reflection_note")
+    if reflection:
+        refl_block, _ = sanitize_untrusted(str(reflection), "reflection")
+        sections.append(refl_block)
+
+    # Authoritative current file state. The patcher assigns by index and never
+    # checks original_line, so line_number MUST be chosen against the file as
+    # it is *now* (a prior attempt may already have rewritten lines).
+    if current_files:
+        cf_parts = [
+            "### AUTHORITATIVE current file state — the patcher does "
+            "`lines[line_number-1] = new_line` BY INDEX. It does NOT search "
+            "for `original_line`, and it CANNOT insert lines: each fix "
+            "replaces exactly one existing line. Pick every `line_number` "
+            "from THIS numbered view of the file as it is right now:"
+        ]
+        for path, content in current_files.items():
+            block, _ = sanitize_untrusted(_number_lines(content), f"current:{path}")
+            cf_parts.append(f"--- {path} (current) ---")
+            cf_parts.append(block)
+        sections.append("\n".join(cf_parts))
+
     prior = state.get("llm_result") or {}
     fixes = prior.get("fixes") or []
     if fixes:
@@ -162,11 +210,12 @@ def _format_retry_feedback(state: BugFixState) -> str | None:
         patch_lines: list[str] = []
         for i, f in enumerate(fixes, 1):
             target = f.get("file_path") or suspect
-            patch_lines.append(f"--- fix {i} in {target} ---")
-            patch_lines.append("- " + (f.get("original") or ""))
-            patch_lines.append("+ " + (f.get("replacement") or ""))
+            ln = f.get("line_number")
+            patch_lines.append(f"--- fix {i}: {target} line {ln} ---")
+            patch_lines.append("- " + str(f.get("original_line") or ""))
+            patch_lines.append("+ " + str(f.get("new_line") or ""))
         patch_block, _ = sanitize_untrusted("\n".join(patch_lines), "prior_patch")
-        sections.append("### What you submitted last time:")
+        sections.append("### What you submitted last time (this did NOT work):")
         sections.append(patch_block)
 
     apply_err = state.get("apply_error")
@@ -188,7 +237,9 @@ def _format_retry_feedback(state: BugFixState) -> str | None:
     return "\n".join(sections)
 
 
-def _build_initial_messages(state: BugFixState) -> list:
+def _build_initial_messages(
+    state: BugFixState, current_files: dict[str, str] | None = None
+) -> list:
     suspect_path = state.get("suspect_file_path") or ""
     parse_failed = bool(state.get("parse_trace_fallback"))
     fetch_failed = bool(state.get("source_fetch_failed"))
@@ -233,7 +284,7 @@ def _build_initial_messages(state: BugFixState) -> list:
     if hint:
         hint_block, _ = sanitize_untrusted(hint, "memory_hint")
         parts.extend(["", hint_block])
-    retry_feedback = _format_retry_feedback(state)
+    retry_feedback = _format_retry_feedback(state, current_files)
     if retry_feedback:
         parts.extend(["", retry_feedback])
     return [
@@ -257,7 +308,30 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
             # `run` returns a merged copy when callbacks supplied updates.
             state = update
 
-    messages      = _build_initial_messages(state)
+    # On a retry, re-read the CURRENT on-disk content of every file the prior
+    # attempt touched (plus the suspect). A prior partial/failed apply may have
+    # already rewritten lines; without this the LLM picks line_number against a
+    # stale file and the patch lands out of range. Best-effort — never break
+    # the run if a file can't be read.
+    current_files: dict[str, str] = {}
+    if (state.get("fix_retry_count") or 0) > 0 and provider is not None:
+        targets: list[str] = []
+        sp = state.get("suspect_file_path")
+        if sp:
+            targets.append(sp)
+        for f in (state.get("llm_result") or {}).get("fixes") or []:
+            fp = f.get("file_path")
+            if fp and fp not in targets:
+                targets.append(fp)
+        for p in targets:
+            try:
+                current_files[p] = provider.fetch_file(p)
+            except Exception as exc:
+                logger.warning(
+                    "react_loop: could not refresh %s for retry prompt: %s", p, exc
+                )
+
+    messages      = _build_initial_messages(state, current_files)
     step_count    = 0
     llm_result    = None
     confidence    = None

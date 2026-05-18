@@ -204,6 +204,26 @@ def test_evaluation_sweep_e2e(tmp_path: Path, monkeypatch):
     assert fl["avg_iterations"] == 0.5
 
 
+# ── eval must never share checkpoints across cells ───────────────────────────
+
+
+def test_make_agent_disables_checkpointer():
+    """Evaluation cells must run WITHOUT a checkpointer. The checkpointer is
+    keyed on thread_id=bug_id; in eval bug_id is the fixture id, identical
+    across every sweep/spec/process sharing one sqlite file, so checkpointing
+    silently resumes a prior cell's state and cross-contaminates outcomes.
+    make_agent must force it off (unless a spec explicitly overrides)."""
+    a = runner.make_agent({"name": "baseline", "agent": "langgraph", "kwargs": {}})
+    assert a._checkpointer is None
+
+    # explicit per-spec override is still honoured (setdefault, not override).
+    # False is a checkpointer value LangGraph's graph compiler accepts.
+    b = runner.make_agent({
+        "name": "x", "agent": "langgraph", "kwargs": {"checkpointer": False},
+    })
+    assert b._checkpointer is False
+
+
 # ── small companion checks for metrics edge cases ─────────────────────────────
 
 

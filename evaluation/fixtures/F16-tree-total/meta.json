@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F16-tree-total",
+  "category": "misleading-signal",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Reflection demonstrator candidate. _collect() preorder-collects all node values correctly (root included). total() returns sum(vals[1:]) — the [1:] slice drops the root. The shortfall looks like 'the root isn't collected', luring raw-output retries into editing _collect (append root again -> double counts, new wrong numbers, same region). The fix is removing the [1:] slice on total()'s return line. Reflection can spot 'every node is already collected; the sum drops the first element'. Screen before use."
+}

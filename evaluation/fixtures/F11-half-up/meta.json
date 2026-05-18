@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F11-half-up",
+  "category": "oscillation-trap",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Reflection demonstrator. Python round() is banker's rounding; spec wants ties away from zero. The naive fix int(x+0.5) satisfies the positive-tie tests but inverts the negative-tie tests; the obvious negative fix breaks the positive tests. Raw test_output only shows the currently-failing regime, so a temp=0 retry oscillates between one-sided forms. The correct fix is sign-branched (floor(x+0.5) if x>=0 else ceil(x-0.5)) — a structural change neither failing test's output hints at. Reflection's cross-attempt post-mortem ('you keep trading positive ties for negative ties; the spec is away-from-zero, branch on sign') is the missing signal."
+}

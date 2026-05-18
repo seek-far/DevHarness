@@ -13,14 +13,48 @@ import subprocess
 import sys
 from pathlib import Path
 
+from enhancements.hooks import HookName
 from graph.state import BugFixState
 from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from services.apply_patch import apply_change_infos
 from services.patch_guard import PatchScopeError, validate_patch_scope
-from services.runtime_context import get_provider
+from services.runtime_context import get_budget, get_hooks, get_provider
 
 logger = logging.getLogger(__name__)
+
+
+def _finalize(
+    state: BugFixState,
+    config: Optional[RunnableConfig],
+    result: dict,
+) -> dict:
+    """Fire the POST_APPLY_TEST hook on failure, fold its output into `result`.
+
+    On a passing run this is a no-op (a green run must never pay the cost of
+    a post-mortem). On any failure path it runs the hook against a merged
+    view of state+result so callbacks (e.g. the reflection enhancement) see
+    the patch, apply_error and test_output that just failed.
+
+    `_budget` is passed transiently so a callback can account its own LLM
+    call against the run budget; it is stripped from the persisted delta so
+    the non-serializable RunBudget never enters checkpointed state. Only keys
+    a callback actually added/changed are returned, keeping this node generic
+    (no enhancement-specific keys hard-coded here).
+    """
+    if result.get("test_passed"):
+        return result
+    hooks = get_hooks(config)
+    if hooks is None or not hooks.has(HookName.POST_APPLY_TEST):
+        return result
+    before = {**state, **result}
+    after = hooks.run(HookName.POST_APPLY_TEST, {**before, "_budget": get_budget(config)})
+    delta = {
+        k: v
+        for k, v in after.items()
+        if not k.startswith("_") and (k not in before or before.get(k) != v)
+    }
+    return {**result, **delta}
 
 
 def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
@@ -65,12 +99,12 @@ def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] =
                 "within the repo."
             )
             logger.warning("apply_change_and_test rejected fix: %s", err)
-            return {
+            return _finalize(state, config, {
                 "apply_error": err,
                 "test_passed": False,
                 "test_output": f"[apply rejected]\n{err}",
                 "fix_retry_count": state.get("fix_retry_count", 0) + 1,
-            }
+            })
         fixes_by_file.setdefault(target, []).append(f)
 
     # ── 1. Apply patch ───────────────────────────────────────────────���────────
@@ -82,19 +116,19 @@ def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] =
             logger.info("patch applied to %s (%d edits)", src_filepath, len(fixes))
     except PatchScopeError as exc:
         logger.warning("patch_guard rejected fix: %s", exc)
-        return {
+        return _finalize(state, config, {
             "apply_error": f"patch rejected by guardrail: {exc}",
             "test_passed": False,
             "test_output": f"[patch_guard rejected]\n{exc}",
             "fix_retry_count": state.get("fix_retry_count", 0) + 1,
-        }
+        })
     except Exception as exc:
         logger.warning("apply_patch failed: %s", exc)
-        return {
+        return _finalize(state, config, {
             "apply_error": str(exc),
             "test_passed": False,
             "test_output": f"[apply_patch error]\n{exc}",
-        }
+        })
 
     # ── 2. Create isolated venv and install project dependencies ──────────────
     venv_path = repo_path / ".venv"
@@ -139,4 +173,4 @@ def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] =
     }
     if not test_passed:
         result["fix_retry_count"] = state.get("fix_retry_count", 0) + 1
-    return result
+    return _finalize(state, config, result)

@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F12-ceil-pages",
+  "category": "oscillation-trap",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Reflection demonstrator. Buggy ceil-division `items // per_page + 1`. Dropping `+ 1` fixes test_exact_multiple and test_zero_items but regresses test_one_over and test_one_under; re-adding `+ 1` flips it back. Two mutually-exclusive forms of one expression (`x//y` vs `x//y+1`); raw test_output only ever shows one side, so a temp=0 retry oscillates. The correct fix is the third form `(items + per_page - 1) // per_page`, which no single failing test's output suggests. Reflection naming the trade-off redirects to the joint fix."
+}

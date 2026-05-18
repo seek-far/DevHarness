@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F15-span",
+  "category": "misleading-signal",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Reflection demonstrator candidate. span() correctly selects in-range values into `sel`, but the return line computes max(sel) - min(values) — min over the ORIGINAL list, not the selection. The failing numbers (9 vs 5) read like an arithmetic/selection bug, drawing raw-output retries toward select() / is_between(), which are correct. The fix is a one-token operand swap on the return line. Reflection can name 'the subtraction uses min of the unfiltered values'. Screen before use."
+}

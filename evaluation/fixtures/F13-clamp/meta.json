@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F13-clamp",
+  "category": "oscillation-trap",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Reflection demonstrator. Buggy symmetric clamp `min(v, limit)` (lower bound missing). Replacing it with `max(v, -limit)` fixes test_low/test_neg_within but regresses test_high/test_high_2; switching back flips it. Two mutually-exclusive single-expression forms (min vs max); raw test_output shows only one failing side, so a temp=0 retry oscillates. The correct fix composes both: `max(-limit, min(v, limit))` — a structure neither failing test's output hints at. Reflection naming the min/max trade-off redirects to the composed fix."
+}

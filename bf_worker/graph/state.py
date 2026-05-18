@@ -46,6 +46,9 @@ class BugFixState(TypedDict, total=False):
     # ── enhancements (optional) ───────────────────────────────────────────────
     memory_hint: str | None         # injected by memory enhancement (PRE_REACT_LOOP)
     memory_matches_count: int | None  # number of memory entries surfaced
+    reflection_note: str | None     # injected by reflection enhancement (POST_APPLY_TEST) — causal post-mortem of the last failed attempt, rendered first in the retry prompt
+    reflection_count: int | None    # number of reflection post-mortems produced this run (≤ MAX_FIX_RETRIES)
+    reflection_mode: str | None     # last reflection's lens: "apply" (deterministic patch-mechanics note, no LLM) | "test" (LLM causal post-mortem)
 
     # ── branch / apply ────────────────────────────────────────────────────────
     fix_branch_name: str | None

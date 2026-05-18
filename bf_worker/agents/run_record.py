@@ -110,6 +110,8 @@ class RunRecord:
     commit_change_retries:     int | None = None  # transient retries inside commit_change before commit_and_push succeeded
     wait_ci_result_retries:    int | None = None  # transient retries inside wait_ci_result before the provider returned (0 even on timeout: timeouts are not transients)
     create_mr_retries:         int | None = None  # transient retries inside create_mr before create_review succeeded
+    reflection_count:          int | None = None  # post-mortems the reflection enhancement produced this run (None when the enhancement is not wired; ≤ MAX_FIX_RETRIES otherwise)
+    reflection_mode:           str | None = None  # last reflection lens: "apply" (deterministic patch-mechanics note, no LLM) | "test" (LLM causal post-mortem) | None (enhancement not wired / never fired)
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -181,6 +183,8 @@ class RunRecord:
             commit_change_retries     = s.get("commit_change_retries"),
             wait_ci_result_retries    = s.get("wait_ci_result_retries"),
             create_mr_retries         = s.get("create_mr_retries"),
+            reflection_count          = s.get("reflection_count"),
+            reflection_mode           = s.get("reflection_mode"),
         )
 
     def to_dict(self) -> dict[str, Any]:

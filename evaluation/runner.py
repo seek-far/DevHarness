@@ -59,6 +59,19 @@ def make_agent(agent_spec: dict) -> Agent:
             kwargs.setdefault("enhancements", build_enhancements(enh_specs))
         # Eval runs do NOT write to the running-mode journal — eval has its own
         # output directory (evaluation/runs/), so journal stays None.
+        #
+        # checkpointer=None is REQUIRED here, not optional. The checkpointer is
+        # keyed on thread_id=bug_id, and in evaluation bug_id is the *fixture
+        # id* — identical across every sweep, every spec in a multi-spec
+        # config, and every parallel process, all sharing one sqlite file.
+        # With checkpointing on, cell N silently *resumes* cell N-1's saved
+        # state (the LangGraph resume semantics meant for crash recovery in
+        # running mode), cross-contaminating outcomes (observed: a baseline
+        # cell inheriting a reflection cell's reflection_count, test_passed
+        # leaking, fix_rate flapping run-to-run). Evaluation cells are
+        # independent fresh trials — resume is meaningless here. Unless the
+        # spec explicitly overrides it, force checkpointing off.
+        kwargs.setdefault("checkpointer", None)
         return LangGraphAgent(agent_config=agent_spec, **kwargs)
     raise ValueError(f"unknown agent kind: {kind!r}")
 

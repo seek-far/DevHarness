@@ -179,13 +179,17 @@ def memory_lookup(state):
 agent = LangGraphAgent(enhancements=[(HookName.AGENT_PRE_FIX, memory_lookup)])
 ```
 
-Currently wired hook points: `agent.pre_fix`, `agent.post_fix` (called from `LangGraphAgent.fix()`), and `graph.pre_react_loop` (called from `graph/nodes/react_loop.py` — used by the memory enhancement to inject a `memory_hint` into the initial prompt). Other graph-internal points (`graph.post_react_loop`, `graph.pre_apply_test`, `graph.post_apply_test`) are *named* but their call sites in the graph nodes are added when the first enhancement that needs them lands — adding hook calls without a concrete consumer would be premature.
+Currently wired hook points: `agent.pre_fix`, `agent.post_fix` (called from `LangGraphAgent.fix()`), `graph.pre_react_loop` (called from `graph/nodes/react_loop.py` — used by the memory enhancement to inject a `memory_hint` into the initial prompt), and `graph.post_apply_test` (called from `graph/nodes/apply_change_and_test.py` on every failure path — used by the reflection enhancement). Other graph-internal points (`graph.post_react_loop`, `graph.pre_apply_test`) are *named* but their call sites in the graph nodes are added when the first enhancement that needs them lands — adding hook calls without a concrete consumer would be premature.
 
 #### Bundled enhancement: memory lookup
 
 `bf_worker/enhancements/memory.py` is a token-overlap memory of past fixes. It registers a `PRE_REACT_LOOP` callback (queries `evaluation/memory/store.json` using `error_info` + `suspect_file_path` and injects up to `top_k` matches as `state["memory_hint"]`, which the ReAct prompt appends as a "Prior similar fixes (reference only)" section) and an `AGENT_POST_FIX` callback (appends each run's outcome to the store). The store is pre-seeded with 10 category-keyed lessons so the first sweep has something to retrieve. Compare baseline vs memory with `configs/memory_vs_baseline.json`.
 
-Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) into `(hook_name, callback)` tuples by `bf_worker/enhancements/build_enhancements.py:build_enhancements`. The same factory is used by both the evaluation runner (`evaluation/runner.py:make_agent`) and the running-mode entry points (`bf_worker/standalone.py` when `--config` is given, and GitLab workers when `BF_AGENT_CONFIG` is set), so the same agent spec file works across modes — e.g. `configs/memory.json` enables the memory enhancement on a single standalone run via `--config configs/memory.json`.
+#### Bundled enhancement: reflection
+
+`bf_worker/enhancements/reflection.py` is opt-in self-reflection. It registers a `POST_APPLY_TEST` callback that fires whenever an apply+test cycle fails (and never on a green run). The callback has two lenses, picked by whether the patch ran: a **test-failure lens** (patch applied, tests failed) makes **one** LLM call producing a causal post-mortem — `WRONG_HYPOTHESIS` / `WHY_IT_FAILED` / `NEXT_FOCUS` (`reflection_mode="test"`); and an **apply-crash lens** (patch never applied) which emits a *deterministic* patch-mechanics note with **no LLM call** — because that failure is mechanical, not a reasoning error: the patcher assigns by index (`lines[line_number-1]=new_line`), never matches `original_line`, and cannot insert lines, so the remedy is a fixed contract, not causal analysis (`reflection_mode="apply"`). Both store `state["reflection_note"]`. Separately, the retry prompt now re-reads each touched file's **current on-disk content rendered with line numbers** as an authoritative block, so the LLM picks a valid `line_number` instead of anchoring against a stale file (the dominant retry failure observed in practice). This is deliberately *not* an "add more information" step: the raw pytest output is already fed back by the retry channel, and facing the same raw dump the LLM tends to re-derive the same wrong fix (pure resample). Reflection is a compression + causal re-framing over information already in hand, so `react_loop._format_retry_feedback` renders the post-mortem **first** and demotes the raw test output to an appendix beneath it. Without the enhancement the retry prompt is byte-identical to before. The reflection LLM call is accounted against the per-run budget and is hard-capped at `MAX_FIX_RETRIES` post-mortems per run (enforced inside the callback — the hook fires on every failure path including apply-crashes that don't advance the retry counter, so routing alone does not bound it). Compare baseline vs reflection with `configs/reflection_vs_baseline.json`.
+
+Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}` or `{"kind": "reflection"}`) into `(hook_name, callback)` tuples by `bf_worker/enhancements/build_enhancements.py:build_enhancements`. The same factory is used by both the evaluation runner (`evaluation/runner.py:make_agent`) and the running-mode entry points (`bf_worker/standalone.py` when `--config` is given, and GitLab workers when `BF_AGENT_CONFIG` is set), so the same agent spec file works across modes — e.g. `configs/memory.json` enables the memory enhancement on a single standalone run via `--config configs/memory.json`.
 
 ### RunRecord (canonical telemetry schema)
 
@@ -197,6 +201,7 @@ Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}`) i
 - Branch creation: `fix_branch_name`, `branch_create_status`, `base_branch`, `base_commit`, `branch_create_result`
 - Commit/push: `commit_status`, `commit_branch`, `commit_hash`, `commit_result`
 - Review output: `review_status`, `review_url`, `review_id`, `review_iid`, `review_branch`, `patch_file`, `report_file`, `review_result`
+- Enhancement telemetry: `reflection_count` — how many reflection post-mortems the reflection enhancement produced this run; `reflection_mode` — the last lens used (`"apply"` deterministic patch-mechanics note | `"test"` LLM causal post-mortem | `None` when not wired / never fired). Additive and backward-compatible, so `SCHEMA_VERSION` stays `"1"`.
 
 GitLab runs populate commit and merge-request fields, local-git runs populate local commit fields, and no-git runs populate patch/report fields.
 
@@ -217,7 +222,7 @@ python -m evaluation.cli report <run_id>                             # compariso
 python -m evaluation.cli journal-prune --older-than 30d --keep-flagged  # dry-run retention
 ```
 
-The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source. `list-journal --flagged` is only a review filter; `promote` can promote flagged or unflagged entries. Promotion tries to populate `fixtures/<id>/source/` automatically from the journal's buggy git commit (`base_commit`, falling back to `branch_create_result.commit`) and repo metadata (`project_web_url`, `source_repo_path`, or explicit `--source-repo`). If repo/commit information is missing, promotion still creates the fixture and leaves `source/` for manual population.
+The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source. Evaluation also runs every cell with **checkpointing disabled** (`make_agent` sets `checkpointer=None`): the LangGraph checkpointer is keyed on `thread_id=bug_id`, which in evaluation is the fixture id — identical across every sweep, spec, and parallel process sharing one sqlite file — so leaving it on makes one cell silently resume another's state and corrupts the comparison. Never enable checkpointing for a sweep; if results look impossible (a baseline cell with reflection telemetry, `test_passed` contradicting the trajectory), suspect a stale checkpoint. `list-journal --flagged` is only a review filter; `promote` can promote flagged or unflagged entries. Promotion tries to populate `fixtures/<id>/source/` automatically from the journal's buggy git commit (`base_commit`, falling back to `branch_create_result.commit`) and repo metadata (`project_web_url`, `source_repo_path`, or explicit `--source-repo`). If repo/commit information is missing, promotion still creates the fixture and leaves `source/` for manual population.
 
 #### Journal retention (`bench journal-prune`)
 
@@ -589,7 +594,8 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   ├── enhancements/         # LangGraphAgent-only extension layer
 │   │   ├── hooks.py          #   HookRegistry, HookName (named extension points)
 │   │   ├── build_enhancements.py  # Spec-dispatch factory: {kind:...} → (hook, callback) tuples
-│   │   └── memory.py         #   Bundled memory-lookup enhancement (PRE_REACT_LOOP + AGENT_POST_FIX)
+│   │   ├── memory.py         #   Bundled memory-lookup enhancement (PRE_REACT_LOOP + AGENT_POST_FIX)
+│   │   └── reflection.py     #   Bundled self-reflection enhancement (POST_APPLY_TEST)
 │   ├── providers/
 │   │   ├── base.py           # Provider ABCs (SourceProvider, VCSProvider, ReviewProvider)
 │   │   ├── gitlab_provider.py  # GitLab implementation (owns the Repo helper for git CLI + GitLab REST)
@@ -622,7 +628,8 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 ├── configs/                  # Agent specs (consumed by evaluation sweeps and `standalone --config`)
 │   ├── baseline.json         #   No-enhancements reference point
 │   ├── memory.json           #   Memory-only single spec — pass to `bf_worker.standalone --config`
-│   └── memory_vs_baseline.json  # Baseline + memory enhancement, side by side (eval sweep)
+│   ├── memory_vs_baseline.json  # Baseline + memory enhancement, side by side (eval sweep)
+│   └── reflection_vs_baseline.json  # Baseline + reflection enhancement, side by side (eval sweep)
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender

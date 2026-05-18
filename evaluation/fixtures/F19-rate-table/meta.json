@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F19-rate-table",
+  "category": "multifile-error-not-bug-site",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Multi-file reflection candidate (shared config table, fix must be at source). rates.RATES['plus'] is wrong (1.0; tests imply 0.5). Two INDEPENDENT consumers read RATES directly: billing.monthly() and report.projected(). Two tests fail in different modules. A tempting local fix (special-case 'plus' inside billing.monthly) satisfies test_plus_month but NOT test_plus_projected (different module, separate RATES read), so the locally-plausible fix is provably insufficient — only correcting the shared table entry fixes both. Misleading signal: '15 == 30' / '60 == 120' reads like a x2 arithmetic bug in the billing math. Reflection can name 'both failures share plan=plus across two modules; the rate table, not the math, is wrong'. Screen before use."
+}

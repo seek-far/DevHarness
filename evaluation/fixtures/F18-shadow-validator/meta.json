@@ -1,0 +1,8 @@
+{
+  "fixture_id": "F18-shadow-validator",
+  "category": "multifile-error-not-bug-site",
+  "difficulty": "hard",
+  "test_cmd": "pytest",
+  "expected_outcome": "fixed",
+  "notes": "Multi-file reflection candidate (shadowing duplicate). Traceback blames forms.validate(). forms.py imports the canonical, CORRECT validators.is_valid_code (a red herring — imported, never called) and also defines a private duplicate _check() with a wrong regex (\\d{2} instead of \\d{3}); validate() calls _check. The strong attractor: a model fetching forms.py sees the authoritative-looking imported validator and may 'fix' validators.is_valid_code — which is already correct and not on the code path, so tests do not change at all. That null delta is exactly reflection's unique signal ('your edits don't change the result; validate() runs _check, not is_valid_code'). The one-line fix is _check's regex. Screen before use."
+}
