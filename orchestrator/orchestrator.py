@@ -30,7 +30,19 @@ class Orchestrator:
         logger.debug(f"{self._cfg=}")
         self._redis = aioredis.from_url(self._cfg.redis_url, decode_responses=False)
         self._registry = WorkerRegistry()
-        if self._cfg.env in ("local_docker_compose", "local_docker_compose_http"):
+        # Spawner selection is decoupled from the GitLab env via WORKER_SPAWNER.
+        # Empty/"auto" reproduces the historical by-env mapping exactly, so
+        # every existing env + test is byte-identical.
+        spawner_kind = (getattr(self._cfg, "worker_spawner", "") or "").lower()
+        if spawner_kind in ("", "auto"):
+            if self._cfg.env in ("local_docker_compose", "local_docker_compose_http"):
+                spawner_kind = "docker"
+            elif self._cfg.env == "local_k8s":
+                spawner_kind = "k8s"
+            else:
+                spawner_kind = "process"
+
+        if spawner_kind == "docker":
             from pathlib import Path
             worker_env_file = str(Path(__file__).resolve().parent.parent / "settings" / f"worker_{self._cfg.env}.env")
             self._spawner = DockerWorkerSpawner(
@@ -42,7 +54,7 @@ class Orchestrator:
                 worker_env_file=worker_env_file,
                 env=self._cfg.env,
             )
-        elif self._cfg.env == "local_k8s":
+        elif spawner_kind == "k8s":
             self._spawner = K8sJobSpawner(
                 registry=self._registry,
                 redis_url=self._cfg.redis_url,

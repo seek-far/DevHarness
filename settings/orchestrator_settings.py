@@ -44,6 +44,20 @@ class OrchestratorSettings(BaseAppSettings):
       test                → orchestrator_test.env
       production          → orchestrator_production.env
     """
+    # ── worker spawner selection ───────────────────────────────
+    # Decouples "where the worker runs" from "which GitLab" (env). Orchestrator
+    # -only (gateway/worker never spawn) so scoped here, not in base_settings.
+    #   "" / "auto" → derive from env (back-compat: docker for the
+    #                 local_docker_compose* envs, k8s for local_k8s, else
+    #                 subprocess) — existing envs/tests byte-identical.
+    #   "docker"    → DockerWorkerSpawner (Docker API, one container per bug)
+    #   "process"   → WorkerSpawner (subprocess)
+    #   "k8s"       → K8sJobSpawner
+    # Stage-2 (gitlab_saas in containers) sets WORKER_SPAWNER=docker so the
+    # gitlab.com env still spawns worker containers; host-mode gitlab_saas
+    # (infra/aws-gitlab, no Docker socket) leaves it unset → subprocess.
+    worker_spawner: str = ""
+
     # ── k8s Job mode (local_k8s) ───────────────────────────────
     # Read only by orchestrator.spawner.K8sJobSpawner when env == "local_k8s".
     # Scoped here (not base_settings) because the orchestrator is the only

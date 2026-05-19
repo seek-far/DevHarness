@@ -147,6 +147,41 @@ Verified 2026-05-19 (GitLab API): MR **!39** opened
 success**. Always pair the journal/worker-log with the GitLab-API cross-check
 (`merge_requests?source_branch=…` + `pipelines?ref=…`).
 
+### 4z-2. Containerized Stage-2 (`gitlab_saas` + cloudflared, no public IP)
+
+Same compose stack → gitlab.com. Override adds cloudflared and flips ENV:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gitlab_saas.yml \
+  --profile build build
+docker compose -f docker-compose.yml -f docker-compose.gitlab_saas.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.gitlab_saas.yml \
+  logs cloudflared            # → https://<rand>.trycloudflare.com
+# set the gitlab.com project webhook to  <that-url>/webhook  (pipeline events)
+# trigger a failing pipeline; verify on gitlab.com:
+#   merge_requests?source_branch=auto/bf/<bug>-<sha8>  +  that pipeline = success
+```
+
+- Webhook URL is the cloudflared `https://<rand>.trycloudflare.com/webhook`,
+  **not** an ip:port (no public IP; cloudflared dials out). Ephemeral —
+  changes on every cloudflared restart; re-set the gitlab.com webhook.
+- `orchestrator_gitlab_saas.env` sets `WORKER_SPAWNER=docker` so the
+  gitlab.com env still spawns worker containers (decoupled from env;
+  `tests/test_worker_spawner_selection.py` pins empty/`auto` = byte-identical
+  historical mapping).
+- Auth method is unchanged vs Stage 1 — same access token, same
+  `PRIVATE-TOKEN` REST header, no SSH; only the git URL is HTTPS/public
+  (`https://oauth2:<token>@gitlab.com/...`).
+- Token lives only in gitignored `settings/{worker,orchestrator}_gitlab_saas.
+  env` (+ baked into the local `dh-bf-worker` image) — short-lived, revoke
+  after. Same mutual-exclusion rule as §2/§4z.
+
+Verified 2026-05-19 (gitlab.com API): `lishu20161/order_be` →
+**MR !1 opened** `auto/bf/2026_05_19-19_49_42_9-5cf79cc5`→`main`, fix-branch
+CI success — both webhooks round-tripped through the cloudflared tunnel.
+
+- To teardown, docker compose down the two projects:
+  docker-compose.yml -f docker-compose.gitlab_saas.yml
 ### 4a. Option-1 end-to-end — exact procedure & last proven run
 
 This is the cheapest full GitLab-mode test (no VM); it rehearses the

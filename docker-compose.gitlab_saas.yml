@@ -1,0 +1,33 @@
+# Stage-2 override: same containerized stack as docker-compose.yml, but
+# pointed at gitlab.com (ENV=gitlab_saas) with a cloudflared quick tunnel for
+# inbound webhooks (no public IP needed — cloudflared dials OUT to Cloudflare
+# and forwards to the in-stack gateway). The GitLab container is NOT joined to
+# sdlcma_net here: gitlab.com is public, reached over normal outbound HTTPS.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gitlab_saas.yml \
+#     --profile build build
+#   docker compose -f docker-compose.yml -f docker-compose.gitlab_saas.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.gitlab_saas.yml \
+#     logs cloudflared      # ← read the https://<rand>.trycloudflare.com URL
+services:
+  gateway:
+    environment:
+      ENV: gitlab_saas
+
+  orchestrator:
+    # ENV=gitlab_saas; WORKER_SPAWNER=docker comes from
+    # settings/orchestrator_gitlab_saas.env so the orchestrator container still
+    # spawns each worker as a container via the Docker socket (the gitlab.com
+    # env would otherwise fall back to the in-container subprocess spawner,
+    # which has no bf_worker code).
+    environment:
+      ENV: gitlab_saas
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://gateway:8000
+    networks: [sdlcma_net]
+    depends_on:
+      - gateway
+    restart: unless-stopped
