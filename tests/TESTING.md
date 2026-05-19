@@ -100,11 +100,52 @@ setup contracts: `docs/deployment.md` (local-only) + each
 |---|---|---|
 | `infra/local-gitlab/` (Option 1) | stack on the WSL host, GitLab=docker-compose on Windows | `local_multi_process` |
 | `infra/devstack-gitlab/` (Option 2) | stack inside a DevStack OpenStack VM, same GitLab | `local_multi_process` |
+| `docker-compose.yml` (cloud Stage 1) | **containerized** stack, GitLab=docker-compose on Windows | `local_docker_compose_http` |
 | `infra/aws-gitlab/` | single host, gitlab.com (SaaS) | `gitlab_saas` |
 
 Each: `bash infra/<x>/setup.sh` → trigger a failing pipeline → `bash
 infra/<x>/gitlab-smoke.sh` → `bash infra/<x>/teardown.sh`. Exit 0 =
 `(fixed, opened)` within `TIMEOUT`; non-zero on timeout/wrong outcome.
+
+### 4z. Containerized Stage-1 (`local_docker_compose_http`)
+
+Cloud-track Stage 1: the *whole* stack containerized, proving the
+containerization itself locally at $0 before pointing the same compose stack
+at gitlab.com (Stage 2 = `gitlab_saas` + cloudflared; see
+`/mnt/d/PL/sdlcma/cloud-gitlab-plan.md`).
+
+```bash
+bash infra/local-gitlab/teardown.sh              # MUST: mutually exclusive — see below
+docker network create sdlcma_net 2>/dev/null || true
+docker network connect sdlcma_net gitlab         # GitLab container resolvable as `gitlab`
+docker compose --profile build build             # builds gateway/orchestrator/worker
+docker compose up -d                             # ENV=local_docker_compose_http
+# repoint the project webhook → http://gateway:8000/webhook (pipeline events)
+# trigger a failing order_be pipeline; then verify on GitLab (source of truth):
+#   MR opened auto/bf/<bug>-<sha8> → main  +  that fix-branch pipeline = success
+docker compose down                              # teardown
+```
+
+> **PRECONDITION — mutually exclusive (same lesson as §2).** The orchestrator
+> uses Redis group `orchestrator-group-mp`. Any *other* orchestrator on a
+> reachable Redis (the Option-1 systemd stack, a stray `integration_test.py`)
+> races for webhooks. The compose Redis is internal to `sdlcma_net` (no host
+> publish) so it is isolated **from host Redis**, but still stop the Option-1
+> systemd stack first (`bash infra/local-gitlab/teardown.sh`) — only one
+> stack may own the `order_be` webhook + answer it.
+
+Two real packaging gaps Stage 1 caught locally (now fixed; both were
+invisible to host/systemd runs because the host venv/PYTHONPATH masked them):
+- `inspection/` not in the worker image (`graph/nodes/code_review.py` imports
+  it) → `Dockerfile.bf-worker` `COPY inspection/`.
+- worker image lacks `langgraph-checkpoint-sqlite`, checkpointer defaults to
+  `sqlite` → `DockerWorkerSpawner` injects `BF_CHECKPOINT_BACKEND=none`
+  (ephemeral container; also dodges the §2 contamination hazard).
+
+Verified 2026-05-19 (GitLab API): MR **!39** opened
+`auto/bf/2026_05_19-17_56_33_3-62d30b75`→`main`, fix-branch pipeline **#107
+success**. Always pair the journal/worker-log with the GitLab-API cross-check
+(`merge_requests?source_branch=…` + `pipelines?ref=…`).
 
 ### 4a. Option-1 end-to-end — exact procedure & last proven run
 

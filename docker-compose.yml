@@ -6,8 +6,9 @@ services:
   redis:
     image: redis:7-alpine
     networks: [sdlcma_net]
-    ports:
-      - "6379:6379"
+    # No host port publish on purpose: the stack reaches Redis as redis:6379
+    # over sdlcma_net. Publishing 6379 would clash with any host Redis and
+    # re-create the dual-stack consumer-group contention already debugged.
 
   gateway:
     image: dh-gateway:latest
@@ -17,7 +18,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      ENV: local_docker_compose
+      ENV: local_docker_compose_http
     networks: [sdlcma_net]
     depends_on:
       - redis
@@ -28,9 +29,20 @@ services:
       context: .
       dockerfile: Dockerfile.orchestrator
     environment:
-      ENV: local_docker_compose
+      ENV: local_docker_compose_http
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [sdlcma_net]
     depends_on:
       - redis
+
+  # Build-only. The orchestrator's DockerWorkerSpawner runs dh-bf-worker
+  # directly via the Docker socket (one container per bug, not a long-running
+  # service). This stanza only exists so `docker compose --profile build build`
+  # produces the image; it never starts under `docker compose up`.
+  worker:
+    image: dh-bf-worker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.bf-worker
+    profiles: ["build"]

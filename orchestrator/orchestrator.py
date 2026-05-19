@@ -30,7 +30,7 @@ class Orchestrator:
         logger.debug(f"{self._cfg=}")
         self._redis = aioredis.from_url(self._cfg.redis_url, decode_responses=False)
         self._registry = WorkerRegistry()
-        if self._cfg.env == "local_docker_compose":
+        if self._cfg.env in ("local_docker_compose", "local_docker_compose_http"):
             from pathlib import Path
             worker_env_file = str(Path(__file__).resolve().parent.parent / "settings" / f"worker_{self._cfg.env}.env")
             self._spawner = DockerWorkerSpawner(
@@ -40,6 +40,7 @@ class Orchestrator:
                 docker_network=self._cfg.docker_network,
                 ssh_private_key=self._cfg.ssh_private_key,
                 worker_env_file=worker_env_file,
+                env=self._cfg.env,
             )
         elif self._cfg.env == "local_k8s":
             self._spawner = K8sJobSpawner(

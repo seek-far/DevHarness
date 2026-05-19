@@ -64,6 +64,17 @@ class Repo:
         elif cfg.env == 'local_docker_compose':
             self.repo_url = repo_url.replace("gitlab.local","gitlab")
             self.ssh_url = _to_ssh_url(self.repo_url)
+        elif cfg.env == 'local_docker_compose_http':
+            # Containerized stack reaching a docker-compose GitLab by its
+            # container name, but token-over-HTTP with NO SSH: no ssh_url is
+            # set, so ensure_repo_ready falls into the generic
+            # http://{user}:{token}@… clone branch and never calls
+            # ensure_origin_ssh (push stays token-HTTP). Mirrors gitlab_saas's
+            # no-SSH model over plain HTTP, so Stage-1→Stage-2 differs only by
+            # transport. Additive: the local_docker_compose /
+            # local_multi_process / gitlab_saas branches are untouched (never
+            # == this env).
+            self.repo_url = repo_url.replace("gitlab.local", "gitlab")
         elif cfg.env == 'local_ts_host':
             if not "8080" in repo_url:
                 self.repo_url = repo_url.replace("xxx.tailnnn.ts.net" , "xxx.tailnnn.ts.net:8080")

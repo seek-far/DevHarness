@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir -r bf_worker/requirements.txt
 
 COPY bf_worker/ /app/bf_worker/
 COPY settings/ /app/settings/
+# graph/nodes/code_review.py imports the top-level `inspection` package
+# (Phase-2 reviewer); it is NOT under bf_worker/, so without this COPY the
+# worker crashes on import (ModuleNotFoundError: No module named 'inspection').
+COPY inspection/ /app/inspection/
 
 ENV PYTHONPATH="/app:/app/bf_worker"
 

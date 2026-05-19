@@ -593,6 +593,29 @@ docker build -f Dockerfile.bf-worker -t dh-bf-worker:latest .
 docker compose up
 ```
 
+### Mode 3: Docker Compose over HTTP, no SSH (`ENV=local_docker_compose_http`)
+
+Same containerized topology as Mode 2 (Gateway/Orchestrator/Redis as
+containers, per-bug worker spawned as a container via the Docker socket), but
+clone **and** push go over `http://<user>:<token>@gitlab/...` with **no SSH**
+— the additive sibling of Mode 2 that mirrors the `gitlab_saas` no-SSH model
+over plain HTTP. It is **Stage 1 of the cloud rehearsal**: prove the
+containerization itself locally before pointing the same stack at gitlab.com
+(`gitlab_saas` + cloudflared). No SSH key required; spawned worker containers
+run with `BF_CHECKPOINT_BACKEND=none` (ephemeral). Mutually exclusive with any
+other orchestrator on the same Redis (see `tests/TESTING.md`).
+
+```bash
+docker network create sdlcma_net                 # if absent
+docker network connect sdlcma_net gitlab         # GitLab container reachable as `gitlab`
+docker compose --profile build build             # builds gateway/orchestrator/worker
+docker compose up -d                             # ENV=local_docker_compose_http
+# point the project webhook at  http://gateway:8000/webhook
+```
+
+Full Stage-1/Stage-2 plan and the containerization gaps it caught:
+`docs/deployment.md` + `/mnt/d/PL/sdlcma/cloud-gitlab-plan.md`.
+
 ### GitLab Webhook Setup
 
 In your GitLab project → Settings → Webhooks:

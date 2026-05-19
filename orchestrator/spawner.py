@@ -133,13 +133,17 @@ class DockerWorkerSpawner:
 
     def __init__(self, registry: WorkerRegistry, redis_url: str,
                  worker_image: str, docker_network: str, ssh_private_key: str,
-                 worker_env_file: str):
+                 worker_env_file: str, env: str = "local_docker_compose"):
         self._registry = registry
         self._redis_url = redis_url
         self._worker_image = worker_image
         self._docker_network = docker_network
         self._ssh_private_key = ssh_private_key
         self._worker_env_file = worker_env_file
+        # ENV the spawned worker container runs under. Default keeps the
+        # existing local_docker_compose caller byte-identical;
+        # local_docker_compose_http passes its own env through.
+        self._env = env
 
         import docker
         self._docker = docker.from_env()
@@ -181,7 +185,14 @@ class DockerWorkerSpawner:
             "project_id": project_id,
             "project_web_url": project_web_url,
             "job_id": job_id,
-            "ENV": "local_docker_compose",
+            "ENV": self._env,
+            # Per-bug worker containers are ephemeral — a persistent sqlite
+            # checkpoint has no resume value and re-creates the shared-state
+            # contamination hazard (see project memory). Disabling also avoids
+            # depending on the optional langgraph-checkpoint-sqlite package in
+            # the worker image. Checkpointing is a pure perf optimization;
+            # "none" == the pre-checkpointing behaviour.
+            "BF_CHECKPOINT_BACKEND": "none",
         }
 
         if self._ssh_private_key:
