@@ -75,6 +75,13 @@ class Repo:
             if not "8080" in repo_url:
                 self.repo_url = self.repo_url.replace(cfg.gitlab_ip , f"{cfg.gitlab_ip}:8080")
             logger.debug(f"self.repo_url={self.repo_url},self.ssh_url={self.ssh_url}")
+        elif cfg.env == 'gitlab_saas':
+            # gitlab.com (SaaS): public HTTPS host, NO host rewrite (unlike the
+            # local_* envs which rewrite gitlab.local→localhost). clone/push
+            # auth is https://oauth2:<token>@… injected in ensure_repo_ready,
+            # so no SSH key / ssh_url is needed (mirrors local_multi_process's
+            # HTTP-token model, just over HTTPS).
+            self.repo_url = repo_url
 
         self.token = cfg.gitlab_private_token#os.environ["GITLAB_PRIVATE_TOKEN"]
 
@@ -130,7 +137,14 @@ class Repo:
             self.repo_path.mkdir(parents=True, exist_ok=True)
             # clone into the directory itself
             # if os.environ.get("ENV", "") != "local_ts_host":
-            if cfg.env not in ["local_ts_host", "local_ts_host__aca", "local_docker_compose"]: #os.environ.get("ENV", "")
+            if cfg.env == "gitlab_saas":
+                # HTTPS + access token: https://oauth2:<token>@gitlab.com/grp/proj
+                # (oauth2 is the GitLab-recommended username for PAT/project/
+                # group tokens). Explicit first branch → existing envs below
+                # are byte-identical (they are never == "gitlab_saas").
+                auth_url = self.repo_url.replace("https://", f"https://oauth2:{self.token}@", 1)
+                self.run("clone", auth_url, ".", cwd=self.repo_path)
+            elif cfg.env not in ["local_ts_host", "local_ts_host__aca", "local_docker_compose"]: #os.environ.get("ENV", "")
                 auth_url = self.repo_url.replace("http://", f"http://{cfg.gitlab_username}:{self.token}@")
                 self.run("clone", auth_url, ".", cwd=self.repo_path)
             elif cfg.env == "local_docker_compose":
