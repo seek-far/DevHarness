@@ -608,6 +608,12 @@ Trigger: **Pipeline events**
 
 ## Test Utilities
 
+**Full testing runbook: [`tests/TESTING.md`](tests/TESTING.md)** — every
+testing surface (unit, integration, evaluation sweeps, and the real-host
+GitLab-mode end-to-end smokes) with exact run steps, expected results, the
+GitLab-API cross-check, and coverage boundaries. The sections below are a
+quick reference.
+
 ### Integration Test
 
 Runs the full pipeline (gateway → orchestrator → worker) against an isolated Redis DB with a synthetic bug report:
