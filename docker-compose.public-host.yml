@@ -1,0 +1,42 @@
+# Public-host override: containerized stack → gitlab.com.
+#
+# Ingress reality: the host has a public IP but its upstream IONOS provider
+# firewall only permits inbound 22/80/443 (verified: host reaches its own
+# public IP:8000 via hairpin = 200, but external → :8000 times out). 80/443
+# belong to the live Caddy/sales-retro and must not be touched. So inbound
+# webhooks come via a **cloudflared** quick tunnel (outbound 443 only — not
+# subject to the inbound firewall), exactly as in local Stage-2. The
+# gateway's :8000 publish from the base file is harmless (only used for the
+# host-local healthcheck; unreachable externally).
+#
+# Same gitlab_saas auth as local Stage-2 (HTTPS + oauth2:<token>, no SSH).
+#
+# Deliberately NO `restart:` policy on any service → after a host reboot the
+# Docker daemon does NOT resurrect the stack. Only infra/public-host/setup.sh
+# brings it up; infra/public-host/teardown.sh takes it down. (Matches the
+# project-wide setup/teardown reboot-OFF semantic.)
+#
+# Usage (driven by infra/public-host/setup.sh):
+#   docker compose -f docker-compose.yml -f docker-compose.public-host.yml \
+#     --profile build build
+#   docker compose -f docker-compose.yml -f docker-compose.public-host.yml up -d
+services:
+  gateway:
+    environment:
+      ENV: gitlab_saas
+
+  orchestrator:
+    # WORKER_SPAWNER=docker comes from settings/orchestrator_gitlab_saas.env so
+    # the gitlab.com env still spawns each worker as a container via the
+    # Docker socket.
+    environment:
+      ENV: gitlab_saas
+
+  # Inbound webhook ingress — outbound-only tunnel, immune to the provider's
+  # inbound firewall. No `restart:` policy (reboot-OFF, like the rest).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://gateway:8000
+    networks: [sdlcma_net]
+    depends_on:
+      - gateway
