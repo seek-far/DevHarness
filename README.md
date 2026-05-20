@@ -562,9 +562,9 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 
 ---
 
-## Running (GitLab Mode Details)
+## Deployment Methods for GitLab Running Mode
 
-In GitLab mode, DevHarness can be deployed in two ways, controlled by `settings/.env`:
+In GitLab mode, DevHarness can be deployed in four ways, controlled by `settings/.env`:
 
 ### Mode 1: Local Multi-Process (`ENV=local_multi_process`)
 
@@ -616,6 +616,47 @@ docker compose up -d                             # ENV=local_docker_compose_http
 Full Stage-1/Stage-2 plan and the containerization gaps it caught:
 `docs/deployment.md` + `/mnt/d/PL/sdlcma/cloud-gitlab-plan.md`.
 
+### Mode 4: gitlab.com via cloudflared (`ENV=gitlab_saas`)
+
+Same containerized topology as Mode 3 (Gateway/Orchestrator/Redis + per-bug
+worker container), but the GitLab target is **gitlab.com**, not a self-hosted
+GitLab. This is the natural next step after Mode 3: the wiring rehearsed
+there (token/HTTP, no SSH) now points at the public SaaS.
+
+- HTTPS + `oauth2:<token>` for clone and push (no SSH, no host rewrite).
+- `WORKER_SPAWNER=docker` makes the orchestrator spawn workers as containers
+  in this containerized topology. (`WORKER_SPAWNER` is the additive seam
+  that decouples *where the worker runs* from *which GitLab* — leave it
+  unset on the AWS single-host systemd variant, see below.)
+- Inbound webhook reaches the gateway through a **cloudflared quick tunnel**:
+  gitlab.com posts to `https://<assigned>.trycloudflare.com/webhook`, and
+  cloudflared dials *out* and pushes the request to `gateway:8000` inside
+  `sdlcma_net`. No DNS, no TLS, no inbound port to open.
+
+**Why cloudflared — convenience, not necessity.** If the host has a public
+IP with inbound `:8000` open, or terminates HTTPS in front of the gateway
+(e.g. a reverse proxy on `:443`), gitlab.com can post directly and the
+tunnel is unnecessary. We chose cloudflared because Phase 0.5 ran on an
+IONOS host whose provider firewall only admits 22/80/443 — so even with a
+public IP we could not expose `:8000` directly — and because the quick
+tunnel needs no DNS or TLS provisioning, which is the fastest path for
+testing.
+
+```bash
+docker network create sdlcma_net                 # if absent
+docker compose --profile build build
+docker compose up -d                             # ENV=gitlab_saas
+# read the public URL from the cloudflared container's logs and configure
+# the gitlab.com project webhook to:
+#   https://<assigned>.trycloudflare.com/webhook
+```
+
+A single-host **systemd** variant on the same `gitlab_saas` env (no
+containers, subprocess spawner — leave `WORKER_SPAWNER` unset) is the AWS
+target; harness lives in `infra/aws-gitlab/`. Reboot-OFF semantic and the
+co-tenant rules with other services on the same public host are in
+`docs/deployment.md`.
+
 ### GitLab Webhook Setup
 
 In your GitLab project → Settings → Webhooks:
@@ -623,7 +664,9 @@ In your GitLab project → Settings → Webhooks:
 | Mode | Webhook URL |
 |---|---|
 | Local Multi-Process | `http://<your-host>:8000/webhook` |
-| Docker Compose | `http://gateway:8000/webhook` (within `sdlcma_net`) |
+| Docker Compose (SSH) | `http://gateway:8000/webhook` (within `sdlcma_net`) |
+| Docker Compose over HTTP | `http://gateway:8000/webhook` (within `sdlcma_net`) |
+| gitlab.com via cloudflared | `https://<assigned>.trycloudflare.com/webhook` (quick tunnel; direct `http://<host>:8000/webhook` also works if inbound `:8000` is open) |
 
 Trigger: **Pipeline events**
 
