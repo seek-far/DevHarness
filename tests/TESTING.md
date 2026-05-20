@@ -101,6 +101,7 @@ setup contracts: `docs/deployment.md` (local-only) + each
 | `infra/local-gitlab/` (Option 1) | stack on the WSL host, GitLab=docker-compose on Windows | `local_multi_process` |
 | `infra/devstack-gitlab/` (Option 2) | stack inside a DevStack OpenStack VM, same GitLab | `local_multi_process` |
 | `docker-compose.yml` (cloud Stage 1) | **containerized** stack, GitLab=docker-compose on Windows | `local_docker_compose_http` |
+| `infra/public-host/` (Phase 0.5) | **containerized** stack on a public-IP host, gitlab.com + cloudflared | `gitlab_saas` |
 | `infra/aws-gitlab/` | single host, gitlab.com (SaaS) | `gitlab_saas` |
 
 Each: `bash infra/<x>/setup.sh` → trigger a failing pipeline → `bash
@@ -182,6 +183,49 @@ CI success — both webhooks round-tripped through the cloudflared tunnel.
 
 - To teardown, docker compose down the two projects:
   docker-compose.yml -f docker-compose.gitlab_saas.yml
+
+### 4z-3. Public-host migration (`infra/public-host/`, Phase 0.5)
+
+Same containerized stack moved onto a real public-IP host (verified on
+`82.165.48.174`, Ubuntu 24.04, 2 vCPU / 1.8 GB, IONOS). Driven from the WSL
+dev box; SSH key + root account.
+
+```bash
+ssh -i ~/.ssh/sales_deploy root@82.165.48.174 \
+  'bash /root/sales_02-deploy/teardown.sh'    # free RAM: stop sales-retro
+bash infra/public-host/setup.sh               # docker, 4G swap, ship images,
+                                              # compose up, print tunnel URL
+# read the printed https://<rand>.trycloudflare.com URL and set it as the
+# gitlab.com project webhook (Pipeline events, SSL ON — valid cert)
+# trigger a failing pipeline; verify on gitlab.com API:
+#   merge_requests?source_branch=auto/bf/<bug>-<sha8>  +  that pipeline=success
+bash infra/public-host/teardown.sh            # compose down + swapoff+rm
+```
+
+> **PRECONDITION — co-tenant.** The host also runs the live `sales-retro`
+> app (Caddy → 127.0.0.1:8765) from a separate repo (`/mnt/d/my_git/
+> sales_02`). 2 GB RAM is tight, so always run `sales_02/deploy/teardown.sh`
+> *first* (stop + `systemctl disable`; reboot-OFF). Restore with
+> `sales_02/deploy/setup.sh` after. Caddy is left running throughout.
+>
+> **Reboot-OFF semantic (project-wide).** Compose services carry no
+> `restart:` policy and `teardown.sh` removes the swapfile too, so a host
+> reboot brings *nothing* SDLCMA back — only `setup.sh` does.
+
+Real finding worth pinning: the host's **upstream IONOS provider firewall
+drops inbound `:8000`** (only 22/80/443 reach the OS — verified via the host
+reaching its own public IP `:8000` 200 via hairpin while the external
+internet times out). So cloudflared is **mandatory here** even with a public
+IP. `docker-compose.public-host.yml` includes the cloudflared service for
+this reason; `setup.sh` prints the trycloudflare URL after up. (A Caddy
+reverse-proxy on the already-open `:443` is a possible later nicety but
+would edit the live Caddyfile — deliberately not done.)
+
+Verified 2026-05-20 (gitlab.com API): `lishu20161/order_be` retry →
+**MR !5 opened** `auto/bf/2026_05_19-22_06_22_4-5cf79cc5`→`main`, fix-branch
+CI pipeline **2538661005 success** — webhook (initial + validation) both
+round-tripped through the cloudflared tunnel.
+
 ### 4a. Option-1 end-to-end — exact procedure & last proven run
 
 This is the cheapest full GitLab-mode test (no VM); it rehearses the
