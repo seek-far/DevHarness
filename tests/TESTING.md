@@ -88,7 +88,35 @@ otherwise resumes a prior run across cells/specs/processes and contaminates
 results. Repeated/long sweeps run as parallel staggered background processes,
 never a sequential loop.
 
-## 4. Real-host GitLab-mode smokes (`infra/*/gitlab-smoke.sh`)
+## 4. One-command regression (`infra/*/regression.sh` + `tests/integration_test_wrapper.sh`)
+
+Each deployment has a single-entrypoint regression script that does
+**env check → version detection → update if stale → setup → smoke → restore**
+with timestamped progress lines and standard exit codes (0 PASS / 2 FAIL /
+3 TIMEOUT / 4 PRE-FLIGHT FAIL). Common flags:
+
+- `--timeout N`     — smoke wall-clock budget
+- `--no-update`     — skip rebuild/push step
+- `--no-teardown`   — leave stack running after smoke
+- `--keep-env`      — don't revert `settings/.env` or webhook URL
+
+| Script | What it covers | Default smoke target |
+|---|---|---|
+| `tests/integration_test_wrapper.sh` | `integration_test.py` (FastAPI TestClient, isolated Redis db=15) | in-process |
+| `infra/local-gitlab/regression.sh` | Option 1 (systemd, `local_multi_process`) | Windows docker-compose GitLab @ `localhost:8080` |
+| `infra/local-docker-compose/regression.sh` | Containerized stack (`local_docker_compose`) | Windows docker-compose GitLab on `sdlcma_net` |
+| `infra/public-host/regression.sh` | Stage 2 on IONOS public host, gitlab.com via cloudflared | gitlab.com `lishu20161/order_be` |
+| `infra/aws-ecs/regression.sh` | AWS ECS on EC2, gitlab.com via cloudflared | gitlab.com `lishu20161/order_be` |
+
+Each script's header comment lists its specific knobs (e.g. `aws-ecs` adds
+`--teardown=full` for `delete-stack`; `public-host` honours `HOST`/`SSH_KEY`
+env overrides). The scripts are idempotent: re-running picks up the right
+state automatically.
+
+The lower-level `setup.sh` / `gitlab-smoke.sh` / `teardown.sh` /
+`deploy-images.sh` building blocks remain for manual / partial use.
+
+## 5. Real-host GitLab-mode smokes (`infra/*/gitlab-smoke.sh`) — manual building blocks
 
 Three idempotent harnesses run the *whole* stack against a *real* GitLab and
 assert one full run reaches `outcome="fixed"` + an MR opened from
