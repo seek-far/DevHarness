@@ -18,11 +18,13 @@ class HealthMonitor:
         redis: Redis,
         heartbeat_key_tpl: str,
         check_interval: int = 5,
+        completed_key_tpl: str = "worker:completed:{bug_id}",
     ):
         self._registry = registry
         self._spawner = spawner
         self._redis = redis
         self._heartbeat_key_tpl = heartbeat_key_tpl
+        self._completed_key_tpl = completed_key_tpl
         self._check_interval = check_interval
         self._task: asyncio.Task | None = None
 
@@ -74,6 +76,22 @@ class HealthMonitor:
                     logger.warning(f"[Monitor] bug_id={bug_id} warmup timed out, marking failed")
                     self._registry.update_status(bug_id, "failed")
             else:
+                # Heartbeat expired AND the spawner-specific process status
+                # hasn't reported the exit code yet. Distinguish "worker
+                # exited cleanly but the container runtime is slow to report
+                # STOPPED" from "worker actually crashed" by checking the
+                # completion key the worker SETs in its `finally`. Without
+                # this check, a successful ECS run misfires ~30-60 restarts
+                # in the window between worker exit and lastStatus=STOPPED
+                # (verified on the 2026-05-21 MR !6 run).
+                completed_key = self._completed_key_tpl.format(bug_id=bug_id)
+                if await self._redis.exists(completed_key):
+                    logger.info(
+                        f"[Monitor] bug_id={bug_id} heartbeat expired but completion "
+                        f"key {completed_key} present — marking done (worker exited cleanly)"
+                    )
+                    self._registry.update_status(bug_id, "done")
+                    continue
                 logger.warning(f"[Monitor] bug_id={bug_id} heartbeat expired (ttl={ttl}), restarting")
                 await self._restart(bug_id)
 

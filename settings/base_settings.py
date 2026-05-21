@@ -35,6 +35,18 @@ class BaseAppSettings(BaseSettings):
     worker_heartbeat_interval: int = 10  # seconds
     worker_heartbeat_ttl: int = 30       # seconds
 
+    # ── Worker-completion signal (orchestrator's restart suppression) ─
+    # The worker SETs this key right before exiting (any outcome: fixed,
+    # no_fix, error, R10-short-circuit). The HealthMonitor reads it before
+    # restarting on heartbeat expiry — without this, a successfully-exited
+    # worker can look identical to a crashed one for the ~30-60s window
+    # between worker exit and the container runtime reporting STOPPED back
+    # via the spawner (real ECS bug observed 2026-05-21: 37 misfires after
+    # MR !6 opened, see project memory). TTL is long enough that the
+    # Monitor's next 20s sweep always catches it.
+    worker_completed_key: str = "worker:completed:{bug_id}"
+    worker_completed_ttl: int = 86400    # seconds (1 day)
+
     # ── Health Monitor ────────────────────────────────────────
     health_check_interval: int = 20      # seconds
 

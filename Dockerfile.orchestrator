@@ -2,6 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# boto3 is an optional dependency only needed for the ECS spawner;
+# installed unconditionally here (small ~15 MB) to keep the image
+# usable across all orchestrator modes.
 COPY orchestrator/requirements.txt /app/orchestrator/requirements.txt
 RUN pip install --no-cache-dir -r orchestrator/requirements.txt
 

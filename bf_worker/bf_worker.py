@@ -72,6 +72,18 @@ class BugFixWorker:
                 await hb_task
             except asyncio.CancelledError:
                 pass
+            # SET the completion key BEFORE clearing the heartbeat so the
+            # Monitor never sees "heartbeat gone + completion absent" (it
+            # would interpret that as a crash and restart). Both writes are
+            # cheap — order is what matters. Fires on EVERY exit path
+            # (fixed/no_fix/error/R10) because we're in `finally`.
+            completed_key = cfg.worker_completed_key.format(bug_id=self.bug_id)
+            try:
+                await self._redis.set(
+                    completed_key, b"1", ex=cfg.worker_completed_ttl
+                )
+            except Exception as e:
+                logger.warning("failed to set completion key %s: %s", completed_key, e)
             await self._redis.delete(self._hb_key)
             await self._redis.aclose()
             self._cleanup_repo()

@@ -103,6 +103,7 @@ setup contracts: `docs/deployment.md` (local-only) + each
 | `docker-compose.yml` (cloud Stage 1) | **containerized** stack, GitLab=docker-compose on Windows | `local_docker_compose_http` |
 | `infra/public-host/` (Phase 0.5) | **containerized** stack on a public-IP host, gitlab.com + cloudflared | `gitlab_saas` |
 | `infra/aws-gitlab/` | single host, gitlab.com (SaaS) | `gitlab_saas` |
+| `infra/aws-ecs/` | ECS on EC2 t3.micro (services as one host-net task; per-bug `bf-worker` task via `ecs:RunTask`), gitlab.com + cloudflared | `gitlab_saas` + `WORKER_SPAWNER=ecs` |
 
 Each: `bash infra/<x>/setup.sh` → trigger a failing pipeline → `bash
 infra/<x>/gitlab-smoke.sh` → `bash infra/<x>/teardown.sh`. Exit 0 =
@@ -225,6 +226,57 @@ Verified 2026-05-20 (gitlab.com API): `lishu20161/order_be` retry →
 **MR !5 opened** `auto/bf/2026_05_19-22_06_22_4-5cf79cc5`→`main`, fix-branch
 CI pipeline **2538661005 success** — webhook (initial + validation) both
 round-tripped through the cloudflared tunnel.
+
+### 4z-4. AWS ECS (`infra/aws-ecs/`)
+
+Managed-cluster cloud variant. Same auth as 4z-3 (`gitlab_saas` →
+HTTPS+`oauth2:<token>`, cloudflared for inbound). The only delta is
+`WORKER_SPAWNER=ecs` → workers run as ECS tasks (`ecs:RunTask`) on the same
+t3.micro EC2 instance, instead of as Docker containers off `docker.sock`.
+No new `ENV` value; the worker reuses the existing `gitlab_saas`
+GitLab-provider branch unchanged. The services task uses `NetworkMode: host`
+so the 4 long-running containers share `localhost`; the bf-worker task uses
+`awsvpc`, and the orchestrator passes the EC2 host's private IPv4 in
+`ECS_WORKER_REDIS_URL` because the worker's `localhost` is its own ENI.
+
+```bash
+# 1) infra (idempotent CloudFormation; auto-discovers default VPC+subnets)
+KEY_NAME=sdlcma-key \
+GITLAB_TOKEN=glpat-xxx \
+LLM_API_KEY=sk-xxx \
+bash infra/aws-ecs/create-stack.sh
+
+# 2) build & push the 3 images to ECR
+bash infra/aws-ecs/deploy-images.sh
+
+# 3) scale the services task up (created at DesiredCount=0 so step 2 runs first)
+aws ecs update-service --cluster sdlcma-cluster --service sdlcma-services \
+    --desired-count 1 --region us-east-1
+
+# 4) grab the cloudflared URL (set as gitlab.com webhook, Pipeline events)
+aws logs tail /sdlcma/services --filter trycloudflare --region us-east-1
+
+# 5) smoke: retry a failing pipeline, watch CloudWatch, verify MR
+PROJECT_PATH=lishu20161/order_be GITLAB_TOKEN=glpat-xxx \
+bash infra/aws-ecs/gitlab-smoke.sh
+
+# 6) teardown
+bash infra/aws-ecs/delete-stack.sh                # keep ECR repos
+DELETE_ECR=1 bash infra/aws-ecs/delete-stack.sh   # full cleanup
+```
+
+Unit coverage: `tests/test_ecs_spawner.py` pins the RunTask shape (launch
+type, awsvpc config, the **mandatory** `command=["--bug-id", bug_id]`
+override — without it the worker entrypoint runs with no args and hangs),
+the `ENV=gitlab_saas` worker env (not `"ecs"`), idempotency, restart, the
+host-mode network branch (no `networkConfiguration` — ECS rejects it for
+bridge/host), and the `EcsTaskProxy.reload_status` race
+(empty-`tasks`-without-MISSING leaves returncode=None so HealthMonitor
+doesn't unregister a live worker).
+`tests/test_worker_spawner_selection.py` pins that ECS is reachable *only*
+via explicit `WORKER_SPAWNER=ecs` (no auto-mapping from an `ENV=ecs`,
+which doesn't exist). Last proven run: 2026-05-21, MR !6 on
+`lishu20161/order_be`, ~65 s trigger→MR (eu-north-1).
 
 ### 4a. Option-1 end-to-end — exact procedure & last proven run
 

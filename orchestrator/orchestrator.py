@@ -21,7 +21,7 @@ from orchestrator.monitor import HealthMonitor
 from orchestrator.parser import ParseError, parse_message
 from orchestrator.registry import WorkerRegistry
 from orchestrator.router import MessageRouter
-from orchestrator.spawner import WorkerSpawner, DockerWorkerSpawner, K8sJobSpawner
+from orchestrator.spawner import WorkerSpawner, DockerWorkerSpawner, EcsWorkerSpawner, K8sJobSpawner
 
 class Orchestrator:
     def __init__(self, settings=None):
@@ -64,6 +64,22 @@ class Orchestrator:
                 secret_name=self._cfg.k8s_secret_name,
                 job_ttl_seconds=self._cfg.k8s_job_ttl_seconds,
             )
+        elif spawner_kind == "ecs":
+            self._spawner = EcsWorkerSpawner(
+                registry=self._registry,
+                # Empty `ecs_worker_redis_url` falls back to the orchestrator's
+                # own redis_url. With worker_network_mode=host the worker
+                # shares the host's network namespace so localhost works;
+                # under awsvpc set this to the EC2 host's private IPv4.
+                redis_url=(self._cfg.ecs_worker_redis_url or self._cfg.redis_url),
+                cluster=self._cfg.ecs_cluster_name,
+                task_def=self._cfg.ecs_worker_task_def,
+                subnets=self._cfg.ecs_worker_subnets,
+                security_groups=self._cfg.ecs_worker_security_groups,
+                region=self._cfg.ecs_region,
+                worker_env=self._cfg.ecs_worker_env,
+                worker_network_mode=self._cfg.ecs_worker_network_mode,
+            )
         else:
             self._spawner = WorkerSpawner(self._registry, self._cfg.redis_url)
         self._router = MessageRouter(
@@ -75,6 +91,7 @@ class Orchestrator:
             redis=self._redis,
             heartbeat_key_tpl=self._cfg.worker_heartbeat_key,
             check_interval=self._cfg.health_check_interval,
+            completed_key_tpl=self._cfg.worker_completed_key,
         )
         self._consumer = StreamConsumer(
             redis=self._redis,

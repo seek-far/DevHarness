@@ -1,5 +1,6 @@
 pydantic
 pydantic-settings
 redis[hiredis]>=5.0
+boto3>=1.34.0
 docker>=7.0
 kubernetes>=29.0

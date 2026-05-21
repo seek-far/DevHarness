@@ -246,6 +246,220 @@ def _k8s_job_name(bug_id: str, restart_count: int = 0) -> str:
     return name[:63].rstrip("-")
 
 
+# ── ECS mode ─────────────────────────────────────────────────────
+
+class EcsTaskProxy:
+    """Wraps an ECS task to provide an interface compatible with
+    asyncio.subprocess.Process (pid, returncode, terminate, kill, wait)
+    plus reload_status() (HealthMonitor refreshes via it, same as Docker/K8s).
+    """
+
+    def __init__(self, ecs_client, cluster: str, task_arn: str):
+        self._ecs = ecs_client
+        self._cluster = cluster
+        self._task_arn = task_arn
+        self._returncode = None
+
+    @property
+    def pid(self):
+        return self._task_arn.split("/")[-1]
+
+    @property
+    def returncode(self):
+        return self._returncode
+
+    def terminate(self):
+        try:
+            self._ecs.stop_task(cluster=self._cluster, task=self._task_arn)
+        except Exception:
+            pass
+
+    def kill(self):
+        self.terminate()
+
+    def reload_status(self):
+        try:
+            resp = self._ecs.describe_tasks(
+                cluster=self._cluster, tasks=[self._task_arn]
+            )
+            tasks = resp.get("tasks", [])
+            if not tasks:
+                # An empty `tasks` list can mean either (a) the freshly-
+                # spawned task isn't yet visible to describe-tasks (brief
+                # propagation window — ECS RunTask returned an ARN but
+                # describe-tasks hasn't caught up), or (b) the task is gone
+                # for real. Only the latter has a `failures` entry with
+                # reason=="MISSING". For (a) leave returncode=None so the
+                # HealthMonitor doesn't mark a live worker as exited 10s
+                # after spawn (verified bug; AWS ECS bug-fix run lost the
+                # validation-event routing because of this race).
+                failures = resp.get("failures", [])
+                if any(f.get("reason") == "MISSING" for f in failures):
+                    self._returncode = -1
+                return
+            task = tasks[0]
+            if task.get("lastStatus") == "STOPPED":
+                containers = task.get("containers", [])
+                exit_codes = [
+                    c.get("exitCode", -1) for c in containers
+                    if c.get("exitCode") is not None
+                ]
+                self._returncode = exit_codes[0] if exit_codes else -1
+        except Exception:
+            # Don't kill the worker registry entry just because one
+            # describe-tasks call hit a transient error — same rationale as
+            # the empty-tasks branch above. Leave returncode=None.
+            pass
+
+    async def wait(self):
+        loop = asyncio.get_event_loop()
+        while self._returncode is None:
+            await loop.run_in_executor(None, self.reload_status)
+            if self._returncode is None:
+                await asyncio.sleep(2)
+        return self._returncode
+
+
+class EcsWorkerSpawner:
+    """Spawns workers as one-off ECS tasks (ecs mode).
+
+    The orchestrator itself runs inside ECS and authenticates via its task IAM
+    role — no explicit AWS credentials to manage. Each bug spawns one
+    ``bf-worker`` task (awsvpc, same VPC as the orchestrator). Fire-and-forget;
+    the HealthMonitor polls task status via ``describe_tasks``.
+    """
+
+    def __init__(self, registry: WorkerRegistry, redis_url: str,
+                 cluster: str, task_def: str, subnets: str,
+                 security_groups: str, region: str = "us-east-1",
+                 worker_env: str = "gitlab_saas",
+                 worker_network_mode: str = "awsvpc"):
+        self._registry = registry
+        self._redis_url = redis_url
+        self._cluster = cluster
+        self._task_def = task_def
+        self._subnets = [s.strip() for s in subnets.split(",") if s.strip()]
+        self._security_groups = [s.strip() for s in security_groups.split(",") if s.strip()]
+        self._region = region
+        # The ENV the worker container runs under (gitlab.com → gitlab_saas).
+        # Matches the established WORKER_SPAWNER-decoupling pattern: spawner is
+        # picked separately from the GitLab env. NOT a new "ecs" worker env.
+        self._worker_env = worker_env
+        # Worker task's network mode — must match the bf-worker task
+        # definition's NetworkMode. Used to decide whether to attach
+        # networkConfiguration on run_task: ECS REJECTS networkConfiguration
+        # for bridge/host modes with InvalidParameterException.
+        self._worker_network_mode = worker_network_mode
+
+        import boto3
+        self._ecs = boto3.client("ecs", region_name=region)
+
+    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+        if self._registry.exists(bug_id):
+            logger.warning("[EcsSpawner] bug_id=%s already running, skip", bug_id)
+            return self._registry.get(bug_id)
+
+        entry = await self._start_task(bug_id, project_id, project_web_url, job_id)
+        self._registry.register(entry)
+        return entry
+
+    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+        old = self._registry.get(bug_id)
+        restart_count = (old.restart_count + 1) if old else 1
+
+        if old and old.process:
+            try:
+                old.process.terminate()
+            except Exception as e:
+                logger.warning("[EcsSpawner] terminate bug_id=%s: %s", bug_id, e)
+
+        entry = await self._start_task(bug_id, project_id, project_web_url, job_id,
+                                       restart_count=restart_count)
+        self._registry.register(entry)
+        logger.info("[EcsSpawner] restarted bug_id=%s restart_count=%d", bug_id, restart_count)
+        return entry
+
+    async def _start_task(self, bug_id: str, project_id: str, project_web_url: str,
+                          job_id: str, restart_count: int = 0) -> WorkerEntry:
+        environment = {
+            "BUG_ID": bug_id,
+            "REDIS_URL": self._redis_url,
+            "project_id": project_id,
+            "project_web_url": project_web_url,
+            "job_id": job_id,
+            # Worker uses the same GitLab-auth env as host-mode gitlab.com runs
+            # (HTTPS + oauth2:<token>, no SSH). The spawner choice is decoupled
+            # from this via WORKER_SPAWNER on the orchestrator side.
+            "ENV": self._worker_env,
+            # Ephemeral task → checkpoint has no resume value AND re-creates
+            # the shared-state contamination hazard (same rationale as the
+            # Docker spawner). "none" == pre-checkpointing behaviour.
+            "BF_CHECKPOINT_BACKEND": "none",
+        }
+        if os.getenv("BF_AGENT_CONFIG"):
+            environment["BF_AGENT_CONFIG"] = os.environ["BF_AGENT_CONFIG"]
+
+        run_kwargs = {
+            "cluster": self._cluster,
+            "taskDefinition": self._task_def,
+            "launchType": "EC2",
+            "count": 1,
+            "overrides": {
+                "containerOverrides": [{
+                    "name": "bf-worker",
+                    # entrypoint.sh execs `python bf_worker.py "$@"` so the
+                    # bug_id must arrive via command override (the Docker
+                    # spawner does the same: command=["--bug-id", bug_id]).
+                    "command": ["--bug-id", bug_id],
+                    "environment": [
+                        {"name": k, "value": v} for k, v in environment.items()
+                    ],
+                }]
+            },
+        }
+        if self._worker_network_mode == "awsvpc":
+            # awsvpc tasks need their own ENI; bridge/host inherit the host's
+            # networking and ECS rejects networkConfiguration for them
+            # (InvalidParameterException). On EC2 launch type secondary awsvpc
+            # ENIs do NOT inherit MapPublicIpOnLaunch — they get no public IP
+            # by default; need NAT or EIP for outbound. Single-host setups
+            # usually do better with "host" (shares the host's primary ENI).
+            run_kwargs["networkConfiguration"] = {
+                "awsvpcConfiguration": {
+                    "subnets": self._subnets,
+                    "securityGroups": self._security_groups,
+                    # `assignPublicIp` is Fargate-only — passing it on EC2
+                    # launch type returns InvalidParameterException.
+                }
+            }
+
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: self._ecs.run_task(**run_kwargs),
+        )
+
+        tasks = resp.get("tasks", [])
+        if not tasks:
+            raise RuntimeError(f"ecs:RunTask returned no tasks for bug_id={bug_id}")
+
+        task_arn = tasks[0]["taskArn"]
+        proxy = EcsTaskProxy(self._ecs, self._cluster, task_arn)
+        logger.info("[EcsSpawner] started bug_id=%s task=%s", bug_id, task_arn)
+
+        now = time.time()
+        return WorkerEntry(
+            bug_id=bug_id,
+            process=proxy,
+            project_id=project_id,
+            project_web_url=project_web_url,
+            job_id=job_id,
+            started_at=now,
+            warmup_deadline=now + WARMUP_GRACE,
+            restart_count=restart_count,
+        )
+
+
 class K8sJobProxy:
     """
     Wraps a k8s Job to provide an interface compatible with

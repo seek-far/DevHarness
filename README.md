@@ -657,6 +657,14 @@ target; harness lives in `infra/aws-gitlab/`. Reboot-OFF semantic and the
 co-tenant rules with other services on the same public host are in
 `docs/deployment.md`.
 
+A managed-cluster variant — **AWS ECS** — runs the same `gitlab_saas` stack
+on a free-tier t3.micro: services (redis/gateway/orchestrator/cloudflared)
+as one ECS Service in host-network mode, per-bug `bf-worker` as a one-off
+awsvpc task via `ecs:RunTask` (`WORKER_SPAWNER=ecs`). Single CloudFormation
+template in `infra/aws-ecs/`; full runbook and rationale in
+`docs/deployment.md`. No new `ENV` value — the worker reuses the `gitlab_saas`
+auth path, only the spawner differs.
+
 ### GitLab Webhook Setup
 
 In your GitLab project → Settings → Webhooks:

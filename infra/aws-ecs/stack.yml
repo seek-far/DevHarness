@@ -1,0 +1,443 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  SDLCMA -- ECS stack on a single EC2 instance (free-tier compatible).
+  Services (redis + gateway + orchestrator + cloudflared) run as one
+  multi-container ECS task in HOST network mode so the 4 containers share
+  the host network namespace and reach each other via localhost (matches
+  the docker-compose pattern and what the env vars expect). bf-worker is
+  a one-off awsvpc task launched via ecs:RunTask by the orchestrator.
+  ENI budget on t3.micro (2 max): host mode counts against the primary
+  ENI (1), bf-worker awsvpc uses 1, total 2.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID (default VPC is fine)
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet for EC2 + ECS services
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second public subnet for bf-worker tasks (can be same AZ)
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair for SSH access (create in Console > EC2 > Key Pairs)
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t2.micro]
+  SwapSizeGB:
+    Type: Number
+    Default: 4
+    Description: Swap file size in GB (mandatory on 1 GB t3.micro)
+  EcsAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id
+    Description: ECS-optimized AMI (auto-resolved via SSM)
+  ServiceDesiredCount:
+    Type: Number
+    Default: 0
+    Description: Desired task count (0 = pause; set to 1 after images are pushed to ECR)
+  GitlabToken:
+    Type: String
+    NoEcho: true
+    Description: "gitlab.com project/group access token (scopes: api + write_repository)"
+  LLMApiKey:
+    Type: String
+    NoEcho: true
+    Description: LLM API key (Dashscope / OpenAI-compatible)
+  LLMApiBaseUrl:
+    Type: String
+    Default: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+    Description: LLM API base URL
+  LLMModel:
+    Type: String
+    Default: qwen3-coder-plus
+    Description: LLM model name
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: {default: Network}
+        Parameters: [VpcId, PublicSubnetA, PublicSubnetB]
+      - Label: {default: Compute}
+        Parameters: [KeyName, InstanceType, SwapSizeGB]
+      - Label: {default: Secrets}
+        Parameters: [GitlabToken, LLMApiKey, LLMApiBaseUrl, LLMModel]
+
+Resources:
+  # ── ECR Repositories ──────────────────────────────────────────
+  EcrGateway:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: dh-gateway
+      ImageTagMutability: MUTABLE
+
+  EcrOrchestrator:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: dh-orchestrator
+      ImageTagMutability: MUTABLE
+
+  EcrBfWorker:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: dh-bf-worker
+      ImageTagMutability: MUTABLE
+
+  # ── IAM Roles ─────────────────────────────────────────────────
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EcsInstanceRole]
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+
+  OrchestratorTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunBfWorkerTask
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:DescribeTasks
+                  - ecs:StopTask
+                Resource:
+                  - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/bf-worker:*"
+                  - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/bf-worker"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EcsTaskExecutionRole.Arn
+
+  # ── Security Groups ────────────────────────────────────────────
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SDLCMA services -- outbound only (cloudflared is ingress)
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+
+  WorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SDLCMA bf-worker tasks
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: "-1"
+
+  # Worker can reach services (Redis on 6379)
+  ServiceIngress6379:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ServiceSecurityGroup
+      SourceSecurityGroupId: !Ref WorkerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+
+  # ── EC2 Instance (ECS container instance) ──────────────────────
+  EcsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref EcsAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref EcsInstanceProfile
+      SecurityGroupIds: [!Ref ServiceSecurityGroup]
+      SubnetId: !Ref PublicSubnetA
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          echo "ECS_CLUSTER=sdlcma-cluster" >> /etc/ecs/ecs.config
+          # Swap (mandatory OOM mitigation on 1 GB t3.micro)
+          if ! swapon --show=NAME --noheadings | grep -q /swapfile; then
+            fallocate -l ${SwapSizeGB}G /swapfile 2>/dev/null || \
+              dd if=/dev/zero of=/swapfile bs=1M count=$((${SwapSizeGB}*1024)) status=none
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+          fi
+      Tags:
+        - Key: Name
+          Value: sdlcma-ecs-host
+
+  # ── ECS Cluster ────────────────────────────────────────────────
+  SdlcmaCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: sdlcma-cluster
+
+  # ── CloudWatch Log Groups ──────────────────────────────────────
+  ServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /sdlcma/services
+      RetentionInDays: 7
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /sdlcma/worker
+      RetentionInDays: 7
+
+  # ── ECS Task Definitions ────────────────────────────────────────
+  ServicesTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: sdlcma-services
+      # host mode: 4 containers share the EC2 host's network namespace, so
+      # `localhost:6379` and `localhost:8000` resolve across containers (same
+      # as docker-compose default and what the existing env vars assume).
+      # bridge mode would isolate namespaces and break those references.
+      NetworkMode: host
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt OrchestratorTaskRole.Arn
+      ContainerDefinitions:
+        # NOTE on memory: the services containers use `MemoryReservation`
+        # (soft) instead of `Memory` (hard) so ECS' scheduler only counts the
+        # reservations — not theoretical caps — against the host's 940 MB. The
+        # bf-worker awsvpc task needs its full 512 MB at scheduling time;
+        # hard-reserving the full headline numbers here leaves <240 MB free
+        # and breaks bf-worker placement with a (silent) failures=[RESOURCE:
+        # MEMORY] response from ecs:RunTask.
+        - Name: redis
+          Image: redis:7-alpine
+          MemoryReservation: 64
+          Essential: true
+          # No PortMappings under host mode (container port == host port).
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: redis
+
+        - Name: gateway
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-gateway:latest"
+          MemoryReservation: 96
+          Essential: true
+          DependsOn:
+            - ContainerName: redis
+              Condition: START
+          Environment:
+            - Name: ENV
+              Value: gitlab_saas
+            - Name: REDIS_URL
+              Value: redis://localhost:6379/0
+            - Name: LLM_API_KEY
+              Value: !Ref LLMApiKey
+            - Name: LLM_API_BASE_URL
+              Value: !Ref LLMApiBaseUrl
+            - Name: LLM_MODEL
+              Value: !Ref LLMModel
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: gateway
+
+        - Name: orchestrator
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-orchestrator:latest"
+          MemoryReservation: 192
+          Essential: true
+          DependsOn:
+            - ContainerName: redis
+              Condition: START
+          Environment:
+            # ENV stays gitlab_saas (gitlab.com auth path); the spawner choice
+            # is decoupled via WORKER_SPAWNER. Matches the host-mode AWS
+            # rehearsal and Stage-2 docker pattern.
+            - Name: ENV
+              Value: gitlab_saas
+            - Name: WORKER_SPAWNER
+              Value: ecs
+            - Name: REDIS_URL
+              Value: redis://localhost:6379/0
+            - Name: GITLAB_API
+              Value: https://gitlab.com/api/v4
+            - Name: GITLAB_USERNAME
+              Value: oauth2
+            - Name: GITLAB_PRIVATE_TOKEN
+              Value: !Ref GitlabToken
+            - Name: ECS_CLUSTER_NAME
+              Value: sdlcma-cluster
+            - Name: ECS_WORKER_TASK_DEF
+              Value: bf-worker
+            - Name: ECS_WORKER_SUBNETS
+              # MUST be in the same AZ as the EC2 container instance (awsvpc
+              # ENI is attached to the host, so the subnet's AZ has to match
+              # the instance's AZ). Single-instance stack → reuse PublicSubnetA
+              # (where EcsInstance lives). Using a different subnet here
+              # returns ecs:RunTask failures=[LOCATION] silently.
+              Value: !Ref PublicSubnetA
+            - Name: ECS_WORKER_SECURITY_GROUPS
+              Value: !Ref WorkerSecurityGroup
+            - Name: ECS_REGION
+              Value: !Ref AWS::Region
+            # AWS_REGION is the standard boto3 fallback; we pass region_name
+            # explicitly to the ECS client, but setting it keeps any other
+            # boto3 call (CloudWatch, STS) from needing extra config.
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            # bf-worker uses HOST network mode so it shares the EC2 host's
+            # primary ENI (which has a public IP) — awsvpc secondary ENIs do
+            # NOT auto-assign public IPs and would need a NAT/EIP. Host mode
+            # also lets the worker reach Redis at localhost. The orchestrator's
+            # own `redis_url=redis://localhost:6379/0` propagates to the
+            # worker via the fallback, so ECS_WORKER_REDIS_URL is unset.
+            - Name: ECS_WORKER_NETWORK_MODE
+              Value: host
+            - Name: LLM_API_KEY
+              Value: !Ref LLMApiKey
+            - Name: LLM_API_BASE_URL
+              Value: !Ref LLMApiBaseUrl
+            - Name: LLM_MODEL
+              Value: !Ref LLMModel
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: orchestrator
+
+        - Name: cloudflared
+          Image: cloudflare/cloudflared:latest
+          MemoryReservation: 32
+          Essential: true
+          DependsOn:
+            - ContainerName: gateway
+              Condition: START
+          Command:
+            - tunnel
+            - --no-autoupdate
+            - --url
+            - http://localhost:8000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: cloudflared
+
+  BfWorkerTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: bf-worker
+      # Host network mode (not awsvpc) so the worker inherits the EC2 host's
+      # public-IP-bearing primary ENI for outbound HTTPS to gitlab.com / the
+      # LLM API; also lets Redis at localhost work. Task-level Cpu/Memory are
+      # not required for host mode (only container-level matters).
+      NetworkMode: host
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: bf-worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-bf-worker:latest"
+          Essential: true
+          Memory: 512
+          # ENV/REDIS_URL/BUG_ID/project_* arrive at runtime via the spawner's
+          # container override; everything below is the static "what this
+          # container needs to talk to gitlab.com & the LLM" baseline that
+          # never changes per task.
+          Environment:
+            - Name: GITLAB_API
+              Value: https://gitlab.com/api/v4
+            - Name: GITLAB_USERNAME
+              Value: oauth2
+            - Name: GITLAB_PRIVATE_TOKEN
+              Value: !Ref GitlabToken
+            - Name: LLM_API_KEY
+              Value: !Ref LLMApiKey
+            - Name: LLM_API_BASE_URL
+              Value: !Ref LLMApiBaseUrl
+            - Name: LLM_MODEL
+              Value: !Ref LLMModel
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: bf-worker
+
+  # ── ECS Service ────────────────────────────────────────────────
+  SdlcmaService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref SdlcmaCluster
+      ServiceName: sdlcma-services
+      TaskDefinition: !Ref ServicesTaskDef
+      DesiredCount: !Ref ServiceDesiredCount
+      LaunchType: EC2
+      SchedulingStrategy: REPLICA
+      # Single-instance, host-network deploy → new task can't coexist with old
+      # on the same EC2 (port + RAM conflicts on t3.micro). Default min=100%
+      # deadlocks `force-new-deployment` here. Lower min to 0 to allow brief
+      # downtime; keep max=200 because ECS' AZ-rebalancing guardrail rejects
+      # `maximumPercent <= 100`. In practice host-mode + insufficient RAM
+      # naturally serializes the swap regardless of the max ceiling.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 200
+    DependsOn:
+      - EcsInstance
+
+Outputs:
+  EcrGatewayUri:
+    Description: ECR URI for dh-gateway
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-gateway:latest"
+  EcrOrchestratorUri:
+    Description: ECR URI for dh-orchestrator
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-orchestrator:latest"
+  EcrBfWorkerUri:
+    Description: ECR URI for dh-bf-worker
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-bf-worker:latest"
+  ClusterName:
+    Description: ECS Cluster name
+    Value: !Ref SdlcmaCluster
+  InstancePublicIp:
+    Description: EC2 instance public IP (SSH here)
+    Value: !GetAtt EcsInstance.PublicIp
+  CloudflaredLogHint:
+    Description: Command to read the cloudflared tunnel URL
+    Value: !Sub "aws logs tail /sdlcma/services --filter trycloudflare --region ${AWS::Region}"
+  WebhookSetup:
+    Description: After finding the cloudflared URL, set it on gitlab.com (Pipeline events, SSL verification ON)
+    Value: "https://<trycloudflare-url>/webhook"

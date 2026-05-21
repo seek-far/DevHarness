@@ -53,6 +53,10 @@ class OrchestratorSettings(BaseAppSettings):
     #   "docker"    → DockerWorkerSpawner (Docker API, one container per bug)
     #   "process"   → WorkerSpawner (subprocess)
     #   "k8s"       → K8sJobSpawner
+    #   "ecs"       → EcsWorkerSpawner (ecs:RunTask, one task per bug). ENV
+    #                 stays "gitlab_saas" so the worker still uses the
+    #                 gitlab.com HTTPS+oauth2 auth path; only the spawner
+    #                 differs from the host-mode gitlab.com run.
     # Stage-2 (gitlab_saas in containers) sets WORKER_SPAWNER=docker so the
     # gitlab.com env still spawns worker containers; host-mode gitlab_saas
     # (infra/aws-gitlab, no Docker socket) leaves it unset → subprocess.
@@ -70,6 +74,36 @@ class OrchestratorSettings(BaseAppSettings):
     # Finished Jobs are GC'd by the k8s TTL controller this many seconds after
     # completion — keeps `kubectl get jobs` readable without an explicit reaper.
     k8s_job_ttl_seconds: int = 600
+
+    # ── ECS mode ─────────────────────────────────────────────────
+    # Read only by orchestrator.spawner.EcsWorkerSpawner when
+    # WORKER_SPAWNER=ecs. ENV stays "gitlab_saas" on the orchestrator side
+    # (we still talk to gitlab.com); WORKER_SPAWNER decouples *where the
+    # worker runs* from *which GitLab*, same pattern as Stage-2 docker.
+    # Overridden by orchestrator_ecs.env via the usual priority.
+    ecs_cluster_name: str = "sdlcma-cluster"
+    ecs_worker_task_def: str = "bf-worker"
+    ecs_worker_subnets: str = ""       # comma-separated subnet IDs
+    ecs_worker_security_groups: str = ""  # comma-separated SG IDs
+    ecs_region: str = "us-east-1"
+    # ENV the spawned bf-worker container runs under. Default = gitlab_saas
+    # (gitlab.com HTTPS + oauth2 token, no SSH) — the only worker-side env that
+    # currently maps cleanly onto cloud GitLab.
+    ecs_worker_env: str = "gitlab_saas"
+    # Network mode of the bf-worker task definition. Default "host" because a
+    # secondary awsvpc ENI in a public subnet does NOT auto-assign a public
+    # IP (only the host's *primary* ENI honours MapPublicIpOnLaunch — for
+    # secondary ENIs you'd need an EIP or NAT, neither of which is free on AWS).
+    # Host mode shares the EC2 host's primary ENI public IP, so the worker can
+    # reach gitlab.com / the LLM API without extra cost. Set to "awsvpc" only
+    # if the worker needs an isolated ENI AND you've arranged NAT/EIP.
+    ecs_worker_network_mode: str = "host"
+    # Redis URL the spawned worker uses. With network_mode=host the worker
+    # shares the host's network namespace, so the orchestrator's own
+    # `redis://localhost:6379/0` works for the worker too — leave empty to
+    # fall back. With awsvpc the worker's localhost is its own ENI, so set
+    # this to the EC2 host's private IPv4 (e.g. via CloudFormation).
+    ecs_worker_redis_url: str = ""
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / f"orchestrator_{_probe.env}.env",
