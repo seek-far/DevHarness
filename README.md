@@ -564,7 +564,7 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 
 ## Deployment Methods for GitLab Running Mode
 
-In GitLab mode, DevHarness can be deployed in four ways, controlled by `settings/.env`:
+In GitLab mode, DevHarness can be deployed in five ways, controlled by `settings/.env` and (for spawners that diverge from the historical by-env default) the additive `WORKER_SPAWNER` setting:
 
 ### Mode 1: Local Multi-Process (`ENV=local_multi_process`)
 
@@ -657,13 +657,52 @@ target; harness lives in `infra/aws-gitlab/`. Reboot-OFF semantic and the
 co-tenant rules with other services on the same public host are in
 `docs/deployment.md`.
 
-A managed-cluster variant — **AWS ECS** — runs the same `gitlab_saas` stack
-on a free-tier t3.micro: services (redis/gateway/orchestrator/cloudflared)
-as one ECS Service in host-network mode, per-bug `bf-worker` as a one-off
-awsvpc task via `ecs:RunTask` (`WORKER_SPAWNER=ecs`). Single CloudFormation
-template in `infra/aws-ecs/`; full runbook and rationale in
-`docs/deployment.md`. No new `ENV` value — the worker reuses the `gitlab_saas`
-auth path, only the spawner differs.
+### Mode 5: AWS ECS (`ENV=gitlab_saas` + `WORKER_SPAWNER=ecs`)
+
+Managed-cluster variant of Mode 4, on a free-tier `t3.micro` EC2 instance.
+The four long-running services (redis + gateway + orchestrator +
+cloudflared) run as **one ECS Service** in `host` network mode, sharing the
+host's primary ENI's public IP. Per-bug `bf-worker` is launched as a
+**one-off ECS task** via `ecs:RunTask` (also `host` network mode — the
+secondary `awsvpc` ENI in a public subnet does NOT auto-assign a public IP
+and would need a NAT Gateway).
+
+- The worker reuses the `gitlab_saas` GitLab-provider branch unchanged.
+  AWS ECS is purely a *spawner swap*, controlled by `WORKER_SPAWNER=ecs`
+  in `settings/orchestrator_ecs.env` (additive; existing envs/tests are
+  byte-identical).
+- Single-file infrastructure: `infra/aws-ecs/stack.yml` (CloudFormation).
+  3× ECR repos + 2× IAM roles + 2× security groups + 1× EC2 + 1× ECS
+  cluster + 2× task definitions (services + bf-worker) + 1× ECS Service.
+- Free tier: `t3.micro` 750 hrs/mo + 8 GB EBS + 5 GB CloudWatch ingest
+  + 500 MB ECR. No NAT Gateway, no ALB, no EKS.
+
+```bash
+# 1. Create the CloudFormation stack
+KEY_NAME=my-ec2-key \
+GITLAB_TOKEN=glpat-... \
+LLM_API_KEY=sk-... \
+bash infra/aws-ecs/create-stack.sh
+
+# 2. Build and push the 3 images to ECR
+bash infra/aws-ecs/deploy-images.sh
+
+# 3. Scale the service up + grab the cloudflared URL
+aws ecs update-service --cluster sdlcma-cluster --service sdlcma-services \
+                       --desired-count 1 --region us-east-1
+aws logs tail /sdlcma/services --filter trycloudflare --region us-east-1
+# → https://<assigned>.trycloudflare.com  (set as the gitlab.com webhook)
+```
+
+Verified end-to-end (2026-05-21): `lishu20161/order_be` failing pipeline →
+trycloudflare URL → ECS services task → orchestrator → `ecs:RunTask` →
+bf-worker task → fix branch pushed → fix-branch CI success → validation
+event routed back via Redis → MR opened on gitlab.com. Trigger → MR ≈ 65 s.
+Full runbook + 9 deployment-specific gotchas (assignPublicIp Fargate-only,
+secondary-ENI public-IP behavior, services-task `MemoryReservation` vs
+`Memory`, single-instance `MinimumHealthyPercent`, etc.) in
+`docs/deployment.md`. Teardown via `bash infra/aws-ecs/delete-stack.sh`
+(add `DELETE_ECR=1` to also drop ECR repos).
 
 ### GitLab Webhook Setup
 
@@ -671,10 +710,11 @@ In your GitLab project → Settings → Webhooks:
 
 | Mode | Webhook URL |
 |---|---|
-| Local Multi-Process | `http://<your-host>:8000/webhook` |
+| Local Multi-Process | `http://<your-host>:8000/webhook` (or `http://host.docker.internal:8000/webhook` if the GitLab container fires the hook from inside Docker Desktop) |
 | Docker Compose (SSH) | `http://gateway:8000/webhook` (within `sdlcma_net`) |
 | Docker Compose over HTTP | `http://gateway:8000/webhook` (within `sdlcma_net`) |
 | gitlab.com via cloudflared | `https://<assigned>.trycloudflare.com/webhook` (quick tunnel; direct `http://<host>:8000/webhook` also works if inbound `:8000` is open) |
+| AWS ECS | `https://<assigned>.trycloudflare.com/webhook` (cloudflared sidecar inside the ECS services task; URL changes every service task replacement) |
 
 Trigger: **Pipeline events**
 
@@ -687,6 +727,30 @@ testing surface (unit, integration, evaluation sweeps, and the real-host
 GitLab-mode end-to-end smokes) with exact run steps, expected results, the
 GitLab-API cross-check, and coverage boundaries. The sections below are a
 quick reference.
+
+### One-command regression per deployment
+
+Every deployment method — plus `integration_test.py` — has a single-entrypoint
+regression script that **detects code/image staleness, updates if needed,
+sets up the stack, runs an end-to-end smoke, then restores prior state**, all
+with timestamped progress lines and standard exit codes (`0` PASS · `2` FAIL
+· `3` TIMEOUT · `4` PRE-FLIGHT FAIL). This is the project's main "is this
+still working?" entry point — re-running it is the fastest way to verify any
+code change end-to-end against any deployment without thinking about which
+preconditions you forgot.
+
+| Script | Deployment | Smoke target |
+|---|---|---|
+| `tests/integration_test_wrapper.sh` | `integration_test.py` (in-process) | isolated Redis db=15 |
+| `infra/local-gitlab/regression.sh` | Mode 1 — `local_multi_process` (systemd) | Windows docker-compose GitLab |
+| `infra/local-docker-compose/regression.sh` | Mode 2 — `local_docker_compose` (containerized) | Windows docker-compose GitLab on `sdlcma_net` |
+| `infra/public-host/regression.sh` | Mode 4 — `gitlab_saas` on public-IP host (cloudflared) | gitlab.com |
+| `infra/aws-ecs/regression.sh` | Mode 5 — AWS ECS (`gitlab_saas` + `WORKER_SPAWNER=ecs`) | gitlab.com |
+
+Common flags: `--timeout N`, `--no-update`, `--no-teardown`, `--keep-env`.
+Full contract + per-script knobs in [`tests/TESTING.md`](tests/TESTING.md)
+§4. Each `infra/*/` directory also retains the lower-level `setup.sh` /
+`gitlab-smoke.sh` / `teardown.sh` building blocks for manual / partial runs.
 
 ### Integration Test
 
