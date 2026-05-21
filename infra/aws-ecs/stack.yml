@@ -5,9 +5,12 @@ Description: >
   multi-container ECS task in HOST network mode so the 4 containers share
   the host network namespace and reach each other via localhost (matches
   the docker-compose pattern and what the env vars expect). bf-worker is
-  a one-off awsvpc task launched via ecs:RunTask by the orchestrator.
-  ENI budget on t3.micro (2 max): host mode counts against the primary
-  ENI (1), bf-worker awsvpc uses 1, total 2.
+  a one-off task launched per bug via ecs:RunTask by the orchestrator,
+  ALSO in HOST network mode — secondary awsvpc ENIs in public subnets do
+  NOT auto-assign public IPs and would need NAT/EIP for outbound (the
+  worker has to reach gitlab.com + the LLM API). Host mode reuses the
+  EC2 instance's primary ENI's public IP for free, fitting the free-tier
+  budget. awsvpc remains opt-in via `ecs_worker_network_mode=awsvpc`.
 
 Parameters:
   VpcId:
@@ -145,34 +148,21 @@ Resources:
                 Action: iam:PassRole
                 Resource: !GetAtt EcsTaskExecutionRole.Arn
 
-  # ── Security Groups ────────────────────────────────────────────
+  # ── Security Group (the single one used by everything) ────────
+  # Attached to the EC2 instance and therefore implicitly to BOTH the
+  # services task AND the bf-worker task (both in host network mode →
+  # they share the EC2 host's primary ENI). Outbound-only — inbound is
+  # not needed because cloudflared dials OUT to establish the tunnel.
+  # If you ever flip the worker to awsvpc mode, pass this SG as
+  # ECS_WORKER_SECURITY_GROUPS (already wired in the orchestrator env).
   ServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: SDLCMA services -- outbound only (cloudflared is ingress)
+      GroupDescription: SDLCMA host network -- outbound only
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - CidrIp: 0.0.0.0/0
           IpProtocol: "-1"
-
-  WorkerSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: SDLCMA bf-worker tasks
-      VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        - CidrIp: 0.0.0.0/0
-          IpProtocol: "-1"
-
-  # Worker can reach services (Redis on 6379)
-  ServiceIngress6379:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref ServiceSecurityGroup
-      SourceSecurityGroupId: !Ref WorkerSecurityGroup
-      IpProtocol: tcp
-      FromPort: 6379
-      ToPort: 6379
 
   # ── EC2 Instance (ECS container instance) ──────────────────────
   EcsInstance:
@@ -235,11 +225,14 @@ Resources:
       ContainerDefinitions:
         # NOTE on memory: the services containers use `MemoryReservation`
         # (soft) instead of `Memory` (hard) so ECS' scheduler only counts the
-        # reservations — not theoretical caps — against the host's 940 MB. The
-        # bf-worker awsvpc task needs its full 512 MB at scheduling time;
-        # hard-reserving the full headline numbers here leaves <240 MB free
-        # and breaks bf-worker placement with a (silent) failures=[RESOURCE:
-        # MEMORY] response from ecs:RunTask.
+        # reservations — not theoretical caps — against the host's 940 MB.
+        # bf-worker (host mode, container-level `Memory: 512` cgroup limit)
+        # competes for the SAME host RAM at runtime; hard-reserving the full
+        # headline numbers here would crowd it out and cause RAM pressure /
+        # swap during pip-install + pytest peaks (~450 MB measured peak).
+        # Under earlier awsvpc plans this was also a scheduling-time issue
+        # (RunTask returned silent failures=[RESOURCE:MEMORY]); host mode
+        # removes the scheduling check but keeps the runtime budget.
         - Name: redis
           Image: redis:7-alpine
           MemoryReservation: 64
@@ -304,15 +297,16 @@ Resources:
               Value: sdlcma-cluster
             - Name: ECS_WORKER_TASK_DEF
               Value: bf-worker
+            # ECS_WORKER_SUBNETS / ECS_WORKER_SECURITY_GROUPS are consulted
+            # ONLY when ecs_worker_network_mode=awsvpc (the spawner builds
+            # networkConfiguration just for that path; host mode ignores
+            # them). Pre-populated to sane defaults so the opt-in flip is a
+            # one-setting change. Subnet must match the EC2 instance's AZ —
+            # mismatched returns ecs:RunTask failures=[LOCATION] silently.
             - Name: ECS_WORKER_SUBNETS
-              # MUST be in the same AZ as the EC2 container instance (awsvpc
-              # ENI is attached to the host, so the subnet's AZ has to match
-              # the instance's AZ). Single-instance stack → reuse PublicSubnetA
-              # (where EcsInstance lives). Using a different subnet here
-              # returns ecs:RunTask failures=[LOCATION] silently.
               Value: !Ref PublicSubnetA
             - Name: ECS_WORKER_SECURITY_GROUPS
-              Value: !Ref WorkerSecurityGroup
+              Value: !Ref ServiceSecurityGroup
             - Name: ECS_REGION
               Value: !Ref AWS::Region
             # AWS_REGION is the standard boto3 fallback; we pass region_name
