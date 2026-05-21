@@ -15,10 +15,12 @@ Parameters:
     Description: VPC ID (default VPC is fine)
   PublicSubnetA:
     Type: AWS::EC2::Subnet::Id
-    Description: Public subnet for EC2 + ECS services
-  PublicSubnetB:
-    Type: AWS::EC2::Subnet::Id
-    Description: Second public subnet for bf-worker tasks (can be same AZ)
+    Description: >
+      Public subnet for the EC2 instance + ECS services. With the worker
+      task running in host network mode (default), this is the only subnet
+      needed — no per-task ENI is created. If you flip to awsvpc workers
+      (ecs_worker_network_mode=awsvpc) the worker's subnet must match the
+      EC2 instance's AZ, so this same subnet still works.
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: EC2 key pair for SSH access (create in Console > EC2 > Key Pairs)
@@ -59,7 +61,7 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: {default: Network}
-        Parameters: [VpcId, PublicSubnetA, PublicSubnetB]
+        Parameters: [VpcId, PublicSubnetA]
       - Label: {default: Compute}
         Parameters: [KeyName, InstanceType, SwapSizeGB]
       - Label: {default: Secrets}

@@ -16,8 +16,8 @@
 #   LLM_API_KEY=sk-xxx \
 #   bash infra/aws-ecs/create-stack.sh
 #
-# The script looks up your default VPC and subnets automatically.
-# Override with VPC_ID / SUBNET_A / SUBNET_B if needed.
+# The script looks up your default VPC and the first public subnet
+# automatically. Override with VPC_ID / SUBNET_A if needed.
 # ============================================================================
 set -euo pipefail
 
@@ -42,15 +42,12 @@ if [ -z "${VPC_ID:-}" ]; then
   echo "VPC: $VPC_ID"
 fi
 
-if [ -z "${SUBNET_A:-}" ] || [ -z "${SUBNET_B:-}" ]; then
-  say "Auto-detecting public subnets in VPC"
-  SUBNETS="$(aws ec2 describe-subnets --region "$REGION" \
+if [ -z "${SUBNET_A:-}" ]; then
+  say "Auto-detecting public subnet in VPC"
+  SUBNET_A="$(aws ec2 describe-subnets --region "$REGION" \
     --filters "Name=vpc-id,Values=$VPC_ID" \
-    --query 'Subnets[*].SubnetId' --output text)"
-  SUBNET_A="${SUBNET_A:-$(echo "$SUBNETS" | awk '{print $1}')}"
-  SUBNET_B="${SUBNET_B:-$(echo "$SUBNETS" | awk '{print $2}')}"
+    --query 'Subnets[0].SubnetId' --output text)"
   echo "Subnet A: $SUBNET_A"
-  echo "Subnet B: $SUBNET_B"
 fi
 
 STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,7 +60,6 @@ aws cloudformation create-stack \
   --parameters \
     "ParameterKey=VpcId,ParameterValue=${VPC_ID}" \
     "ParameterKey=PublicSubnetA,ParameterValue=${SUBNET_A}" \
-    "ParameterKey=PublicSubnetB,ParameterValue=${SUBNET_B}" \
     "ParameterKey=KeyName,ParameterValue=${KEY_NAME}" \
     "ParameterKey=InstanceType,ParameterValue=${INSTANCE_TYPE}" \
     "ParameterKey=SwapSizeGB,ParameterValue=${SWAP_SIZE_GB}" \
