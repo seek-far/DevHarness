@@ -203,13 +203,21 @@ def test_gateway_prometheus_annotations(docs):
     assert ann["prometheus.io/scrape"] == "true"
     assert ann["prometheus.io/port"] == "8000"
     assert ann["prometheus.io/path"] == "/healthz"
+    # checksum/config is always present (unconditional) — see gateway.yaml header.
+    assert "checksum/config" in ann
 
     out = _helm("template", "sdlcma", str(CHART),
                 "--set", "observability.prometheusAnnotations=false")
     dep2 = next(d for d in yaml.safe_load_all(out)
                 if d and d["kind"] == "Deployment"
                 and d["metadata"]["name"] == "gateway")
-    assert "annotations" not in dep2["spec"]["template"]["metadata"]
+    # With prom annotations off, only checksum/config remains; the three
+    # prometheus.io/* keys must be gone.
+    ann2 = dep2["spec"]["template"]["metadata"].get("annotations", {})
+    assert "checksum/config" in ann2
+    assert "prometheus.io/scrape" not in ann2
+    assert "prometheus.io/port"   not in ann2
+    assert "prometheus.io/path"   not in ann2
 
 
 def test_eval_job_off_by_default(docs):

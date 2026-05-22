@@ -106,6 +106,9 @@ def test_spawn_creates_job_with_expected_spec():
     assert env["project_web_url"] == "http://gitlab/x.git"
     assert env["job_id"] == "99"
     assert env["REDIS_URL"] == "redis://redis:6379/0"
+    # Ephemeral Job → checkpointing must be OFF (invariant #4; parity with
+    # DockerWorkerSpawner / EcsWorkerSpawner).
+    assert env["BF_CHECKPOINT_BACKEND"] == "none"
 
     cm_refs = [s.config_map_ref.name for s in c.env_from if s.config_map_ref]
     secret_refs = [s.secret_ref.name for s in c.env_from if s.secret_ref]

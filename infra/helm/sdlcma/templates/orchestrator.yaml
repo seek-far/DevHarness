@@ -38,9 +38,15 @@ spec:
     metadata:
       labels:
         app: orchestrator
+      annotations:
+        # Rolls the pod whenever any ConfigMap data changes — without this,
+        # `helm upgrade -f values-gitlab-saas.yaml` quietly leaves the pod
+        # running the OLD ENV (verified bug 2026-05-22: orchestrator stayed
+        # on ENV=local_k8s after the overlay overrode it to gitlab_saas).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
-      # Identity for K8sJobSpawner (env == local_k8s) to create/delete the
-      # per-bug worker Jobs; bound to orchestrator-job-manager Role (rbac.yaml).
+      # Identity for K8sJobSpawner to create/delete the per-bug worker Jobs;
+      # bound to orchestrator-job-manager Role (rbac.yaml).
       serviceAccountName: {{ .Values.serviceAccount.name }}
       containers:
         - name: orchestrator

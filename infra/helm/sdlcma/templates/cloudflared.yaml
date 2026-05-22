@@ -1,0 +1,48 @@
+{{- /*
+cloudflared Deployment — opt-in webhook ingress when there's no public IP
+(WSL host, NAT'd LAN host, free-tier VM behind a provider firewall). The
+container dials OUT to Cloudflare's edge to establish a quick tunnel, so:
+  - no Service / no inbound port / no NetworkPolicy egress carve-out needed
+    (this chart's NetworkPolicy already restricts INGRESS only).
+  - the trycloudflare URL is printed to stdout — find it with
+    `kubectl logs deploy/cloudflared | grep trycloudflare`.
+
+Single replica on purpose: each restart gets a new quick-tunnel URL.
+For a stable URL, set `cloudflared.args` to a `tunnel run <named>` invocation
+and mount the credentials secret yourself.
+*/ -}}
+{{- if .Values.cloudflared.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: cloudflared
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      containers:
+        - name: cloudflared
+          image: {{ .Values.cloudflared.image | quote }}
+          imagePullPolicy: {{ .Values.cloudflared.imagePullPolicy | default "IfNotPresent" }}
+          args:
+            {{- if .Values.cloudflared.args }}
+            {{- toYaml .Values.cloudflared.args | nindent 12 }}
+            {{- else }}
+            - tunnel
+            - --no-autoupdate
+            - --url
+            - http://gateway:{{ .Values.gateway.service.port }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.cloudflared.resources | nindent 12 }}
+{{- end }}

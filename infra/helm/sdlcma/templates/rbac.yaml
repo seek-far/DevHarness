@@ -25,7 +25,12 @@ metadata:
     {{- include "sdlcma.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["batch"]
-    resources: ["jobs"]
+    # jobs/status is needed by K8sJobProxy.reload_status() →
+    # read_namespaced_job_status (the HealthMonitor polls this every tick;
+    # without it the worker still runs but the orchestrator log spams 403s
+    # and clean returncode detection breaks). RBAC treats subresources
+    # separately — `jobs` alone is not enough.
+    resources: ["jobs", "jobs/status"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]

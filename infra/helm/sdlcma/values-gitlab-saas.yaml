@@ -1,0 +1,46 @@
+# Overlay: K8s deployment against gitlab.com (SaaS).
+#
+# Composes the existing kind-on-WSL chart with the project's existing
+# `gitlab_saas` env (HTTPS + oauth2:<PAT>, no SSH) and the `WORKER_SPAWNER=k8s`
+# decoupling — same pattern AWS ECS already uses on top of `gitlab_saas`
+# (project invariant #1: never invent a new ENV=<spawner> value).
+#
+# Use:
+#   helm install sdlcma infra/helm/sdlcma \
+#     -n sdlcma --create-namespace \
+#     -f infra/helm/sdlcma/values-gitlab-saas.yaml
+#
+# Prereqs (out-of-band, never templated):
+#   kubectl -n sdlcma create secret generic sdlcma-secrets \
+#     --from-literal=GITLAB_PRIVATE_TOKEN=glpat-xxx \
+#     --from-literal=LLM_API_KEY=sk-xxx
+#   # SSH_PRIVATE_KEY intentionally omitted — gitlab.com path uses HTTPS+oauth2.
+
+# ── webhook ingress ──────────────────────────────────────────────
+# No public IP on the WSL host (Phase 1) and no public IP on the Phase 2
+# host either → cloudflared mandatory. Find the URL after install:
+#   kubectl -n sdlcma logs deploy/cloudflared | grep trycloudflare
+cloudflared:
+  enabled: true
+
+# ── ConfigMap overrides ──────────────────────────────────────────
+# Helm 3 deep-merges these on top of values.yaml; keys set to null are
+# REMOVED from the merged result, so the LocalGitlab-specific worker fields
+# (GITLAB_API=http://gitlab:80, GITLAB_USERNAME=lishu2016, GITLAB_SSH_PORT)
+# disappear and the worker image's baked-in settings/worker_gitlab_saas.env
+# becomes the source of truth for GitLab-side wiring. Secrets
+# (GITLAB_PRIVATE_TOKEN, LLM_API_KEY) come via envFrom on `sdlcma-secrets`.
+configMaps:
+  gateway:
+    ENV: gitlab_saas
+  orchestrator:
+    ENV: gitlab_saas
+    # Decouples spawner from env (invariant #1). Without this the
+    # by-env fallback would pick `process` on gitlab_saas — wrong here.
+    WORKER_SPAWNER: k8s
+  worker:
+    ENV: gitlab_saas
+    # Drop LocalGitlab leftovers. Helm 3 removes null-valued keys at merge.
+    GITLAB_API: null
+    GITLAB_USERNAME: null
+    GITLAB_SSH_PORT: null

@@ -564,7 +564,7 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 
 ## Deployment Methods for GitLab Running Mode
 
-In GitLab mode, DevHarness can be deployed in five ways, controlled by `settings/.env` and (for spawners that diverge from the historical by-env default) the additive `WORKER_SPAWNER` setting:
+In GitLab mode, DevHarness can be deployed in six ways, controlled by `settings/.env` and (for spawners that diverge from the historical by-env default) the additive `WORKER_SPAWNER` setting:
 
 ### Mode 1: Local Multi-Process (`ENV=local_multi_process`)
 
@@ -704,6 +704,39 @@ secondary-ENI public-IP behavior, services-task `MemoryReservation` vs
 `docs/deployment.md`. Teardown via `bash infra/aws-ecs/delete-stack.sh`
 (add `DELETE_ECR=1` to also drop ECR repos).
 
+### Mode 6: Kubernetes / kind (`ENV=gitlab_saas` + `WORKER_SPAWNER=k8s`)
+
+Local-cluster variant of Modes 4/5: the existing Helm chart in
+`infra/helm/sdlcma/` running on a single-node `kind` cluster, with
+**cloudflared** providing inbound webhook ingress (no public IP required).
+Per-bug workers are launched as **`bf-worker-<slug>` Jobs** via the
+in-cluster BatchV1Api by `K8sJobSpawner` (`backoff_limit=0` — the
+orchestrator's HealthMonitor owns retries; `ttlSecondsAfterFinished` self-GC;
+`automount_service_account_token=False`; ephemeral
+`BF_CHECKPOINT_BACKEND=none` per invariant #4).
+
+- Same spawner-decoupling pattern as Mode 5: the worker reuses
+  `gitlab_saas` unchanged and `WORKER_SPAWNER=k8s` is layered on via the
+  Helm overlay `infra/helm/sdlcma/values-gitlab-saas.yaml`.
+- Images are `kind load`-ed (no registry); chart sets
+  `imagePullPolicy: IfNotPresent`.
+- cloudflared is a dedicated Deployment dialing OUT to Cloudflare's edge
+  for a quick `trycloudflare.com` URL — new URL on each pod restart; use
+  a named tunnel + credentials Secret if you need stability.
+
+```bash
+# 1. populate settings/worker_gitlab_saas.env with GITLAB_PRIVATE_TOKEN + LLM_API_KEY
+# 2. bring up the stack (kind + build + load + helm install + URL extract)
+bash infra/k8s/setup.sh
+# 3. configure the gitlab.com project webhook to the printed URL + /webhook
+# 4. trigger a failing pipeline, or run the smoke
+PROJECT_PATH=user/repo bash infra/k8s/gitlab-smoke.sh
+# 5. teardown
+bash infra/k8s/teardown.sh
+```
+
+Full runbook in `infra/k8s/README.md`.
+
 ### GitLab Webhook Setup
 
 In your GitLab project → Settings → Webhooks:
@@ -715,6 +748,7 @@ In your GitLab project → Settings → Webhooks:
 | Docker Compose over HTTP | `http://gateway:8000/webhook` (within `sdlcma_net`) |
 | gitlab.com via cloudflared | `https://<assigned>.trycloudflare.com/webhook` (quick tunnel; direct `http://<host>:8000/webhook` also works if inbound `:8000` is open) |
 | AWS ECS | `https://<assigned>.trycloudflare.com/webhook` (cloudflared sidecar inside the ECS services task; URL changes every service task replacement) |
+| Kubernetes / kind | `https://<assigned>.trycloudflare.com/webhook` (cloudflared Deployment; new URL on each pod restart — use a named tunnel for stability) |
 
 Trigger: **Pipeline events**
 
@@ -746,6 +780,7 @@ preconditions you forgot.
 | `infra/local-docker-compose/regression.sh` | Mode 2 — `local_docker_compose` (containerized) | Windows docker-compose GitLab on `sdlcma_net` |
 | `infra/public-host/regression.sh` | Mode 4 — `gitlab_saas` on public-IP host (cloudflared) | gitlab.com |
 | `infra/aws-ecs/regression.sh` | Mode 5 — AWS ECS (`gitlab_saas` + `WORKER_SPAWNER=ecs`) | gitlab.com |
+| `infra/k8s/regression.sh` | Mode 6 — Kubernetes / kind (`gitlab_saas` + `WORKER_SPAWNER=k8s`) | gitlab.com |
 
 Common flags: `--timeout N`, `--no-update`, `--no-teardown`, `--keep-env`.
 Full contract + per-script knobs in [`tests/TESTING.md`](tests/TESTING.md)

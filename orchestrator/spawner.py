@@ -596,6 +596,10 @@ class K8sJobSpawner:
             client.V1EnvVar(name="project_web_url", value=project_web_url),
             client.V1EnvVar(name="job_id", value=job_id),
             client.V1EnvVar(name="REDIS_URL", value=self._redis_url),
+            # Per-bug Job pod is ephemeral — sqlite checkpoint has no resume
+            # value here AND re-creates the shared-state contamination hazard
+            # (project invariant #4). Same rationale as Docker/ECS spawners.
+            client.V1EnvVar(name="BF_CHECKPOINT_BACKEND", value="none"),
         ]
         if os.getenv("BF_AGENT_CONFIG"):
             env.append(client.V1EnvVar(name="BF_AGENT_CONFIG",

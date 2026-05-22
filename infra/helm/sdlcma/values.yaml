@@ -140,6 +140,24 @@ eval:
       cpu: "2"
       memory: 2Gi
 
+# ── cloudflared (webhook ingress when there's no public IP) ───────
+# OFF by default — only the gitlab.com-via-no-public-IP path needs it
+# (overlay: values-gitlab-saas.yaml). LocalGitlab path is unaffected.
+cloudflared:
+  enabled: false
+  image: cloudflare/cloudflared:latest
+  # Empty list → default `tunnel --no-autoupdate --url http://gateway:<port>`
+  # (free quick tunnel). Override for a named tunnel:
+  #   args: ["tunnel", "run", "my-named-tunnel"]
+  args: []
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
 # ── Orchestrator ──────────────────────────────────────────────────
 orchestrator:
   image:

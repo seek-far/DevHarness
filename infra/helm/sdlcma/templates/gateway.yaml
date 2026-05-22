@@ -15,18 +15,21 @@ spec:
     metadata:
       labels:
         app: gateway
-      {{- if .Values.observability.prometheusAnnotations }}
       annotations:
+        # Rolls the pod whenever any ConfigMap data changes — without this,
+        # `helm upgrade -f new-values.yaml` quietly leaves pods running the
+        # OLD config (helm only restarts pods when the Deployment template
+        # itself changes). Cost = an extra rollout when ConfigMaps churn.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.observability.prometheusAnnotations }}
         # 1a.6 observability hook. The gateway has no real /metrics endpoint
         # yet (would be a code change: prometheus_client + a route); we point
         # scrape at /healthz so a Prometheus that IS deployed gets an up/down
         # signal today, and the contract is in place for a future /metrics.
-        # We deliberately do NOT install the Prometheus operator into kind
-        # (too heavy for 1a) — this only wires the scrape contract.
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.gateway.service.port | quote }}
         prometheus.io/path: {{ .Values.observability.scrapePath | quote }}
-      {{- end }}
+        {{- end }}
     spec:
       containers:
         - name: gateway
