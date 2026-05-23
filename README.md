@@ -324,6 +324,24 @@ python -m evaluation.cli run --config configs/memory_vs_baseline.json  # baselin
 python -m evaluation.cli report run_<timestamp>
 ```
 
+#### MCP server (`mcp_server/`)
+
+The same evaluation state — fixtures, journal entries, sweep runs — is also
+exposed over the [Model Context Protocol](https://modelcontextprotocol.io)
+so an MCP-aware client (Claude Desktop, mcp-cli, an MCP-aware agent) can
+introspect and act on it. Read-only tools: `list_fixtures`,
+`read_fixture`, `list_journal_entries`, `read_journal_entry`,
+`list_eval_runs`. One write tool: `promote_journal_to_fixture` (delegates
+to `bench promote`). Two resources: `sdlcma://fixtures` and
+`sdlcma://runs/{run_id}/summary`.
+
+```bash
+# Run the server over stdio (what Claude Desktop and mcp-cli speak)
+uv run python -m mcp_server.server
+```
+
+Setup for Claude Desktop and design notes in [`mcp_server/README.md`](mcp_server/README.md).
+
 ### Provider Abstraction
 
 The worker's LangGraph nodes access all external resources through a **provider abstraction layer** (`bf_worker/providers/`). This decouples the core bug-fixing logic from any specific platform:
