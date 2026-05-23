@@ -20,8 +20,10 @@ Output contract (identical to old ask_llm node):
 from __future__ import annotations
 import json
 import logging
+import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import openai
@@ -53,6 +55,7 @@ llm = ChatOpenAI(
     base_url=cfg.llm_api_base_url,
     model=cfg.llm_model,
     temperature=0,
+    timeout=cfg.llm_request_timeout,
 ).bind_tools(TOOLS_SCHEMA)
 
 
@@ -90,6 +93,168 @@ def _invoke_llm_with_retry(messages: list):
             type(transient).__name__, i + 1, len(_LLM_RETRY_DELAYS), delay, transient,
         )
         time.sleep(delay)
+
+# Matches "<tool_call>{…}</tool_call>" or "<tools>{…}</tools>" (case-insensitive,
+# non-greedy). Some self-hosted backends emit one of these but the parser
+# configured in vLLM doesn't recognise the exact tag — pull the JSON ourselves.
+_TOOL_CALL_WRAPPER_RE = re.compile(
+    r"<(tool_call|tools)\b[^>]*>(.*?)</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+# Markdown fence somewhere in the text: ```json {...} ```  (not anchored — the
+# fence often follows a paragraph of chain-of-thought prose).
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _find_last_json_object(text: str) -> str | None:
+    """Return the last balanced `{…}` substring in `text`, or None.
+
+    Walks the text tracking brace depth and string state (so `{` inside a
+    JSON string literal is not counted). Used to recover tool calls when the
+    model emits a chain-of-thought paragraph before the JSON — common with
+    Qwen2.5-Coder-Instruct and other reasoning-leaning Instruct models.
+
+    We take the LAST object on purpose: when the model produces multiple
+    `{…}` blocks (e.g. an example object in the prose, then the actual
+    call), the final one is the answer.
+    """
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for i, c in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            continue
+        if c == '"':
+            in_string = True
+            continue
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    spans.append((start, i + 1))
+                    start = -1
+    if not spans:
+        return None
+    s, e = spans[-1]
+    return text[s:e]
+
+
+def _try_parse_tool_call(text: str) -> tuple[str, dict] | None:
+    """Parse `text` as a tool call. Returns (name, args_dict) or None.
+
+    Accepts either a single `{name, arguments}` object or an array (take
+    first). Tolerates `arguments` as either a dict or a JSON-encoded string
+    (OpenAI's wire shape), and the LangChain-style `args` spelling. Returns
+    None on any parse / shape mismatch — caller treats that as "not a tool
+    call".
+    """
+    if not (text.startswith("{") or text.startswith("[")):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, list):
+        if not parsed:
+            return None
+        parsed = parsed[0]
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("name")
+    args = parsed.get("arguments", parsed.get("args"))
+    if not isinstance(name, str) or not name:
+        return None
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(args, dict):
+        return None
+    return name, args
+
+
+def _maybe_recover_tool_call_from_content(assistant_msg) -> int:
+    """Recover a tool_call that the backend emitted in `content` instead of
+    `tool_calls`.
+
+    Observed with vLLM serving Qwen2.5-Coder-Instruct: the chat template /
+    parser combo can leave the tool-call JSON in `content` (bare, wrapped
+    in `<tool_call>…</tool_call>` / `<tools>…</tools>` / a markdown fence,
+    or trailing a chain-of-thought paragraph of prose) while leaving
+    `tool_calls` empty. The model has done its job — only the transport-
+    layer wrapper is missing — so synthesise a tool_call rather than
+    burning a retry / hijacking the run.
+
+    Strict no-op when `tool_calls` is already populated, or `content` is
+    missing / doesn't contain a parseable tool call. Well-behaved backends
+    (Dashscope, OpenAI, vLLM with a matched parser+template) hit the
+    early-return on the first line.
+
+    Mutates `assistant_msg.tool_calls` in place. Returns the number of
+    recovered calls (0 or 1; react_loop only ever consumes index 0).
+    """
+    if getattr(assistant_msg, "tool_calls", None):
+        return 0
+    content = getattr(assistant_msg, "content", None)
+    if not isinstance(content, str):
+        return 0
+    text = content.strip()
+    if not text:
+        return 0
+
+    # Try candidate shapes in order of specificity. First one that parses
+    # to a valid tool-call wins. Order matters: an explicit wrapper / fence
+    # is a stronger signal of "here is the call" than a brace-walk fallback,
+    # so we look at those first.
+    candidates: list[str] = []
+    wrapped = _TOOL_CALL_WRAPPER_RE.search(text)
+    if wrapped:
+        candidates.append(wrapped.group(2).strip())
+    fenced = _FENCE_RE.search(text)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+    candidates.append(text)
+    last_obj = _find_last_json_object(text)
+    if last_obj:
+        candidates.append(last_obj)
+
+    seen: set[str] = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        parsed = _try_parse_tool_call(cand)
+        if parsed is None:
+            continue
+        name, args = parsed
+        assistant_msg.tool_calls = [{
+            "name": name,
+            "id": f"recovered_{uuid.uuid4().hex[:16]}",
+            "args": args,
+            "type": "tool_call",
+        }]
+        logger.info(
+            "react_loop: recovered 1 tool_call from content (name=%s) — "
+            "backend did not emit a structured tool_calls field",
+            name,
+        )
+        return 1
+    return 0
+
 
 _SYSTEM = """\
 You are a Python bug fix agent. Your goal is to find the ROOT CAUSE of a CI \
@@ -347,6 +512,9 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
     confidence    = None
     reasoning     = None
     tool_call_log: list[dict] = []
+    # Carry forward the running max across react_loop re-entries (retries,
+    # acting-mode reviewer feedback) so the per-run telemetry stays monotonic.
+    max_input_tokens = int(state.get("max_input_tokens") or 0)
 
     while step_count < MAX_STEPS:
 
@@ -361,10 +529,13 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         # ── call LLM ──────────────────────────────────────────────────────────
         logger.info("react_loop: step %d — calling LLM", step_count + 1)
         assistant_msg = _invoke_llm_with_retry(messages)
+        _maybe_recover_tool_call_from_content(assistant_msg)
         step_count += 1
 
+        in_tok, out_tok = extract_token_usage(assistant_msg)
+        if in_tok > max_input_tokens:
+            max_input_tokens = in_tok
         if budget is not None:
-            in_tok, out_tok = extract_token_usage(assistant_msg)
             budget.record_call(in_tok, out_tok)
 
         # Append the full assistant message (including tool_calls field)
@@ -374,7 +545,14 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         tool_calls = assistant_msg.tool_calls
         if not tool_calls:
             # LLM returned plain text instead of calling a tool.
-            # Nudge it back on track and continue.
+            # Nudge it back on track and continue. Dump a truncated view of
+            # content so unrecognised tool-call shapes from self-hosted
+            # backends are diagnosable from logs without re-running.
+            content_preview = (getattr(assistant_msg, "content", "") or "")[:800]
+            logger.warning(
+                "react_loop: step %d — no tool_calls after recovery; content[:800]=%r",
+                step_count, content_preview,
+            )
             logger.warning(
                 "react_loop: step %d — LLM returned text without tool call, nudging",
                 step_count,
@@ -453,6 +631,7 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         "react_tool_calls": tool_call_log,
         "react_confidence": confidence,
         "react_reasoning":  reasoning,
+        "max_input_tokens": max_input_tokens,
         # Surface memory-related fields for journaling/telemetry (no-op when
         # the memory enhancement is not registered).
         "memory_hint":         state.get("memory_hint"),

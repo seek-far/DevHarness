@@ -39,6 +39,17 @@ class WorkerSettings(BaseAppSettings):
     # Base directory for cloning repos; each worker appends its bug_id.
     # Resolves to /tmp/dh_repo (Linux) or %TEMP%\dh_repo (Windows).
     repo_base_path: str = str(Path(tempfile.gettempdir()) / "dh_repo")
+    # Self-hosted backends (vLLM, llama.cpp, Ollama, …) don't validate the
+    # key but the OpenAI client refuses an empty string — "EMPTY" is the
+    # vLLM-community convention. Cloud backends override via env file.
+    llm_api_key: str = "EMPTY"
+    # Per-LLM-call HTTP timeout (seconds). Default 600s targets self-hosted
+    # backends where a single Qwen2.5-Coder CoT step can run several
+    # minutes; a hard ceiling matters because a degenerate-decoding loop
+    # (e.g. token repetition near the context limit) can otherwise run
+    # until the backend's own limit. Cloud backends never need this long
+    # and can override down via env (e.g. LLM_REQUEST_TIMEOUT=60).
+    llm_request_timeout: int = 600
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / f"worker_{_probe.env}.env",
         env_file_encoding="utf-8",

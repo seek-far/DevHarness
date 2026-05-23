@@ -46,6 +46,52 @@ class PatchAnchorError(Exception):
     """A change could not be anchored to a verbatim current line."""
 
 
+def _leading_ws(s: str) -> str:
+    """Leading whitespace (spaces + tabs) of `s`."""
+    return s[:len(s) - len(s.lstrip(" \t"))]
+
+
+def _reindent_new_line(
+    new_line: str, source_indent: str, on_disk_indent: str,
+) -> str:
+    """Rebase `new_line`'s leading whitespace from `source_indent` (the LLM's
+    framing of `original_line`) to `on_disk_indent` (what the on-disk line
+    actually has). No-op when the two match.
+
+    The whitespace-tolerant anchor in `_resolve_index` can pick a line whose
+    indentation differs from what the LLM submitted in `original_line`. The
+    LLM wrote `new_line` in their own framing, so writing it verbatim
+    misaligns the replacement (F17-span-firstchar: LLM dropped indentation
+    entirely, single-line `start = i` landed at column 0 outside its `for`
+    loop → IndentationError → pytest collection failure → spurious
+    fix-application-broken-the-build).
+
+    Rebase rule per line, in order:
+      - blank line → leave alone
+      - already starts with `on_disk_indent` → LLM compensated, leave alone
+        (this preserves the pre-fix-friendly contract: when the LLM submits
+        `new_line` already at the on-disk indent, we don't double-indent)
+      - starts with `source_indent` → swap the prefix for `on_disk_indent`
+      - `source_indent` is empty → prepend `on_disk_indent`
+      - otherwise → leave alone (best-effort, never worse than verbatim)
+    """
+    if source_indent == on_disk_indent:
+        return new_line
+    out: list[str] = []
+    for line in new_line.split("\n"):
+        if not line.strip():
+            out.append(line)
+        elif on_disk_indent and line.startswith(on_disk_indent):
+            out.append(line)
+        elif source_indent and line.startswith(source_indent):
+            out.append(on_disk_indent + line[len(source_indent):])
+        elif source_indent == "":
+            out.append(on_disk_indent + line)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _resolve_index(src_lines: list[str], change: dict, src_filepath: str) -> int:
     if not isinstance(change, dict):
         raise PatchAnchorError(
@@ -117,11 +163,27 @@ def apply_change_infos(src_filepath: str, change_infos: list[dict]):
     # also lets a later edit see an earlier edit's result.
     for change_info in change_infos:
         idx = _resolve_index(src_lines, change_info, str(src_filepath))
+        # Rebase new_line's leading whitespace from the LLM's framing of
+        # original_line onto the on-disk line's leading whitespace. No-op
+        # when they already match (the common path: exact anchor or
+        # content-anchor with same indentation). Matters when the
+        # whitespace-tolerant anchor path in _resolve_index was taken.
+        source_indent = _leading_ws(str(change_info.get("original_line", "")))
+        on_disk_indent = _leading_ws(src_lines[idx])
+        rebased = _reindent_new_line(
+            str(change_info["new_line"]), source_indent, on_disk_indent,
+        )
+        if rebased != str(change_info["new_line"]):
+            logger.warning(
+                "apply_patch: %s rebased new_line indent from %r to %r "
+                "(LLM submitted with mismatched indentation)",
+                str(src_filepath), source_indent, on_disk_indent,
+            )
         # new_line may be multi-line: splice replaces the one anchored line
         # with 1+ lines. Pure replacement (1 line) keeps len stable; an
         # insert grows it. Later changes are resolved by content against the
         # mutated buffer, so a shifted line_number is harmless.
-        src_lines[idx:idx + 1] = str(change_info['new_line']).split("\n")
+        src_lines[idx:idx + 1] = rebased.split("\n")
     src_filepath.write_text("\n".join(src_lines), encoding="utf-8")
 
 

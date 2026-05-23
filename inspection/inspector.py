@@ -154,6 +154,7 @@ class LLMInspector(Inspector):
                 base_url=cfg.llm_api_base_url,
                 model=cfg.llm_model,
                 temperature=0,
+                timeout=cfg.llm_request_timeout,
             )
             if self._model is None:
                 self._model = cfg.llm_model

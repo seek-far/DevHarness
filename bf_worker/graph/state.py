@@ -42,6 +42,7 @@ class BugFixState(TypedDict, total=False):
     react_tool_calls: list          # log of every tool call: [{step, tool, input}]
     react_confidence: str | None    # "high" | "medium" | "low"
     react_reasoning: str | None     # LLM's stated reasoning from submit_fix
+    max_input_tokens: int | None    # largest prompt_tokens reported by the backend across every LLM call this run (react_loop + reflection); 0 when backend never returned usage; None when no LLM call ever happened
 
     # ── enhancements (optional) ───────────────────────────────────────────────
     memory_hint: str | None         # injected by memory enhancement (PRE_REACT_LOOP)

@@ -261,6 +261,7 @@ Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}` or
 - Commit/push: `commit_status`, `commit_branch`, `commit_hash`, `commit_result`
 - Review output: `review_status`, `review_url`, `review_id`, `review_iid`, `review_branch`, `patch_file`, `report_file`, `review_result`
 - Enhancement telemetry: `reflection_count` — how many reflection post-mortems the reflection enhancement produced this run; `reflection_mode` — the last lens used (`"apply"` deterministic patch-mechanics note | `"test"` LLM causal post-mortem | `None` when not wired / never fired). Additive and backward-compatible, so `SCHEMA_VERSION` stays `"1"`.
+- LLM context telemetry: `max_input_tokens` — the largest `prompt_tokens` the backend reported across every LLM call this run (react_loop + reflection). `0` means the backend never returned a usage block; `None` means no LLM call ever ran. Useful for spotting when a run brushes a finite-window self-hosted backend's context limit. Additive, `SCHEMA_VERSION` unchanged.
 
 GitLab runs populate commit and merge-request fields, local-git runs populate local commit fields, and no-git runs populate patch/report fields.
 
@@ -323,6 +324,28 @@ python -m evaluation.cli run --config configs/baseline.json            # baselin
 python -m evaluation.cli run --config configs/memory_vs_baseline.json  # baseline + memory side by side
 python -m evaluation.cli report run_<timestamp>
 ```
+
+#### Remote evaluation against a self-hosted LLM (`infra/remote-eval/`)
+
+For sweep runs against a model served by your own vLLM / llama.cpp / Ollama on a different host, `infra/remote-eval/deploy.sh` is the simplest path. It rsyncs source over SSH (Tailscale-friendly), bootstraps `.venv-linux` via `uv`, queries the remote's local `http://127.0.0.1:8000/v1/models` to discover the served model id, and writes `settings/worker_local_multi_process.env` pointing the worker at `127.0.0.1:8000`. Reuses the existing `local_multi_process` ENV — the discriminator for "self-hosted backend" lives in the three LLM fields, not in a new ENV name. `LLM_API_KEY` defaults to `"EMPTY"` so you do not have to invent a fake key.
+
+```bash
+# Defaults: HOST=100.81.178.68 SSH_KEY=~/.ssh/ls4090 SSH_USER=ls REMOTE_DIR=/home/ls/sdlcma
+bash infra/remote-eval/deploy.sh
+
+# Then on the remote:
+ssh -i ~/.ssh/ls4090 ls@100.81.178.68
+cd ~/sdlcma && source .venv-linux/bin/activate
+uv run python -m evaluation.cli run --config configs/baseline.json
+
+# Pull results back:
+rsync -az -e "ssh -i ~/.ssh/ls4090" \
+  ls@100.81.178.68:~/sdlcma/evaluation/runs/ ./evaluation/runs/
+```
+
+The harness is **eval-only**: no gateway, orchestrator, or Redis. First run is full sync + venv + `uv pip install -r requirements.txt`; subsequent runs are pure incremental rsync. The new `max_input_tokens` RunRecord field surfaces how close each cell got to the backend's context limit.
+
+**Tool-calling fallback for self-hosted backends.** vLLM + Qwen2.5-Coder-Instruct (and similar combos where chat-template and tool-call parser disagree on the wrapper tag) sometimes returns a valid tool-call JSON in the assistant message's `content` while leaving `tool_calls` empty. `react_loop._maybe_recover_tool_call_from_content` recovers it — bare JSON, `<tool_call>…</tool_call>`, `<tools>…</tools>`, or a ```json``` fence are all accepted. Strict no-op on Dashscope / OpenAI / vLLM with a matched parser+template. If you do start vLLM cleanly, the recommended Qwen2.5-Coder setup is `--enable-auto-tool-choice --tool-call-parser hermes --chat-template <vllm-repo>/examples/tool_chat_template_hermes.jinja`.
 
 #### MCP server (`mcp_server/`)
 
@@ -574,7 +597,8 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 | Variable | Description |
 |---|---|
 | `GITLAB_PRIVATE_TOKEN` | GitLab personal access token with `api` scope (GitLab mode only) |
-| `LLM_API_KEY` | API key for your LLM provider |
+| `LLM_API_KEY` | API key for your LLM provider. Defaults to `"EMPTY"` (the vLLM-community convention) when omitted, so self-hosted backends (vLLM, llama.cpp's server, Ollama) work without it. Cloud backends still require a real key. |
+| `LLM_REQUEST_TIMEOUT` | Optional. Per-LLM-call HTTP timeout in seconds. Default 600 — sized for self-hosted CoT-heavy Qwen-style models on a single GPU, where one step can take minutes. Cloud backends should override down (e.g. `LLM_REQUEST_TIMEOUT=60`). |
 | `LLM_API_BASE_URL` | OpenAI-compatible base URL (e.g. Dashscope) |
 | `LLM_MODEL` | Model name (e.g. `qwen3-coder-480b-a35b-instruct`) |
 

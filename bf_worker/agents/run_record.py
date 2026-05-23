@@ -117,6 +117,7 @@ class RunRecord:
     code_review_would_escalate: bool | None = None  # True iff a high-sev AND high-conf finding was present (shadow records it; acting acts on it)
     code_review_findings:       list | None = None  # compact per-finding dicts for offline evaluation of the reviewer's value
     code_review_rounds:         int | None = None  # acting mode only: fixer↔review rounds escalated (independent of fix_retry_count; None/0 in shadow)
+    max_input_tokens:           int | None = None  # largest prompt_tokens reported by the backend across every LLM call this run (react_loop + reflection); 0 when backend never returned usage; None when no LLM call ever ran
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -195,6 +196,7 @@ class RunRecord:
             code_review_would_escalate = s.get("code_review_would_escalate"),
             code_review_findings       = s.get("code_review_findings"),
             code_review_rounds         = s.get("code_review_rounds"),
+            max_input_tokens           = s.get("max_input_tokens"),
         )
 
     def to_dict(self) -> dict[str, Any]:

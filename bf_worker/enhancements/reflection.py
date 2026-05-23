@@ -194,6 +194,7 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
                 base_url=cfg.llm_api_base_url,
                 model=cfg.llm_model,
                 temperature=0,
+                timeout=cfg.llm_request_timeout,
             )
         return state_box["llm"]
 
@@ -244,8 +245,8 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
             logger.warning("reflection: LLM call failed (non-fatal): %s", exc)
             return None
 
+        in_tok, out_tok = extract_token_usage(msg)
         if budget is not None:
-            in_tok, out_tok = extract_token_usage(msg)
             budget.record_call(in_tok, out_tok)
 
         text = (getattr(msg, "content", "") or "").strip()
@@ -254,10 +255,13 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
 
         count = int(state.get("reflection_count") or 0) + 1
         logger.info("reflection: produced post-mortem #%d", count)
+        prior_max = int(state.get("max_input_tokens") or 0)
+        new_max = max(prior_max, in_tok)
         return {
             "reflection_note": _format_note(text),
             "reflection_count": count,
             "reflection_mode": "test",
+            "max_input_tokens": new_max,
         }
 
     reflect.__name__ = "reflect"
