@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 from agents.base import BugInput
 from agent_config import load_agent_spec, make_agent, maybe_reexec_for_agent_ref
 from providers.gitlab_provider import GitLabProvider
+from services.llm_model_check import check_or_abort as _check_llm_model
 
 from pathlib import Path
 sys.path.append(str(Path.cwd()))
@@ -112,7 +113,8 @@ class BugFixWorker:
         )
 
         agent_spec = load_agent_spec(os.getenv("BF_AGENT_CONFIG"))
-        agent = make_agent(agent_spec)
+        served = _check_llm_model(cfg)  # SystemExit on self-hosted mismatch
+        agent = make_agent(agent_spec, llm_model_served=served)
         logger.info("invoking agent=%s ...", agent.name)
         fix_output = agent.fix(bug_input)
 

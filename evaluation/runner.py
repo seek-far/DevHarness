@@ -28,6 +28,7 @@ from agents.langgraph_agent import LangGraphAgent
 from agents.run_record import RunRecord
 from providers.local_provider import LocalNoGitProvider
 from enhancements import build_enhancements
+from services.llm_model_check import check_or_abort as _check_llm_model
 from settings import worker_cfg as cfg
 
 from evaluation.fixture import Fixture, discover
@@ -39,7 +40,7 @@ _RUNS_ROOT = _HERE / "runs"
 
 # ── Agent factory ────────────────────────────────────────────────────────────
 
-def make_agent(agent_spec: dict) -> Agent:
+def make_agent(agent_spec: dict, *, llm_model_served: str | None = None) -> Agent:
     """Build an Agent instance from a config dict.
 
     agent_spec = {
@@ -49,8 +50,15 @@ def make_agent(agent_spec: dict) -> Agent:
         "enhancements": [{"kind": "memory", ...}, ...]   # optional
     }
 
+    `llm_model_served`, when provided, is stashed on agent_spec so the
+    eval-mode RunRecord captures the backend's actually-served model name
+    (from llm_model_check.check_or_abort). None for cloud backends.
+
     Add new agents here as adapters are written (Aider, SWE-agent, ...).
     """
+    if llm_model_served is not None:
+        # Copy first — never mutate the caller's spec dict.
+        agent_spec = {**agent_spec, "llm_model_served": llm_model_served}
     kind = agent_spec.get("agent", "langgraph")
     kwargs = dict(agent_spec.get("kwargs", {}))
     if kind == "langgraph":
@@ -108,9 +116,16 @@ def run_sweep(
 
     summary: list[dict] = []
 
+    # One-shot startup check: when pointed at a self-hosted backend, verify
+    # the served model matches the env. Aborts the whole sweep on mismatch
+    # rather than letting cells silently run against the wrong model (eval
+    # comparisons would be invalid). Cloud backends are not probed (return
+    # None). Override with LLM_ALLOW_MODEL_MISMATCH=1 for known divergence.
+    served = _check_llm_model(cfg)
+
     for spec in agent_specs:
         spec_name = spec.get("name", spec.get("agent", "agent"))
-        agent = make_agent(spec)
+        agent = make_agent(spec, llm_model_served=served)
         for fixture in fixtures:
             cell_dir = run_dir / spec_name / fixture.fixture_id
             cell_dir.mkdir(parents=True, exist_ok=True)
@@ -140,6 +155,7 @@ def run_sweep(
                 agent_config=spec,
                 run_id=run_id,
                 llm_model=spec.get("llm_model") or getattr(cfg, "llm_model", None),
+                llm_model_served=served,
             )
             cell_record = record.to_dict()
             cell_record.update({

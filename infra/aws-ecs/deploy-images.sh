@@ -8,13 +8,13 @@
 #   3. ECR repos already created (via CloudFormation or manually)
 #
 # Usage:
-#   REGION=us-east-1 bash infra/aws-ecs/deploy-images.sh
+#   REGION=eu-north-1 bash infra/aws-ecs/deploy-images.sh
 #
 # This builds all 3 images locally, tags them for ECR, and pushes.
 # ============================================================================
 set -euo pipefail
 
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-north-1}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 

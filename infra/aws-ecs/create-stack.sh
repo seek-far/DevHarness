@@ -21,7 +21,7 @@
 # ============================================================================
 set -euo pipefail
 
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-north-1}"
 STACK_NAME="${STACK_NAME:-sdlcma-stack}"
 KEY_NAME="${KEY_NAME:?must set KEY_NAME (EC2 key pair name)}"
 GITLAB_TOKEN="${GITLAB_TOKEN:?must set GITLAB_TOKEN (gitlab.com PAT)}"

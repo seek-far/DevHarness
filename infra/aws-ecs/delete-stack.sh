@@ -11,7 +11,7 @@
 # ============================================================================
 set -euo pipefail
 
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-north-1}"
 STACK_NAME="${STACK_NAME:-sdlcma-stack}"
 DELETE_ECR="${DELETE_ECR:-0}"
 

@@ -118,6 +118,22 @@ class RunRecord:
     code_review_findings:       list | None = None  # compact per-finding dicts for offline evaluation of the reviewer's value
     code_review_rounds:         int | None = None  # acting mode only: fixer↔review rounds escalated (independent of fix_retry_count; None/0 in shadow)
     max_input_tokens:           int | None = None  # largest prompt_tokens reported by the backend across every LLM call this run (react_loop + reflection); 0 when backend never returned usage; None when no LLM call ever ran
+    # ── per-run LLM latency / cost telemetry (additive; SCHEMA_VERSION="1") ──
+    # All accumulate across react_loop + reflection LLM calls within one fix().
+    # None across the board when the run never made an LLM call (e.g. R10
+    # short-circuit). total_cached_input_tokens stays None on backends that
+    # don't report prompt caching (most self-hosted today) — distinct from 0
+    # which means "reported but nothing cached".
+    llm_call_count:             int   | None = None
+    total_prompt_tokens:        int   | None = None
+    total_completion_tokens:    int   | None = None
+    total_cached_input_tokens:  int   | None = None
+    total_llm_wallclock_s:      float | None = None
+    # vLLM /v1/models actually-served name (self-hosted only; None for cloud
+    # backends). Distinct from llm_model (which is what the env file declared)
+    # so a silent mismatch is recoverable post-hoc; mismatches at startup
+    # already abort unless LLM_ALLOW_MODEL_MISMATCH=1.
+    llm_model_served:           str   | None = None
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -138,6 +154,7 @@ class RunRecord:
         agent_config: dict | None = None,
         run_id: str | None = None,
         llm_model: str | None = None,
+        llm_model_served: str | None = None,
     ) -> "RunRecord":
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         s = final_state or {}
@@ -197,6 +214,12 @@ class RunRecord:
             code_review_findings       = s.get("code_review_findings"),
             code_review_rounds         = s.get("code_review_rounds"),
             max_input_tokens           = s.get("max_input_tokens"),
+            llm_call_count             = s.get("llm_call_count"),
+            total_prompt_tokens        = s.get("total_prompt_tokens"),
+            total_completion_tokens    = s.get("total_completion_tokens"),
+            total_cached_input_tokens  = s.get("total_cached_input_tokens"),
+            total_llm_wallclock_s      = s.get("total_llm_wallclock_s"),
+            llm_model_served           = llm_model_served,
         )
 
     def to_dict(self) -> dict[str, Any]:

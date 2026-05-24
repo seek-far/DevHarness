@@ -127,7 +127,8 @@ def test_evaluation_sweep_e2e(tmp_path: Path, monkeypatch):
         }),
     }
     monkeypatch.setattr(
-        runner, "make_agent", lambda spec: agents_by_name[spec["name"]]
+        runner, "make_agent",
+        lambda spec, **_kw: agents_by_name[spec["name"]],
     )
 
     # 4. Real Fixture loader — exercises evaluation/fixture.py.

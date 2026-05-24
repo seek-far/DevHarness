@@ -18,7 +18,7 @@
 # ============================================================================
 set -euo pipefail
 
-REGION="${REGION:-us-east-1}"
+REGION="${REGION:-eu-north-1}"
 STACK_NAME="${STACK_NAME:-sdlcma-stack}"
 GITLAB_TOKEN="${GITLAB_TOKEN:?must set GITLAB_TOKEN}"
 PROJECT_PATH="${PROJECT_PATH:?must set PROJECT_PATH (e.g. user/repo)}"
@@ -36,9 +36,9 @@ PIPELINE_ID="$(echo "$PIPELINE_RESP" | python3 -c 'import json,sys; print(json.l
 echo "Pipeline ID: $PIPELINE_ID"
 echo "Watch: https://gitlab.com/${PROJECT_PATH}/-/pipelines/${PIPELINE_ID}"
 
-say "Watch CloudWatch logs for orchestrator activity (60s timeout)"
+say "Watch CloudWatch logs for orchestrator activity (300s timeout)"
 START_TS="$(date +%s)"
-MAX_WAIT=120
+MAX_WAIT=300
 FOUND=0
 
 while [ "$(($(date +%s) - START_TS))" -lt "$MAX_WAIT" ]; do
@@ -69,7 +69,7 @@ curl -sS "${GITLAB_API}/projects/${PROJECT_ENCODED}/merge_requests?state=opened&
 import json, sys
 mrs = json.load(sys.stdin)
 for mr in mrs:
-    print(f"  !{mr["iid"]}  {mr["title"]}  {mr["source_branch"]}->{mr["target_branch"]}  {mr["web_url"]}")
+    print("  !{iid}  {title}  {source_branch}->{target_branch}  {web_url}".format(**mr))
 '
 
 echo ""

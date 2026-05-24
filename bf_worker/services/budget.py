@@ -140,3 +140,34 @@ def extract_token_usage(assistant_msg) -> tuple[int, int]:
         return in_tok, out_tok
 
     return 0, 0
+
+
+def extract_cached_input_tokens(assistant_msg) -> int | None:
+    """Best-effort extraction of cached input tokens from a LangChain message.
+
+    Returns the cached-prompt token count when the backend reports prompt
+    caching, else None. Distinct from 0 — None means "backend didn't report",
+    0 means "reported but nothing was cached this call".
+
+    Two shapes are probed in order:
+      1. LangChain (>=0.3) usage_metadata.input_token_details.cache_read
+      2. Raw OpenAI passthrough in response_metadata: prompt_tokens_details.
+         cached_tokens under either token_usage or usage.
+
+    Returning None for unknown shapes lets downstream code distinguish
+    "backend doesn't support prompt caching" (most self-hosted today) from
+    "backend reported zero cache hits". The aggregate metric only counts
+    backends that surface this — others contribute None and are filtered out.
+    """
+    meta = getattr(assistant_msg, "usage_metadata", None) or {}
+    details = meta.get("input_token_details") if isinstance(meta, dict) else None
+    if isinstance(details, dict) and details.get("cache_read") is not None:
+        return int(details["cache_read"] or 0)
+
+    rmeta = getattr(assistant_msg, "response_metadata", None) or {}
+    usage = rmeta.get("token_usage") or rmeta.get("usage") or {}
+    pdet = usage.get("prompt_tokens_details") if isinstance(usage, dict) else None
+    if isinstance(pdet, dict) and pdet.get("cached_tokens") is not None:
+        return int(pdet["cached_tokens"] or 0)
+
+    return None

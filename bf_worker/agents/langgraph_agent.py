@@ -204,6 +204,7 @@ class LangGraphAgent(Agent):
                 elapsed_s=round(elapsed_s, 3),
                 agent_config=self._agent_config,
                 llm_model=self._agent_config.get("llm_model") or getattr(cfg, "llm_model", None),
+                llm_model_served=self._agent_config.get("llm_model_served"),
             )
             self._journal.write(record, output.final_state)
         except Exception as exc:

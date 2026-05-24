@@ -37,7 +37,7 @@ from enhancements.hooks import HookName
 from graph.state import BugFixState
 from typing import Optional
 from langchain_core.runnables import RunnableConfig
-from services.budget import extract_token_usage
+from services.budget import extract_cached_input_tokens, extract_token_usage
 from services.prompt_guard import sanitize_untrusted
 from services.react_tools import TOOLS_SCHEMA, execute_tool
 from services.runtime_context import get_budget, get_hooks, get_provider
@@ -515,6 +515,14 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
     # Carry forward the running max across react_loop re-entries (retries,
     # acting-mode reviewer feedback) so the per-run telemetry stays monotonic.
     max_input_tokens = int(state.get("max_input_tokens") or 0)
+    # Same carry-forward for per-run latency / cost accumulators. cached starts
+    # at None so backends that never report stay None (distinct from 0); the
+    # first reporting call promotes it to int and additions accumulate.
+    llm_call_count          = int(state.get("llm_call_count") or 0)
+    total_prompt_tokens     = int(state.get("total_prompt_tokens") or 0)
+    total_completion_tokens = int(state.get("total_completion_tokens") or 0)
+    total_llm_wallclock_s   = float(state.get("total_llm_wallclock_s") or 0.0)
+    total_cached_input_tokens: int | None = state.get("total_cached_input_tokens")
 
     while step_count < MAX_STEPS:
 
@@ -528,13 +536,22 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
 
         # ── call LLM ──────────────────────────────────────────────────────────
         logger.info("react_loop: step %d — calling LLM", step_count + 1)
+        _t0 = time.perf_counter()
         assistant_msg = _invoke_llm_with_retry(messages)
+        _call_wallclock_s = time.perf_counter() - _t0
         _maybe_recover_tool_call_from_content(assistant_msg)
         step_count += 1
 
         in_tok, out_tok = extract_token_usage(assistant_msg)
+        cached_tok = extract_cached_input_tokens(assistant_msg)
         if in_tok > max_input_tokens:
             max_input_tokens = in_tok
+        llm_call_count          += 1
+        total_prompt_tokens     += in_tok
+        total_completion_tokens += out_tok
+        total_llm_wallclock_s   += _call_wallclock_s
+        if cached_tok is not None:
+            total_cached_input_tokens = (total_cached_input_tokens or 0) + cached_tok
         if budget is not None:
             budget.record_call(in_tok, out_tok)
 
@@ -632,6 +649,11 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         "react_confidence": confidence,
         "react_reasoning":  reasoning,
         "max_input_tokens": max_input_tokens,
+        "llm_call_count":            llm_call_count,
+        "total_prompt_tokens":       total_prompt_tokens,
+        "total_completion_tokens":   total_completion_tokens,
+        "total_cached_input_tokens": total_cached_input_tokens,
+        "total_llm_wallclock_s":     round(total_llm_wallclock_s, 6),
         # Surface memory-related fields for journaling/telemetry (no-op when
         # the memory enhancement is not registered).
         "memory_hint":         state.get("memory_hint"),

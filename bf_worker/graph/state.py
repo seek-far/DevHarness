@@ -43,6 +43,16 @@ class BugFixState(TypedDict, total=False):
     react_confidence: str | None    # "high" | "medium" | "low"
     react_reasoning: str | None     # LLM's stated reasoning from submit_fix
     max_input_tokens: int | None    # largest prompt_tokens reported by the backend across every LLM call this run (react_loop + reflection); 0 when backend never returned usage; None when no LLM call ever happened
+    # ── per-run LLM latency / cost telemetry (additive 2026-05-24) ───────────
+    # All accumulate across react_loop + reflection. None when no LLM call ran;
+    # 0 (for the int fields) is a real observation. total_cached_input_tokens
+    # stays None when the backend never reports prompt caching (most self-
+    # hosted today); a single reporting call promotes it from None to int.
+    llm_call_count: int | None
+    total_prompt_tokens: int | None
+    total_completion_tokens: int | None
+    total_cached_input_tokens: int | None
+    total_llm_wallclock_s: float | None
 
     # ── enhancements (optional) ───────────────────────────────────────────────
     memory_hint: str | None         # injected by memory enhancement (PRE_REACT_LOOP)

@@ -35,11 +35,12 @@ MAX_FIX_RETRIES times per run.
 from __future__ import annotations
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from services.budget import extract_token_usage
+from services.budget import extract_cached_input_tokens, extract_token_usage
 from services.prompt_guard import sanitize_untrusted
 
 logger = logging.getLogger(__name__)
@@ -236,16 +237,19 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
 
         from langchain_core.messages import SystemMessage, HumanMessage
         try:
+            _t0 = time.perf_counter()
             msg = _get_llm().invoke([
                 SystemMessage(content=_SYSTEM),
                 HumanMessage(content=prompt),
             ])
+            _call_wallclock_s = time.perf_counter() - _t0
         except Exception as exc:
             # Never break the core run — same contract as every hook callback.
             logger.warning("reflection: LLM call failed (non-fatal): %s", exc)
             return None
 
         in_tok, out_tok = extract_token_usage(msg)
+        cached_tok = extract_cached_input_tokens(msg)
         if budget is not None:
             budget.record_call(in_tok, out_tok)
 
@@ -257,11 +261,23 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
         logger.info("reflection: produced post-mortem #%d", count)
         prior_max = int(state.get("max_input_tokens") or 0)
         new_max = max(prior_max, in_tok)
+        prior_cached = state.get("total_cached_input_tokens")
+        if cached_tok is not None:
+            new_cached: int | None = (prior_cached or 0) + cached_tok
+        else:
+            new_cached = prior_cached
         return {
             "reflection_note": _format_note(text),
             "reflection_count": count,
             "reflection_mode": "test",
             "max_input_tokens": new_max,
+            "llm_call_count":          int(state.get("llm_call_count") or 0) + 1,
+            "total_prompt_tokens":     int(state.get("total_prompt_tokens") or 0) + in_tok,
+            "total_completion_tokens": int(state.get("total_completion_tokens") or 0) + out_tok,
+            "total_cached_input_tokens": new_cached,
+            "total_llm_wallclock_s":   round(
+                float(state.get("total_llm_wallclock_s") or 0.0) + _call_wallclock_s, 6
+            ),
         }
 
     reflect.__name__ = "reflect"

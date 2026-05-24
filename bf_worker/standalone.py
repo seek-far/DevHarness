@@ -53,6 +53,8 @@ sys.path.insert(0, str(_HERE))                   # bf_worker/
 from agents.base import BugInput
 from agent_config import load_agent_spec, make_agent, maybe_reexec_for_agent_ref
 from providers.local_provider import LocalGitProvider, LocalNoGitProvider
+from services.llm_model_check import check_or_abort as _check_llm_model
+from settings import worker_cfg as _worker_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +176,11 @@ def main() -> None:
         )
 
     agent_spec = load_agent_spec(args.config)
-        
+
     # Build agent + bug input
     bug_input = BugInput(bug_id=args.bug_id, provider=provider)
-    agent = make_agent(agent_spec)
+    served = _check_llm_model(_worker_cfg)  # SystemExit on self-hosted mismatch
+    agent = make_agent(agent_spec, llm_model_served=served)
 
     logger.info("invoking agent=%s ...", agent.name)
     fix_output = agent.fix(bug_input)

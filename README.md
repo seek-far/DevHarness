@@ -2,7 +2,7 @@
 
 **DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file.
 
-A built-in evaluation harness benchmarks bug-fix agents against a curated fixture set, and the engine is extensible via in-graph hooks — memory and reflection enhancements ship in-tree today, and new enhancements plug in without touching graph internals.
+A built-in evaluation harness benchmarks bug-fix agents against a curated fixture set, and the engine itself is pluggable via an `Agent` interface — so alternative agents (Aider, SWE-agent, custom) can be swapped in and compared head-to-head.
 
 ---
 
@@ -21,10 +21,9 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   - Supports both API-based LLMs (OpenAI-compatible, Alibaba Dashscope) and
     self-hosted backends (vLLM, llama.cpp server, Ollama).
 
-- **Extensibility** — in-graph hook system; built-in enhancements (memory,
-  reflection); `agent_ref` pins a spec to an SDLCMA git ref for cross-version
-  comparison; `Agent` ABC reserved as a future extension point for third-party
-  agents (none integrated yet).
+- **Extensibility** — `Agent` ABC for plugging in third-party agents; in-graph
+  hook system; built-in enhancements (memory, reflection); `agent_ref` pins a
+  spec to an SDLCMA git ref for cross-version comparison.
 
 - **Observability** — versioned `RunRecord` telemetry (timings, retry counts,
   branch / commit / MR fields, `max_input_tokens`, agent-code git status,
@@ -786,8 +785,8 @@ bash infra/aws-ecs/deploy-images.sh
 
 # 3. Scale the service up + grab the cloudflared URL
 aws ecs update-service --cluster sdlcma-cluster --service sdlcma-services \
-                       --desired-count 1 --region us-east-1
-aws logs tail /sdlcma/services --filter trycloudflare --region us-east-1
+                       --desired-count 1 --region eu-north-1
+aws logs tail /sdlcma/services --filter trycloudflare --region eu-north-1
 # → https://<assigned>.trycloudflare.com  (set as the gitlab.com webhook)
 ```
 

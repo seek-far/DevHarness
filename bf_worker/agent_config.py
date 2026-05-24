@@ -42,10 +42,23 @@ def normalize_agent_ref(spec: dict | None) -> str:
     return "" if ref.lower() in _CURRENT_REFS else ref
 
 
-def make_agent(agent_spec: dict | None = None) -> LangGraphAgent:
-    """Build the configured running-mode agent."""
+def make_agent(
+    agent_spec: dict | None = None,
+    *,
+    llm_model_served: str | None = None,
+) -> LangGraphAgent:
+    """Build the configured running-mode agent.
+
+    `llm_model_served`, when provided, is stashed on agent_config so the
+    journal's RunRecord captures the backend's actual served model name (the
+    output of llm_model_check.check_or_abort at startup). None for cloud
+    backends; the env-declared cfg.llm_model is already captured separately.
+    """
     if agent_spec is None:
-        return LangGraphAgent(journal=JournalWriter())
+        agent_spec = {}
+    if llm_model_served is not None:
+        # Copy first — never mutate a caller's dict.
+        agent_spec = {**agent_spec, "llm_model_served": llm_model_served}
 
     kind = agent_spec.get("agent", "langgraph")
     kwargs = dict(agent_spec.get("kwargs", {}))

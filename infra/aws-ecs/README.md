@@ -37,10 +37,10 @@ aws ecs update-service \
   --cluster sdlcma-cluster \
   --service sdlcma-services \
   --desired-count 1 \
-  --region us-east-1
+  --region eu-north-1
 
 # 4. Read the cloudflared URL
-aws logs tail /sdlcma/services --filter trycloudflare --region us-east-1
+aws logs tail /sdlcma/services --filter trycloudflare --region eu-north-1
 # → https://<rand>.trycloudflare.com
 
 # 5. Set webhook on gitlab.com:
