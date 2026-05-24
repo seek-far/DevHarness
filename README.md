@@ -336,6 +336,10 @@ python -m evaluation.cli report <run_id>                             # compariso
 python -m evaluation.cli journal-prune --older-than 30d --keep-flagged  # dry-run retention
 ```
 
+#### Published benchmark results
+
+- [Cloud vs. self-hosted — initial benchmark (2026-05-24)](evaluation/reports/2026_05_24_cloud_vs_self_hosted.md) — first side-by-side of Dashscope `qwen3-coder-480b-a35b-instruct` vs. vLLM (+FlashInfer) `qwen2.5-coder-32b-instruct-awq` across all 19 bundled fixtures, plus a back-of-envelope FlashInfer effect estimate. Initial results, one sweep per backend — see the caveats section before quoting numbers.
+
 The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source. Evaluation also runs every cell with **checkpointing disabled** (`make_agent` sets `checkpointer=None`): the LangGraph checkpointer is keyed on `thread_id=bug_id`, which in evaluation is the fixture id — identical across every sweep, spec, and parallel process sharing one sqlite file — so leaving it on makes one cell silently resume another's state and corrupts the comparison. Never enable checkpointing for a sweep; if results look impossible (a baseline cell with reflection telemetry, `test_passed` contradicting the trajectory), suspect a stale checkpoint. `list-journal --flagged` is only a review filter; `promote` can promote flagged or unflagged entries. Promotion tries to populate `fixtures/<id>/source/` automatically from the journal's buggy git commit (`base_commit`, falling back to `branch_create_result.commit`) and repo metadata (`project_web_url`, `source_repo_path`, or explicit `--source-repo`). If repo/commit information is missing, promotion still creates the fixture and leaves `source/` for manual population.
 
 #### Journal retention (`bench journal-prune`)
