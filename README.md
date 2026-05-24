@@ -2,7 +2,62 @@
 
 **DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file.
 
-It is also a research platform: the bug-fix approach itself is pluggable (`Agent` interface), and an evaluation harness compares approaches against a curated benchmark.
+A built-in evaluation harness benchmarks bug-fix agents against a curated fixture set, and the engine is extensible via in-graph hooks — memory and reflection enhancements ship in-tree today, and new enhancements plug in without touching graph internals.
+
+---
+
+## Features
+
+- **Bug-fix engine** — LLM ReAct loop (≤8 steps, 4 bound tools); apply-then-test
+  retry feedback loop (failed patch + error tail go into the next prompt);
+  parse and source-fetch fallbacks (regex miss or unreadable file degrades to a
+  raw-trace prompt instead of failing); provider abstraction so the same graph
+  runs against GitLab, local git, or a plain directory.
+
+- **Deployment**
+  - Local: standalone CLI; multi-process or docker-compose against a local
+    GitLab; docker-compose against gitlab.com.
+  - Public-host / AWS ECS / Kubernetes (kind + Helm), all against gitlab.com.
+  - Supports both API-based LLMs (OpenAI-compatible, Alibaba Dashscope) and
+    self-hosted backends (vLLM, llama.cpp server, Ollama).
+
+- **Extensibility** — in-graph hook system; built-in enhancements (memory,
+  reflection); `agent_ref` pins a spec to an SDLCMA git ref for cross-version
+  comparison; `Agent` ABC reserved as a future extension point for third-party
+  agents (none integrated yet).
+
+- **Observability** — versioned `RunRecord` telemetry (timings, retry counts,
+  branch / commit / MR fields, `max_input_tokens`, agent-code git status,
+  reflection and code-review counters); always-on journal writer with
+  `FLAGGED` markers for heuristically interesting runs; Redis heartbeat keys
+  for live worker monitoring; MCP server exposing the evaluation state
+  (`list_fixtures`, `read_journal_entry`, ...) to Claude Desktop or any MCP
+  client.
+
+- **Evaluation & Quality** — `bench` CLI for agent × fixture sweeps; curated
+  fixtures (`F01`–`F10`) plus journal-promoted real bugs; `RunRecord`
+  aggregation into per-agent fix-rate / iterations / wallclock; regression
+  coverage across every surface (unit `pytest`, end-to-end
+  `integration_test.py`, eval sweeps, per-deployment real-host smokes —
+  consolidated in `tests/TESTING.md`).
+
+- **Reliability** — narrow transient-I/O retry shared across 5 nodes; LLM
+  transient retry plus a tool-call recovery fallback (vLLM + Qwen wrapper
+  mismatch); per-run budget caps (calls / tokens / wallclock); LangGraph
+  checkpoint resume at node boundaries; idempotency contract (deterministic
+  fix-branch name, three-state push, MR lookup-then-create); already-merged
+  short-circuit that skips the whole pipeline when the deterministic branch
+  already has a merged MR.
+
+- **Security** — `patch_guard` (write scope + denylist + size caps);
+  `prompt_guard` (untrusted-input wrapping + injection logging); `fetch_guard`
+  (symmetric read-path denylist); `sanitize_untrusted` on every retry-feedback
+  turn.
+
+- **Research** — Code Inspection: a standalone code-review agent independent
+  of the bug-fix loop (Phase 1 CLI + operator scorer; opt-in Phase-2
+  `code_review` graph node with shadow / acting modes), targeting defects the
+  test oracle structurally misses.
 
 ---
 
