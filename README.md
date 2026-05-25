@@ -20,6 +20,15 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   - Public-host / AWS ECS / Kubernetes (kind + Helm), all against gitlab.com.
   - Supports both API-based LLMs (OpenAI-compatible, Alibaba Dashscope) and
     self-hosted backends (vLLM, llama.cpp server, Ollama).
+  - Optional **LLM Gateway** — independent FastAPI service (OpenAI-compatible
+    passthrough) that routes worker LLM calls through a configured
+    **inference policy** (today: ordered ladder; `X-Sdlcma-Attempt` header
+    treated as a difficulty coefficient → primary backend at attempt 0,
+    fallbacks at higher attempts). Bundled configs cover cloud-only,
+    self-hosted-only, and mixed ladders (cloud→self-hosted or cloud→cloud).
+    Orthogonal opt-in via `LLM_VIA_GATEWAY=true`; off by default with zero
+    base impact on the worker code path. Records the chosen backend on
+    `RunRecord.llm_backend_name` for per-backend evaluation aggregation.
 
 - **Extensibility** — `Agent` ABC for plugging in third-party agents; in-graph
   hook system; built-in enhancements (memory, reflection); `agent_ref` pins a
@@ -101,6 +110,32 @@ Local project + error trace
 **Two sub-modes:**
 - **With git** (`LocalGitProvider`): Source dir is a git repo. Creates a fix branch, commits locally (no push).
 - **Without git** (`LocalNoGitProvider`): Plain directory. Creates a temp copy, generates a unified diff patch file + review report. Original source is never modified.
+
+### LLM Gateway (orthogonal opt-in)
+
+The worker's LLM endpoint can be either the upstream backend directly, or an **`llm_gateway`** service that proxies through a configured inference policy. The gateway is orthogonal to the two modes above — turn it on or off for either; the worker code path is byte-identical with it off.
+
+```
+Without gateway (default — single backend per deployment):
+
+    [Worker]  ── OpenAI call ──►  LLM backend (cloud or self-hosted)
+
+
+With gateway (LLM_VIA_GATEWAY=true):
+
+    [Worker]  ── OpenAI call + hint headers ──►  [LLM Gateway]
+       │       (X-Sdlcma-Bug-Id, X-Sdlcma-Attempt)        │
+       │                                                  │  inference policy
+       │                                                  │  (ordered ladder)
+       │                                                  ▼
+       │                                      ┌────────────────────────┐
+       │      X-Sdlcma-Backend-Name           │  attempt=0 → backend A │
+       └────── (response header, lands on ─── │  attempt=1 → backend B │
+               RunRecord.llm_backend_name)    │  attempt≥2 → clamp     │
+                                              └────────────────────────┘
+```
+
+The gateway is a single FastAPI process (`llm_gateway/app.py`, port 9000) that runs alongside the rest of the stack. Worker → gateway is plain OpenAI HTTP, so no client-side dependency on `llm_gateway/` is introduced; off-mode = don't run the gateway and don't set the env flag. See [Configuration → LLM Gateway](#llm-gateway-optional-opt-in) for the bundled policies and how to switch it on, and `docs/architecture.md` "LLM Gateway" for the deep contract.
 
 ---
 
