@@ -1,16 +1,31 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  SDLCMA -- ECS stack on a single EC2 instance (free-tier compatible).
-  Services (redis + gateway + orchestrator + cloudflared) run as one
-  multi-container ECS task in HOST network mode so the 4 containers share
-  the host network namespace and reach each other via localhost (matches
-  the docker-compose pattern and what the env vars expect). bf-worker is
-  a one-off task launched per bug via ecs:RunTask by the orchestrator,
-  ALSO in HOST network mode — secondary awsvpc ENIs in public subnets do
-  NOT auto-assign public IPs and would need NAT/EIP for outbound (the
-  worker has to reach gitlab.com + the LLM API). Host mode reuses the
-  EC2 instance's primary ENI's public IP for free, fitting the free-tier
-  budget. awsvpc remains opt-in via `ecs_worker_network_mode=awsvpc`.
+  SDLCMA -- ECS stack, llm_gateway variant. Adds llm-gateway (FastAPI
+  proxy on localhost:9000) as a 5th container in the services task; the
+  bf-worker task uses LLM_API_BASE_URL=http://localhost:9000/v1 +
+  LLM_VIA_GATEWAY=true. Same cluster/service names as stack.yml so
+  downstream tooling is unchanged; ECR repos use DeletionPolicy: Retain
+  so switching stacks does not lose pushed images. See header comment
+  block below for design / coexistence rules.
+
+# Design notes (long-form — kept out of Description to satisfy CFN's
+# 1024-char limit on that field):
+#
+# - Same single-EC2 / host-network shape as stack.yml. 5 services
+#   containers (redis, gateway, llm-gateway, orchestrator, cloudflared)
+#   share the EC2 host's network namespace; bf-worker (host mode, spawned
+#   per bug) reaches localhost:9000 on the same EC2.
+# - Cluster name `sdlcma-cluster`, service name `sdlcma-services`,
+#   bf-worker task family `bf-worker` — all identical to stack.yml so
+#   regression.sh / gitlab-smoke.sh / CloudWatch dashboards work
+#   unchanged.
+# - ECR repos here share names with stack.yml (`dh-gateway`,
+#   `dh-orchestrator`, `dh-bf-worker`) and add `dh-llm-gateway`. With
+#   DeletionPolicy: Retain, switching stacks (delete one, create the
+#   other) does not destroy pushed images.
+# - All other contracts (gitlab.com auth via gitlab_saas env,
+#   WORKER_SPAWNER=ecs, host-network worker, outbound-only SG) are
+#   identical to stack.yml.
 
 Parameters:
   VpcId:
@@ -19,11 +34,8 @@ Parameters:
   PublicSubnetA:
     Type: AWS::EC2::Subnet::Id
     Description: >
-      Public subnet for the EC2 instance + ECS services. With the worker
-      task running in host network mode (default), this is the only subnet
-      needed — no per-task ENI is created. If you flip to awsvpc workers
-      (ecs_worker_network_mode=awsvpc) the worker's subnet must match the
-      EC2 instance's AZ, so this same subnet still works.
+      Public subnet for the EC2 instance + ECS services. Worker task runs
+      in host network mode so this is the only subnet needed.
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: EC2 key pair for SSH access (create in Console > EC2 > Key Pairs)
@@ -50,15 +62,38 @@ Parameters:
   LLMApiKey:
     Type: String
     NoEcho: true
-    Description: LLM API key (Dashscope / OpenAI-compatible)
+    Description: >
+      LLM API key. Injected as the gateway's DASHSCOPE_API_KEY for the
+      qwen3_dashscope backend in qwen3_api.yaml. Also passed to
+      bf-worker as LLM_API_KEY but the gateway ignores the worker's
+      Authorization header and uses this key for upstream calls.
   LLMApiBaseUrl:
     Type: String
     Default: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-    Description: LLM API base URL
+    Description: >
+      Upstream LLM API base URL — used INSIDE the gateway config (via the
+      bundled qwen3_api.yaml's `base_url`), not by the worker directly.
+      Worker hits the gateway at http://localhost:9000/v1 regardless of
+      this value. Kept here for symmetry with `stack.yml` and so the
+      gateway can read the canonical upstream URL via env if a future
+      config templates it in.
   LLMModel:
     Type: String
     Default: qwen3-coder-plus
-    Description: LLM model name
+    Description: >
+      LLM model name. Used inside the gateway config; the gateway
+      rewrites the worker's `model` field to whichever backend it
+      selects, so the worker's LLM_MODEL is informational.
+  LlmGatewayConfigPath:
+    Type: String
+    Default: /app/configs/llm_gateway/qwen3_api.yaml
+    Description: >
+      Path INSIDE the llm-gateway container to the YAML config file.
+      Defaults to the bundled single-backend qwen3 config. Swap to
+      qwen3_plus_local.yaml / qwen3_and_ds4.yaml etc. if you want a
+      multi-backend policy (those configs reference additional
+      api_key_env names you would need to wire in as extra environment
+      vars below).
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -69,15 +104,15 @@ Metadata:
         Parameters: [KeyName, InstanceType, SwapSizeGB]
       - Label: {default: Secrets}
         Parameters: [GitlabToken, LLMApiKey, LLMApiBaseUrl, LLMModel]
+      - Label: {default: LLM Gateway}
+        Parameters: [LlmGatewayConfigPath]
 
 Resources:
   # ── ECR Repositories ──────────────────────────────────────────
-  # Retain on delete/replace so `delete-stack` (or switching to
-  # stack-llm-gateway.yml) does not destroy pushed images. CloudFormation
-  # refuses to delete a non-empty ECR repo anyway, so without Retain a
-  # delete-stack with images present would fail mid-rollback — Retain
-  # makes the lifecycle predictable. Clean up manually with
-  # `aws ecr delete-repository --force ...` if you truly want them gone.
+  # DeletionPolicy: Retain so switching between stack.yml and this stack
+  # does not destroy pushed images. The trade-off is that `delete-stack`
+  # leaves the repos behind; clean them up manually if you really want
+  # them gone (`aws ecr delete-repository --force ...`).
   EcrGateway:
     Type: AWS::ECR::Repository
     DeletionPolicy: Retain
@@ -100,6 +135,14 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       RepositoryName: dh-bf-worker
+      ImageTagMutability: MUTABLE
+
+  EcrLlmGateway:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: dh-llm-gateway
       ImageTagMutability: MUTABLE
 
   # ── IAM Roles ─────────────────────────────────────────────────
@@ -156,13 +199,11 @@ Resources:
                   - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/bf-worker:*"
                   - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/bf-worker"
               # DescribeTasks / StopTask operate on the task INSTANCE ARN —
-              # what's actually running in the cluster. Originally bundled
-              # with RunTask on task-definition ARNs which silently
-              # AccessDenied'd every Monitor poll; the worker still
-              # completed via the heartbeat-key fallback so 5/21's
-              # end-to-end smoke missed it. Surfaced 2026-05-25 in the
-              # gateway-variant stack when LLM calls ran long enough for
-              # Monitor to actually poll mid-run; same fix applied here.
+              # what's actually running in the cluster. Mismatching this
+              # resource onto task-definition ARNs (the original bug here)
+              # made every Monitor poll AccessDenied; the worker still
+              # completed via the heartbeat-key fallback, but the log
+              # was noisy and Monitor lost mid-run task visibility.
               - Effect: Allow
                 Action:
                   - ecs:DescribeTasks
@@ -174,12 +215,6 @@ Resources:
                 Resource: !GetAtt EcsTaskExecutionRole.Arn
 
   # ── Security Group (the single one used by everything) ────────
-  # Attached to the EC2 instance and therefore implicitly to BOTH the
-  # services task AND the bf-worker task (both in host network mode →
-  # they share the EC2 host's primary ENI). Outbound-only — inbound is
-  # not needed because cloudflared dials OUT to establish the tunnel.
-  # If you ever flip the worker to awsvpc mode, pass this SG as
-  # ECS_WORKER_SECURITY_GROUPS (already wired in the orchestrator env).
   ServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -204,7 +239,10 @@ Resources:
           #!/bin/bash
           set -e
           echo "ECS_CLUSTER=sdlcma-cluster" >> /etc/ecs/ecs.config
-          # Swap (mandatory OOM mitigation on 1 GB t3.micro)
+          # Swap (mandatory OOM mitigation on 1 GB t3.micro). With the
+          # llm-gateway container added, peak host RAM use can brush 1 GB
+          # (services reservations ~576 MB + bf-worker peak ~450 MB);
+          # 4 GB swap keeps pip-install + pytest spikes from OOM-killing.
           if ! swapon --show=NAME --noheadings | grep -q /swapfile; then
             fallocate -l ${SwapSizeGB}G /swapfile 2>/dev/null || \
               dd if=/dev/zero of=/swapfile bs=1M count=$((${SwapSizeGB}*1024)) status=none
@@ -217,6 +255,8 @@ Resources:
           Value: sdlcma-ecs-host
 
   # ── ECS Cluster ────────────────────────────────────────────────
+  # Same name as stack.yml on purpose — downstream tooling (regression.sh,
+  # CloudWatch dashboards) keys off this name.
   SdlcmaCluster:
     Type: AWS::ECS::Cluster
     Properties:
@@ -240,29 +280,41 @@ Resources:
     Type: AWS::ECS::TaskDefinition
     Properties:
       Family: sdlcma-services
-      # host mode: 4 containers share the EC2 host's network namespace, so
-      # `localhost:6379` and `localhost:8000` resolve across containers (same
-      # as docker-compose default and what the existing env vars assume).
-      # bridge mode would isolate namespaces and break those references.
+      # host mode: 5 containers share the EC2 host's network namespace, so
+      # `localhost:6379` (redis) / `localhost:8000` (webhook gateway) /
+      # `localhost:9000` (llm-gateway) resolve across containers AND from
+      # the host-network bf-worker spawned on the same EC2.
       NetworkMode: host
       ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
       TaskRoleArn: !GetAtt OrchestratorTaskRole.Arn
       ContainerDefinitions:
-        # NOTE on memory: the services containers use `MemoryReservation`
-        # (soft) instead of `Memory` (hard) so ECS' scheduler only counts the
-        # reservations — not theoretical caps — against the host's 940 MB.
-        # bf-worker (host mode, container-level `Memory: 512` cgroup limit)
-        # competes for the SAME host RAM at runtime; hard-reserving the full
-        # headline numbers here would crowd it out and cause RAM pressure /
-        # swap during pip-install + pytest peaks (~450 MB measured peak).
-        # Under earlier awsvpc plans this was also a scheduling-time issue
-        # (RunTask returned silent failures=[RESOURCE:MEMORY]); host mode
-        # removes the scheduling check but keeps the runtime budget.
+        # Memory accounting on t3.micro (~940 MB usable):
+        #   redis ............  64
+        #   gateway ..........  96
+        #   llm-gateway ......  32   (NEW — soft reservation; actual
+        #                             RSS ~50-70 MB for Python+uvicorn+
+        #                             fastapi+httpx + small policy state.
+        #                             ECS uses MemoryReservation for
+        #                             scheduling, not the runtime ceiling,
+        #                             so this just leaves headroom for
+        #                             bf-worker's 512 MB hard request to
+        #                             schedule. Initially set to 96 but
+        #                             observed RESOURCE:MEMORY rejecting
+        #                             RunTask: 480 reserved → 460 avail
+        #                             vs 512 needed.)
+        #   orchestrator ..... 192
+        #   cloudflared ......  32
+        #   --------------------
+        #   total ............ 416 MB reservations
+        # bf-worker scheduling check: 940 - 416 = 524 ≥ 512 ✓
+        # Runtime: bf-worker hard cap 512 MB runs concurrently in the
+        # same host network namespace → peak ~ 928 MB plus 4 GB swap.
+        # If you observe sustained swap pressure during pip-install
+        # peaks, bump InstanceType to t3.small.
         - Name: redis
           Image: redis:7-alpine
           MemoryReservation: 64
           Essential: true
-          # No PortMappings under host mode (container port == host port).
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -284,6 +336,8 @@ Resources:
               Value: redis://localhost:6379/0
             - Name: LLM_API_KEY
               Value: !Ref LLMApiKey
+            # webhook gateway does not call the LLM itself; these env vars
+            # are kept so the gateway image's settings probe is happy.
             - Name: LLM_API_BASE_URL
               Value: !Ref LLMApiBaseUrl
             - Name: LLM_MODEL
@@ -295,6 +349,30 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: gateway
 
+        - Name: llm-gateway
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-llm-gateway:latest"
+          MemoryReservation: 32
+          Essential: true
+          # No DependsOn — llm-gateway is self-contained (FastAPI + httpx),
+          # only outbound HTTPS to upstream backends. Starting it before
+          # orchestrator means worker's first LLM call always lands on a
+          # ready listener.
+          Environment:
+            - Name: LLM_GATEWAY_CONFIG
+              Value: !Ref LlmGatewayConfigPath
+            # qwen3_api.yaml references api_key_env: DASHSCOPE_API_KEY.
+            # Reuse the existing LLMApiKey parameter (single source of
+            # truth) — operationally simpler than introducing a separate
+            # DashscopeApiKey parameter.
+            - Name: DASHSCOPE_API_KEY
+              Value: !Ref LLMApiKey
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ServiceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: llm-gateway
+
         - Name: orchestrator
           Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-orchestrator:latest"
           MemoryReservation: 192
@@ -303,9 +381,6 @@ Resources:
             - ContainerName: redis
               Condition: START
           Environment:
-            # ENV stays gitlab_saas (gitlab.com auth path); the spawner choice
-            # is decoupled via WORKER_SPAWNER. Matches the host-mode AWS
-            # rehearsal and Stage-2 docker pattern.
             - Name: ENV
               Value: gitlab_saas
             - Name: WORKER_SPAWNER
@@ -322,37 +397,31 @@ Resources:
               Value: sdlcma-cluster
             - Name: ECS_WORKER_TASK_DEF
               Value: bf-worker
-            # ECS_WORKER_SUBNETS / ECS_WORKER_SECURITY_GROUPS are consulted
-            # ONLY when ecs_worker_network_mode=awsvpc (the spawner builds
-            # networkConfiguration just for that path; host mode ignores
-            # them). Pre-populated to sane defaults so the opt-in flip is a
-            # one-setting change. Subnet must match the EC2 instance's AZ —
-            # mismatched returns ecs:RunTask failures=[LOCATION] silently.
             - Name: ECS_WORKER_SUBNETS
               Value: !Ref PublicSubnetA
             - Name: ECS_WORKER_SECURITY_GROUPS
               Value: !Ref ServiceSecurityGroup
             - Name: ECS_REGION
               Value: !Ref AWS::Region
-            # AWS_REGION is the standard boto3 fallback; we pass region_name
-            # explicitly to the ECS client, but setting it keeps any other
-            # boto3 call (CloudWatch, STS) from needing extra config.
             - Name: AWS_REGION
               Value: !Ref AWS::Region
-            # bf-worker uses HOST network mode so it shares the EC2 host's
-            # primary ENI (which has a public IP) — awsvpc secondary ENIs do
-            # NOT auto-assign public IPs and would need a NAT/EIP. Host mode
-            # also lets the worker reach Redis at localhost. The orchestrator's
-            # own `redis_url=redis://localhost:6379/0` propagates to the
-            # worker via the fallback, so ECS_WORKER_REDIS_URL is unset.
             - Name: ECS_WORKER_NETWORK_MODE
               Value: host
+            # Orchestrator itself doesn't call the LLM; these env vars
+            # carry through to the spawned worker via the spawner's
+            # fallback (worker overrides come first, then orchestrator's
+            # env). For the gateway path the AUTHORITATIVE worker LLM
+            # config is set on BfWorkerTaskDef below — both sides point
+            # at the in-host gateway URL so there is no drift if the
+            # fallback ever activates.
             - Name: LLM_API_KEY
               Value: !Ref LLMApiKey
             - Name: LLM_API_BASE_URL
-              Value: !Ref LLMApiBaseUrl
+              Value: http://localhost:9000/v1
             - Name: LLM_MODEL
               Value: !Ref LLMModel
+            - Name: LLM_VIA_GATEWAY
+              Value: "true"
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -383,10 +452,6 @@ Resources:
     Type: AWS::ECS::TaskDefinition
     Properties:
       Family: bf-worker
-      # Host network mode (not awsvpc) so the worker inherits the EC2 host's
-      # public-IP-bearing primary ENI for outbound HTTPS to gitlab.com / the
-      # LLM API; also lets Redis at localhost work. Task-level Cpu/Memory are
-      # not required for host mode (only container-level matters).
       NetworkMode: host
       ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
       ContainerDefinitions:
@@ -394,10 +459,6 @@ Resources:
           Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-bf-worker:latest"
           Essential: true
           Memory: 512
-          # ENV/REDIS_URL/BUG_ID/project_* arrive at runtime via the spawner's
-          # container override; everything below is the static "what this
-          # container needs to talk to gitlab.com & the LLM" baseline that
-          # never changes per task.
           Environment:
             - Name: GITLAB_API
               Value: https://gitlab.com/api/v4
@@ -405,12 +466,22 @@ Resources:
               Value: oauth2
             - Name: GITLAB_PRIVATE_TOKEN
               Value: !Ref GitlabToken
+            # ── LLM via gateway ─────────────────────────────────────
+            # Worker hits the llm-gateway sidecar over localhost (host
+            # network mode → worker and llm-gateway share the EC2 host's
+            # network namespace). LLM_VIA_GATEWAY=true makes the worker
+            # attach X-Sdlcma-Bug-Id / X-Sdlcma-Attempt headers and skip
+            # the self-hosted /v1/models name probe (the gateway exposes
+            # the UNION of backend models on /v1/models, not a single
+            # name to compare against).
             - Name: LLM_API_KEY
               Value: !Ref LLMApiKey
             - Name: LLM_API_BASE_URL
-              Value: !Ref LLMApiBaseUrl
+              Value: http://localhost:9000/v1
             - Name: LLM_MODEL
               Value: !Ref LLMModel
+            - Name: LLM_VIA_GATEWAY
+              Value: "true"
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -428,12 +499,6 @@ Resources:
       DesiredCount: !Ref ServiceDesiredCount
       LaunchType: EC2
       SchedulingStrategy: REPLICA
-      # Single-instance, host-network deploy → new task can't coexist with old
-      # on the same EC2 (port + RAM conflicts on t3.micro). Default min=100%
-      # deadlocks `force-new-deployment` here. Lower min to 0 to allow brief
-      # downtime; keep max=200 because ECS' AZ-rebalancing guardrail rejects
-      # `maximumPercent <= 100`. In practice host-mode + insufficient RAM
-      # naturally serializes the swap regardless of the max ceiling.
       DeploymentConfiguration:
         MinimumHealthyPercent: 0
         MaximumPercent: 200
@@ -450,8 +515,11 @@ Outputs:
   EcrBfWorkerUri:
     Description: ECR URI for dh-bf-worker
     Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-bf-worker:latest"
+  EcrLlmGatewayUri:
+    Description: ECR URI for dh-llm-gateway
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/dh-llm-gateway:latest"
   ClusterName:
-    Description: ECS Cluster name
+    Description: ECS Cluster name (same as stack.yml)
     Value: !Ref SdlcmaCluster
   InstancePublicIp:
     Description: EC2 instance public IP (SSH here)
@@ -459,6 +527,9 @@ Outputs:
   CloudflaredLogHint:
     Description: Command to read the cloudflared tunnel URL
     Value: !Sub "aws logs tail /sdlcma/services --filter trycloudflare --region ${AWS::Region}"
+  LlmGatewayHealthHint:
+    Description: From the EC2 host, verify the gateway came up
+    Value: "curl -s http://localhost:9000/health | python3 -m json.tool"
   WebhookSetup:
     Description: After finding the cloudflared URL, set it on gitlab.com (Pipeline events, SSL verification ON)
     Value: "https://<trycloudflare-url>/webhook"

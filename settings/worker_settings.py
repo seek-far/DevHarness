@@ -43,6 +43,20 @@ class WorkerSettings(BaseAppSettings):
     # key but the OpenAI client refuses an empty string — "EMPTY" is the
     # vLLM-community convention. Cloud backends override via env file.
     llm_api_key: str = "EMPTY"
+    # LLM endpoint URL and model name. DECLARED HERE EXPLICITLY (rather
+    # than relying on extra="allow" to absorb them from the env file)
+    # because pydantic-settings v2 reverses env-var-vs-env-file priority
+    # for undeclared "extra" fields: the env file wins over the env var,
+    # the opposite of what every other field does. That bit us in gateway
+    # mode on ECS: LLM_API_BASE_URL was correctly set on the task
+    # definition (http://localhost:9000/v1) but the image-baked
+    # worker_gitlab_saas.env still had the upstream Dashscope URL, and
+    # the env file's value silently won — so the worker bypassed the
+    # llm_gateway entirely and hit Dashscope direct. Declaring the
+    # fields here restores the standard "env var overrides env file"
+    # precedence (verified 2026-05-25 AWS ECS regression).
+    llm_api_base_url: str = ""
+    llm_model: str = ""
     # Per-LLM-call HTTP timeout (seconds). Default 600s targets self-hosted
     # backends where a single Qwen2.5-Coder CoT step can run several
     # minutes; a hard ceiling matters because a degenerate-decoding loop
