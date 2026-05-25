@@ -20,15 +20,10 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   - Public-host / AWS ECS / Kubernetes (kind + Helm), all against gitlab.com.
   - Supports both API-based LLMs (OpenAI-compatible, Alibaba Dashscope) and
     self-hosted backends (vLLM, llama.cpp server, Ollama).
-  - Optional **LLM Gateway** — independent FastAPI service (OpenAI-compatible
-    passthrough) that routes worker LLM calls through a configured
-    **inference policy** (today: ordered ladder; `X-Sdlcma-Attempt` header
-    treated as a difficulty coefficient → primary backend at attempt 0,
-    fallbacks at higher attempts). Bundled configs cover cloud-only,
-    self-hosted-only, and mixed ladders (cloud→self-hosted or cloud→cloud).
-    Orthogonal opt-in via `LLM_VIA_GATEWAY=true`; off by default with zero
-    base impact on the worker code path. Records the chosen backend on
-    `RunRecord.llm_backend_name` for per-backend evaluation aggregation.
+  - Optional **LLM Gateway** — independent FastAPI service that proxies
+    worker LLM calls across multiple backends per a configured inference
+    policy (e.g. cloud → self-hosted ladder). Orthogonal opt-in, off by
+    default. Architecture: [LLM Gateway section below](#llm-gateway-orthogonal-opt-in).
 
 - **Extensibility** — `Agent` ABC for plugging in third-party agents; in-graph
   hook system; built-in enhancements (memory, reflection); `agent_ref` pins a
