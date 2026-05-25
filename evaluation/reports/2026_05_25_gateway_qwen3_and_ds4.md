@@ -9,7 +9,7 @@ prior backend exited without a `submit_fix`.
 **Headline:**
 
 | Sweep | fix_rate | cells via qwen3 | cells via ds4 | avg toks/cell | avg LLM s/cell | cost(USD) |
-|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|
 | **This run — gateway, [qwen3_dashscope, deepseek_v4_pro]** | **1.000 (19/19)** | 18 (attempt=0) | 1 (F10, after 1 fix_retry) | 4,610 | 8.67 | 0.10 |
 | Cloud only — Dashscope qwen3 (2026-05-24) | 0.947 (18/19) | 19 | — | 5,359 | 8.85 | 0.12 |
 | Self-hosted only — vLLM Qwen2.5-Coder-32B (2026-05-24) | 0.895 (17/19) | — | — | 6,179 | 9.70 | 0 |
