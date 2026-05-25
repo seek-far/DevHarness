@@ -1,0 +1,39 @@
+# Two-cloud ladder: Qwen3 (Alibaba Dashscope) primary, DeepSeek v4-pro fallback.
+#
+# Both backends are API-based and require outbound HTTPS. The gateway
+# process must have both api_key envs set at startup:
+#   DASHSCOPE_API_KEY=<dashscope key>
+#   DEEPSEEK_API_KEY=<deepseek key>
+#
+# Treats `X-Sdlcma-Attempt` (the worker's react_loop retry counter, plus
+# any no_fix_retry_count) as a difficulty coefficient:
+#   attempt 0 → qwen3_dashscope   (primary)
+#   attempt 1 → deepseek_v4_pro   (fallback — different model family,
+#                                  different blind spots)
+#   attempt ≥ 2 → clamped to deepseek_v4_pro
+#
+# Compared to a single-backend cloud sweep, the value here is the
+# possibility that one provider can recover a bug the other can't,
+# without manual A/B sweeping. Compared to the local→cloud ladder, this
+# trades the "free local on attempt=0" property for "stronger model on
+# attempt=0" — the right choice when you can afford per-call billing for
+# every bug, not just retries.
+
+backends:
+  - name: qwen3_dashscope
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3-coder-480b-a35b-instruct
+    api_key_env: DASHSCOPE_API_KEY
+    request_timeout: 60
+
+  - name: deepseek_v4_pro
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-v4-pro
+    api_key_env: DEEPSEEK_API_KEY
+    request_timeout: 60
+
+inference_policy:
+  type: ordered
+  order: [qwen3_dashscope, deepseek_v4_pro]
+  advance_on:
+    fix_failure: true

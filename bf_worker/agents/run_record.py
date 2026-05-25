@@ -134,6 +134,24 @@ class RunRecord:
     # so a silent mismatch is recoverable post-hoc; mismatches at startup
     # already abort unless LLM_ALLOW_MODEL_MISMATCH=1.
     llm_model_served:           str   | None = None
+    # ── llm_gateway routing (additive 2026-05-25; SCHEMA_VERSION="1") ────────
+    # Name of the backend the SDLCMA llm_gateway actually routed this run's
+    # last LLM call to. None when the worker is talking to a backend directly
+    # (no gateway in the path) or when the gateway didn't return the header.
+    # Distinct from llm_model / llm_model_served: those describe the model
+    # identifier; llm_backend_name identifies the *backend* (e.g.
+    # "qwen3_dashscope" vs "local_vllm") so per-backend aggregations are
+    # possible even when several backends serve the same model name.
+    llm_backend_name:           str   | None = None
+    # ── no_fix retry telemetry (additive 2026-05-25; SCHEMA_VERSION="1") ─────
+    # Counts how many times react_loop exited with llm_result=None and the
+    # graph re-entered react_loop to give a different backend a shot. Gated
+    # on cfg.llm_via_gateway in the router; capped at NO_FIX_MAX_RETRIES=1.
+    # 0 = react_loop succeeded first try (or exhausted but gateway off);
+    # 1 = first react_loop exhausted, second entry happened;
+    # 2 = both react_loop entries exhausted, run went to handle_failure.
+    # None when no react_loop run ever happened (e.g. R10 short-circuit).
+    no_fix_retry_count:         int   | None = None
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -220,6 +238,8 @@ class RunRecord:
             total_cached_input_tokens  = s.get("total_cached_input_tokens"),
             total_llm_wallclock_s      = s.get("total_llm_wallclock_s"),
             llm_model_served           = llm_model_served,
+            llm_backend_name           = s.get("llm_backend_name"),
+            no_fix_retry_count         = s.get("no_fix_retry_count"),
         )
 
     def to_dict(self) -> dict[str, Any]:

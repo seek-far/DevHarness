@@ -141,7 +141,7 @@ def _stub_react_loop(monkeypatch, prompt_tokens_per_call: list[int]):
 
     calls = {"i": 0}
 
-    def fake_invoke(messages):
+    def fake_invoke(llm, messages):
         i = calls["i"]
         calls["i"] += 1
         in_tok = prompt_tokens_per_call[i]
@@ -215,7 +215,7 @@ def test_react_loop_handles_backend_without_usage(monkeypatch):
     call ever happened" (None)."""
     from graph.nodes import react_loop as rl
 
-    def fake_invoke(messages):
+    def fake_invoke(llm, messages):
         msg = SimpleNamespace(
             content="ok",
             usage_metadata=None,

@@ -35,6 +35,7 @@ class BugFixState(TypedDict, total=False):
     # ── llm ───────────────────────────────────────────────────────────────────
     llm_result: dict | None         # full JSON: {can_fix, error_reason, step_by_step_thinking, fixes}
     fix_retry_count: int            # retries due to test failure (kept for routing compat)
+    no_fix_retry_count: int         # retries due to react_loop exhaustion (MAX_STEPS or abort_fix). Tracked SEPARATELY from fix_retry_count because (a) different cap (1 vs MAX_FIX_RETRIES=2), (b) no retry_feedback block makes sense — apply_error/test_output are absent on this path. Gateway attempt header sums both counters so the policy sees a single "I have failed N times" signal.
 
     # ── react loop ────────────────────────────────────────────────────────────
     react_step_count: int           # number of LLM calls made inside the loop
@@ -53,6 +54,13 @@ class BugFixState(TypedDict, total=False):
     total_completion_tokens: int | None
     total_cached_input_tokens: int | None
     total_llm_wallclock_s: float | None
+    # ── llm_gateway routing telemetry (additive 2026-05-25) ──────────────────
+    # Set by react_loop / reflection when the worker is talking to an SDLCMA
+    # llm_gateway. Reflects the backend name reported on the last LLM call's
+    # X-Sdlcma-Backend-Name response header. Carry-forward semantics: a later
+    # call that doesn't carry the header (e.g. all-backends-exhausted) does
+    # not erase a previously-observed value. None in direct-backend mode.
+    llm_backend_name: str | None
 
     # ── enhancements (optional) ───────────────────────────────────────────────
     memory_hint: str | None         # injected by memory enhancement (PRE_REACT_LOOP)

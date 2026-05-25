@@ -339,6 +339,7 @@ python -m evaluation.cli journal-prune --older-than 30d --keep-flagged  # dry-ru
 #### Published benchmark results
 
 - [Cloud vs. self-hosted — initial benchmark (2026-05-24)](evaluation/reports/2026_05_24_cloud_vs_self_hosted.md) — first side-by-side of Dashscope `qwen3-coder-480b-a35b-instruct` vs. vLLM (+FlashInfer) `qwen2.5-coder-32b-instruct-awq` across all 19 bundled fixtures, plus a back-of-envelope FlashInfer effect estimate. Initial results, one sweep per backend — see the caveats section before quoting numbers.
+- [LLM Gateway — two-cloud ladder (qwen3 + deepseek-v4-pro) (2026-05-25)](evaluation/reports/2026_05_25_gateway_qwen3_and_ds4.md) — first sweep through the new `llm_gateway` with the `qwen3_and_ds4.yaml` ordered policy, paired with the new no-fix retry edge (Plan A). **19/19 fix_rate** — first 100 % sweep on the bundled fixtures, with deepseek_v4_pro rescuing F10 on the apply+test retry path. Plan A's no_fix retry edge did not fire (qwen3 always produced a proposal at attempt=0); it remains the rescue path for the local-primary configuration.
 
 The journal is always-on (override path with `BF_JOURNAL_DIR`); evaluation runs are sandboxed and never modify your real source. Evaluation also runs every cell with **checkpointing disabled** (`make_agent` sets `checkpointer=None`): the LangGraph checkpointer is keyed on `thread_id=bug_id`, which in evaluation is the fixture id — identical across every sweep, spec, and parallel process sharing one sqlite file — so leaving it on makes one cell silently resume another's state and corrupts the comparison. Never enable checkpointing for a sweep; if results look impossible (a baseline cell with reflection telemetry, `test_passed` contradicting the trajectory), suspect a stale checkpoint. `list-journal --flagged` is only a review filter; `promote` can promote flagged or unflagged entries. Promotion tries to populate `fixtures/<id>/source/` automatically from the journal's buggy git commit (`base_commit`, falling back to `branch_create_result.commit`) and repo metadata (`project_web_url`, `source_repo_path`, or explicit `--source-repo`). If repo/commit information is missing, promotion still creates the fixture and leaves `source/` for manual population.
 
@@ -657,8 +658,43 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 | `GITLAB_PRIVATE_TOKEN` | GitLab personal access token with `api` scope (GitLab mode only) |
 | `LLM_API_KEY` | API key for your LLM provider. Defaults to `"EMPTY"` (the vLLM-community convention) when omitted, so self-hosted backends (vLLM, llama.cpp's server, Ollama) work without it. Cloud backends still require a real key. |
 | `LLM_REQUEST_TIMEOUT` | Optional. Per-LLM-call HTTP timeout in seconds. Default 600 — sized for self-hosted CoT-heavy Qwen-style models on a single GPU, where one step can take minutes. Cloud backends should override down (e.g. `LLM_REQUEST_TIMEOUT=60`). |
-| `LLM_API_BASE_URL` | OpenAI-compatible base URL (e.g. Dashscope) |
-| `LLM_MODEL` | Model name (e.g. `qwen3-coder-480b-a35b-instruct`) |
+| `LLM_API_BASE_URL` | OpenAI-compatible base URL (e.g. Dashscope, or an SDLCMA `llm-gateway` instance) |
+| `LLM_MODEL` | Model name (e.g. `qwen3-coder-480b-a35b-instruct`). When `LLM_VIA_GATEWAY=true` this is informational — the gateway rewrites `model` to the selected backend's declared name. |
+| `LLM_VIA_GATEWAY` | Optional. Set `true` when `LLM_API_BASE_URL` points at an SDLCMA `llm-gateway` (orthogonal opt-in). Worker attaches `X-Sdlcma-Bug-Id` + `X-Sdlcma-Attempt` hint headers to every LLM call and skips the self-hosted startup model-name probe. Default `false` = byte-identical to the pre-gateway path. See "LLM Gateway" below. |
+
+### LLM Gateway (optional, opt-in)
+
+`llm_gateway/` is an independent FastAPI service that routes OpenAI-compatible requests to one of N configured backends per a **stateless inference policy** (today: ordered ladder — the worker's `X-Sdlcma-Attempt` header is treated as a difficulty coefficient, attempt=0 picks the primary backend and each retry climbs one rung). It is fully orthogonal to the deployment mode below — turn it on for any deployment, or leave it off; the worker code path is byte-identical with it off.
+
+Three bundled configs in `configs/llm_gateway/`:
+
+| File | Backends | Use case |
+|---|---|---|
+| `qwen3_api.yaml` | Dashscope only | Cloud-only; gateway in the path for telemetry / future multi-worker fan-out |
+| `self_hosted.yaml` | local vLLM only | All self-hosted |
+| `qwen3_plus_local.yaml` | Dashscope primary + local vLLM fallback | Try cloud first, escalate to self-hosted on retry or cloud outage |
+
+Switching it on:
+
+```bash
+docker compose \
+  -f docker-compose.yml -f docker-compose.llm-gateway.yml \
+  --profile build build
+docker compose \
+  -f docker-compose.yml -f docker-compose.llm-gateway.yml up -d
+# In the worker env file:
+# LLM_API_BASE_URL=http://llm-gateway:9000/v1
+# LLM_VIA_GATEWAY=true
+```
+
+Switching it off (transition / disable):
+
+```bash
+# Don't pass -f docker-compose.llm-gateway.yml; don't set LLM_VIA_GATEWAY.
+# Worker keeps talking to whatever upstream LLM_API_BASE_URL points at.
+```
+
+The gateway records the chosen backend in `RunRecord.llm_backend_name` (additive — `SCHEMA_VERSION` unchanged) so per-backend evaluation aggregation works even when several backends serve the same model name. Full contract in `docs/architecture.md` ("LLM Gateway" section).
 
 ---
 

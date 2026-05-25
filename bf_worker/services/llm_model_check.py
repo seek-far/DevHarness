@@ -98,12 +98,25 @@ def check_or_abort(cfg: Any) -> str | None:
 
     Behaviour by case:
 
-      cloud backend  (cfg.llm_api_key != "EMPTY")   → return None
+      llm_via_gateway = True                         → return None (skip probe)
+      cloud backend  (cfg.llm_api_key != "EMPTY")    → return None
       self-hosted, network fails                     → log + return None
       self-hosted, env model == served               → return served
       self-hosted, mismatch + override env set       → log + return served
       self-hosted, mismatch + no override            → raise SystemExit
     """
+    # Gateway mode: the worker's LLM endpoint is an SDLCMA llm_gateway, which
+    # exposes the UNION of configured backend models on /v1/models. There is
+    # no single "served" name to check against cfg.llm_model — the chosen
+    # backend (and thus the served model) is selected per-request by the
+    # gateway's inference policy. The gateway itself enforces backend model
+    # discipline via its config; the worker-side probe would be a category
+    # error here.
+    if getattr(cfg, "llm_via_gateway", False):
+        logger.info(
+            "llm_model_check: skipped (llm_via_gateway=True; gateway routes per request)"
+        )
+        return None
     if not is_self_hosted(cfg):
         return None
 

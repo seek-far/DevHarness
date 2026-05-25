@@ -184,20 +184,23 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
     run budget.
     """
     cap = _default_cap() if max_reflections is None else int(max_reflections)
-    state_box: dict[str, Any] = {"llm": llm}
+    # When an llm is injected (tests), reuse it verbatim every call — no
+    # gateway headers, no per-call rebuild. Without an injected llm we
+    # rebuild per reflect() call so X-Sdlcma-Attempt reflects this run's
+    # current fix_retry_count when llm_via_gateway is on. The cost is one
+    # ChatOpenAI() per reflection (at most MAX_FIX_RETRIES per run) — under
+    # 5ms each, negligible vs the LLM call itself.
+    injected_llm = llm
 
-    def _get_llm():
-        if state_box["llm"] is None:
-            from langchain_openai import ChatOpenAI
-            from settings import worker_cfg as cfg
-            state_box["llm"] = ChatOpenAI(
-                api_key=cfg.llm_api_key,
-                base_url=cfg.llm_api_base_url,
-                model=cfg.llm_model,
-                temperature=0,
-                timeout=cfg.llm_request_timeout,
-            )
-        return state_box["llm"]
+    def _get_llm(state: dict):
+        if injected_llm is not None:
+            return injected_llm
+        from services.llm_client import build_llm_with_headers
+        return build_llm_with_headers(
+            bug_id=state.get("bug_id"),
+            attempt=int(state.get("fix_retry_count") or 0),
+            tools=None,
+        )
 
     def reflect(state: dict) -> dict | None:
         # Defensive: the apply node only fires this hook on failure, but a
@@ -238,7 +241,7 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
         from langchain_core.messages import SystemMessage, HumanMessage
         try:
             _t0 = time.perf_counter()
-            msg = _get_llm().invoke([
+            msg = _get_llm(state).invoke([
                 SystemMessage(content=_SYSTEM),
                 HumanMessage(content=prompt),
             ])
@@ -266,6 +269,12 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
             new_cached: int | None = (prior_cached or 0) + cached_tok
         else:
             new_cached = prior_cached
+        # Gateway-reported backend, if any (None outside gateway mode or when
+        # the gateway didn't return the header). Carry-forward semantics same
+        # as react_loop: a missing header in this call doesn't clear an
+        # earlier value.
+        from services.llm_client import read_last_seen_backend
+        backend_name = read_last_seen_backend() or state.get("llm_backend_name")
         return {
             "reflection_note": _format_note(text),
             "reflection_count": count,
@@ -278,6 +287,7 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
             "total_llm_wallclock_s":   round(
                 float(state.get("total_llm_wallclock_s") or 0.0) + _call_wallclock_s, 6
             ),
+            "llm_backend_name":         backend_name,
         }
 
     reflect.__name__ = "reflect"

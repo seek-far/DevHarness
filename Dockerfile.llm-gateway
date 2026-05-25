@@ -1,0 +1,35 @@
+# SDLCMA llm_gateway service image.
+#
+# Independent of bf-worker / orchestrator / gateway: this Dockerfile is the
+# opt-in seam — `docker build -f Dockerfile.llm-gateway` only when you want
+# the gateway. The other three images NEVER include llm_gateway code, so the
+# "transition off" mode is just "don't build/run this image".
+#
+# Run:
+#   docker run -p 9000:9000 \
+#     -e LLM_GATEWAY_CONFIG=/app/configs/llm_gateway/qwen3_plus_local.yaml \
+#     -e DASHSCOPE_API_KEY=sk-... \
+#     dh-llm-gateway:latest
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY llm_gateway/requirements.txt /app/llm_gateway/requirements.txt
+RUN pip install --no-cache-dir -r llm_gateway/requirements.txt
+
+COPY llm_gateway/ /app/llm_gateway/
+COPY configs/llm_gateway/ /app/configs/llm_gateway/
+
+ENV PYTHONPATH="/app" \
+    LLM_GATEWAY_HOST="0.0.0.0" \
+    LLM_GATEWAY_PORT="9000"
+
+EXPOSE 9000
+
+# Use uvicorn directly (the FastAPI app is `llm_gateway.app:app`). Single
+# worker on purpose — the inference policy holds per-bug error-count state
+# in process memory, and multi-worker would split it. Multi-replica
+# horizontal scaling is explicit non-scope today; if it becomes needed,
+# move the policy state to Redis and bump workers here.
+CMD ["sh", "-c", "uvicorn llm_gateway.app:app --host ${LLM_GATEWAY_HOST} --port ${LLM_GATEWAY_PORT} --workers 1"]

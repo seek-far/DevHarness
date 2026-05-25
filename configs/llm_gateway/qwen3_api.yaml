@@ -1,0 +1,22 @@
+# Single-backend gateway config: Qwen3 (Alibaba Dashscope API).
+#
+# Trivial inference policy — order has one entry, advance flags don't matter,
+# every request goes to Dashscope. Use this when you want the gateway in the
+# path (for telemetry / future multi-worker fan-out) but no failover.
+#
+# Set DASHSCOPE_API_KEY in the gateway process env before starting the
+# service. The api_key field is intentionally indirected — committing a key
+# would defeat the purpose.
+
+backends:
+  - name: qwen3_dashscope
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3-coder-480b-a35b-instruct
+    api_key_env: DASHSCOPE_API_KEY
+    request_timeout: 60
+
+inference_policy:
+  type: ordered
+  order: [qwen3_dashscope]
+  advance_on:
+    fix_failure: false

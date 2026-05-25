@@ -1,0 +1,34 @@
+# Ordered ladder: Qwen3 (Dashscope) primary, self-hosted vLLM as fallback.
+#
+# Treats `X-Sdlcma-Attempt` (the worker's react_loop retry counter) as a
+# difficulty coefficient:
+#   attempt 0 → Dashscope          (cheap, fast, strong on the easy cases)
+#   attempt 1 → self-hosted vLLM   (more time to think; different blind spots)
+#   attempt N≥2 → clamped to last  (longest model gets the hardest bugs)
+#
+# Cost / quality intent: try the cheaper, faster model first; escalate to
+# self-hosted on retry. The policy is stateless — backend selection is a
+# pure function of `attempt` and the order below. If a backend is genuinely
+# down, the worker's first call wastes one transient-retry budget, then
+# react_loop comes back with attempt+1 and the policy advances by itself.
+# Process-wide circuit-breaking (count consecutive failures, open the
+# circuit for T seconds) is future work, not implemented today.
+
+backends:
+  - name: qwen3_dashscope
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3-coder-480b-a35b-instruct
+    api_key_env: DASHSCOPE_API_KEY
+    request_timeout: 60
+
+  - name: local_vllm
+    base_url: http://127.0.0.1:8000/v1
+    model: Qwen/Qwen2.5-Coder-32B-Instruct
+    api_key: EMPTY
+    request_timeout: 600
+
+inference_policy:
+  type: ordered
+  order: [qwen3_dashscope, local_vllm]
+  advance_on:
+    fix_failure: true

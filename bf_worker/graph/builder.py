@@ -96,6 +96,7 @@ def build_graph(checkpointer=None) -> StateGraph:
         {
             "create_fix_branch":     "create_fix_branch",
             "apply_change_and_test": "apply_change_and_test",   # branch-reuse path
+            "react_loop":            "react_loop",              # no-fix retry (gateway-only)
             "handle_failure":        "handle_failure",
         },
     )

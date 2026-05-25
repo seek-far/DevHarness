@@ -49,7 +49,7 @@ $SSH "$T" "mkdir -p ${REMOTE_DIR}"
 # --delete keeps the remote tree as a faithful mirror of local (drops files
 # you've removed locally). The exclude list keeps secrets (real *.env),
 # build artefacts, and per-run output OFF the remote.
-rsync -az --delete --info=stats1 \
+rsync -aP --delete --info=stats1 \
   -e "${RSYNC_E}" \
   --exclude '.git/' \
   --exclude '.venv-linux/' \

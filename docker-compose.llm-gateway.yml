@@ -1,0 +1,40 @@
+# Compose overlay: add the SDLCMA llm_gateway service to the stack.
+#
+# This is intentionally a SEPARATE overlay (not merged into docker-compose.yml)
+# so the transition-off mode requires zero changes:
+#   - Don't pass `-f docker-compose.llm-gateway.yml`            → no gateway.
+#   - Don't build `Dockerfile.llm-gateway`                       → no image.
+#   - Don't set `LLM_API_BASE_URL=http://llm-gateway:9000/v1`    → workers
+#     keep talking to whatever upstream they were configured for.
+#
+# Usage with the base local-docker-compose stack:
+#   docker compose \
+#     -f docker-compose.yml -f docker-compose.llm-gateway.yml \
+#     --profile build build
+#   docker compose \
+#     -f docker-compose.yml -f docker-compose.llm-gateway.yml up -d
+#
+# Then in the worker env (settings/worker_local_docker_compose_http.env or a
+# sibling override), point the worker at the gateway:
+#   LLM_API_BASE_URL=http://llm-gateway:9000/v1
+#   LLM_VIA_GATEWAY=true
+#
+# The gateway reads LLM_GATEWAY_CONFIG (a YAML path inside the container)
+# and any backend api_key env vars referenced via api_key_env. DASHSCOPE_API_KEY
+# below is one example; add more as your config needs them.
+
+services:
+  llm-gateway:
+    image: dh-llm-gateway:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.llm-gateway
+    environment:
+      LLM_GATEWAY_CONFIG: /app/configs/llm_gateway/qwen3_plus_local.yaml
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+    networks: [sdlcma_net]
+    # No host port publish by default — the worker reaches the gateway by
+    # service name over sdlcma_net. Uncomment for local curl debugging:
+    # ports:
+    #   - "9000:9000"
+    restart: unless-stopped

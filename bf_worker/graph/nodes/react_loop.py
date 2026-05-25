@@ -22,6 +22,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -38,6 +39,7 @@ from graph.state import BugFixState
 from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from services.budget import extract_cached_input_tokens, extract_token_usage
+from services.llm_client import build_llm_with_headers, read_last_seen_backend
 from services.prompt_guard import sanitize_untrusted
 from services.react_tools import TOOLS_SCHEMA, execute_tool
 from services.runtime_context import get_budget, get_hooks, get_provider
@@ -50,14 +52,6 @@ MAX_STEPS = 8   # max LLM calls per react_loop invocation
 # Length determines max retries; (1, 2) → up to 2 retries on top of 1 attempt.
 _LLM_RETRY_DELAYS = (1, 2)
 
-llm = ChatOpenAI(
-    api_key=cfg.llm_api_key,
-    base_url=cfg.llm_api_base_url,
-    model=cfg.llm_model,
-    temperature=0,
-    timeout=cfg.llm_request_timeout,
-).bind_tools(TOOLS_SCHEMA)
-
 
 def _is_transient_bad_request(exc: openai.BadRequestError) -> bool:
     # Dashscope occasionally rejects the model's own malformed tool-call args
@@ -68,7 +62,7 @@ def _is_transient_bad_request(exc: openai.BadRequestError) -> bool:
     return "function.arguments" in msg or "must be in JSON format" in msg
 
 
-def _invoke_llm_with_retry(messages: list):
+def _invoke_llm_with_retry(llm, messages: list):
     """Invoke the LLM, retrying on narrow transient failures.
 
     Retries: APIConnectionError, RateLimitError, and BadRequestError that
@@ -477,6 +471,29 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
     hooks = get_hooks(config)
     budget = get_budget(config)
 
+    # Build a ChatOpenAI for this react_loop entry. When the worker is
+    # configured to talk to an SDLCMA llm_gateway, attaches X-Sdlcma-Bug-Id
+    # and X-Sdlcma-Attempt as default headers so the gateway's inference
+    # policy can advance backends across react_loop re-entries (apply+test
+    # retries, acting-mode reviewer feedback, AND no-fix retries when
+    # gateway mode is on). Direct-backend mode = byte-identical to the
+    # previous module-level ChatOpenAI.
+    #
+    # The gateway attempt is the SUM of two distinct counters:
+    #   fix_retry_count    — apply+test rejected this many prior patches
+    #   no_fix_retry_count — react_loop exited with llm_result=None this many times
+    # Summing gives the policy one "I have failed N times" signal; the
+    # caller doesn't have to distinguish failure modes to escalate.
+    attempt_for_gateway = (
+        int(state.get("fix_retry_count") or 0)
+        + int(state.get("no_fix_retry_count") or 0)
+    )
+    llm = build_llm_with_headers(
+        bug_id=state.get("bug_id"),
+        attempt=attempt_for_gateway,
+        tools=TOOLS_SCHEMA,
+    )
+
     if hooks is not None:
         update = hooks.run(HookName.PRE_REACT_LOOP, state)
         if update is not state:
@@ -537,7 +554,7 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         # ── call LLM ──────────────────────────────────────────────────────────
         logger.info("react_loop: step %d — calling LLM", step_count + 1)
         _t0 = time.perf_counter()
-        assistant_msg = _invoke_llm_with_retry(messages)
+        assistant_msg = _invoke_llm_with_retry(llm, messages)
         _call_wallclock_s = time.perf_counter() - _t0
         _maybe_recover_tool_call_from_content(assistant_msg)
         step_count += 1
@@ -641,6 +658,24 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
     else:
         logger.info("react_loop: finished successfully")
 
+    # Gateway-reported backend (last call wins). None in direct-backend mode
+    # or when no gateway header was returned. Carry-forward across react_loop
+    # re-entries: a later re-entry on a different backend should reflect the
+    # latest, but a re-entry where the gateway didn't return the header (e.g.
+    # all-backends-exhausted error path) should not erase the previously
+    # observed value.
+    backend_name = read_last_seen_backend() or state.get("llm_backend_name")
+
+    # On a no-fix exit (MAX_STEPS reached or abort_fix), bump no_fix_retry_count.
+    # The routing function reads the bumped value to decide whether to re-enter
+    # (gateway mode + under cap) or fall through to handle_failure. Bumping is
+    # unconditional on the no-fix path — direct-backend mode bumps too, but
+    # routing's gate on cfg.llm_via_gateway will keep behaviour byte-identical
+    # to the pre-feature path (handle_failure on first no-fix).
+    next_no_fix_retry_count = int(state.get("no_fix_retry_count") or 0)
+    if llm_result is None:
+        next_no_fix_retry_count += 1
+
     return {
         "llm_result":       llm_result,
         "react_step_count": step_count,
@@ -654,6 +689,8 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         "total_completion_tokens":   total_completion_tokens,
         "total_cached_input_tokens": total_cached_input_tokens,
         "total_llm_wallclock_s":     round(total_llm_wallclock_s, 6),
+        "llm_backend_name":          backend_name,
+        "no_fix_retry_count":        next_no_fix_retry_count,
         # Surface memory-related fields for journaling/telemetry (no-op when
         # the memory enhancement is not registered).
         "memory_hint":         state.get("memory_hint"),

@@ -1,0 +1,22 @@
+# Single-backend gateway config: self-hosted (vLLM / llama.cpp / Ollama).
+#
+# Trivial inference policy — order has one entry. The `EMPTY` api_key is the
+# vLLM-community convention (the openai client refuses an empty string, so
+# the project sends the literal "EMPTY"). Adjust base_url + model to your
+# deployment.
+#
+# request_timeout is sized for self-hosted CoT-heavy Qwen-style models on a
+# single GPU; cloud backends should use ~60s instead.
+
+backends:
+  - name: local_vllm
+    base_url: http://127.0.0.1:8000/v1
+    model: Qwen/Qwen2.5-Coder-32B-Instruct
+    api_key: EMPTY
+    request_timeout: 600
+
+inference_policy:
+  type: ordered
+  order: [local_vllm]
+  advance_on:
+    fix_failure: false

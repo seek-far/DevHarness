@@ -219,7 +219,7 @@ def _stub_react_loop(monkeypatch, prompt_tokens_per_call: list[int]):
 
     calls = {"i": 0}
 
-    def fake_invoke(messages):
+    def fake_invoke(llm, messages):
         i = calls["i"]
         calls["i"] += 1
         in_tok = prompt_tokens_per_call[i]

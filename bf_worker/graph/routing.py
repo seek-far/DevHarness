@@ -7,6 +7,7 @@ that LangGraph will route to next.
 
 from __future__ import annotations
 from graph.state import BugFixState
+from settings import worker_cfg as cfg
 
 # ── tuneable limits ────────────────────────────────────────────────────────────
 MAX_FIX_RETRIES = 2      # test-failure → re-ask retries. On each retry the
@@ -14,6 +15,17 @@ MAX_FIX_RETRIES = 2      # test-failure → re-ask retries. On each retry the
                          # are injected into the LLM's prompt by
                          # react_loop._format_retry_feedback so it can revise
                          # rather than blindly resample.
+NO_FIX_MAX_RETRIES = 1   # react_loop-exhaustion → re-ask retries. Independent
+                         # cap from MAX_FIX_RETRIES because the failure mode is
+                         # different: there is no apply_error / test_output to
+                         # feed back, so the only meaningful action is "ask a
+                         # DIFFERENT backend with the same prompt". Gated on
+                         # cfg.llm_via_gateway — in direct-backend mode a re-
+                         # entry just samples the same model again (pure waste),
+                         # so we only retry when a gateway is in the path and
+                         # the policy can actually advance. Cap=1 means "give
+                         # the next backend exactly one shot", bounding the
+                         # worst-case wasted spend.
 
 
 # ── after precheck_already_fixed ───────────────────────────────────────────────
@@ -46,12 +58,26 @@ def route_after_parse_trace(state: BugFixState) -> str:
 def route_after_react_loop(state: BugFixState) -> str:
     """
     llm_result is set  → create_fix_branch  (or apply directly if branch exists)
-    llm_result is None → handle_failure
+    llm_result is None:
+      - llm_via_gateway=True AND no_fix_retry_count ≤ NO_FIX_MAX_RETRIES
+            → react_loop  (re-enter with attempt+1; gateway switches backend)
+      - otherwise → handle_failure
+
+    The bumping of no_fix_retry_count itself happens inside react_loop's
+    return value — by the time this routing function runs, the counter
+    already reflects this exit. So `<= NO_FIX_MAX_RETRIES` means "the count
+    AFTER this just-finished exit is still within budget for another try".
     """
     if state.get("llm_result") is not None:
         if state.get("fix_branch_name"):
             return "apply_change_and_test"   # branch-reuse path
         return "create_fix_branch"
+
+    if (
+        getattr(cfg, "llm_via_gateway", False)
+        and int(state.get("no_fix_retry_count") or 0) <= NO_FIX_MAX_RETRIES
+    ):
+        return "react_loop"  # self-loop for cross-backend retry
 
     return "handle_failure"
 

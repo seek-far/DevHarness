@@ -50,6 +50,15 @@ class WorkerSettings(BaseAppSettings):
     # until the backend's own limit. Cloud backends never need this long
     # and can override down via env (e.g. LLM_REQUEST_TIMEOUT=60).
     llm_request_timeout: int = 600
+    # When the worker's LLM endpoint is an SDLCMA llm_gateway (independent
+    # FastAPI service that routes to one of N configured backends per the
+    # request hint headers), set this flag in the env file so the worker
+    # (a) attaches X-Sdlcma-Bug-Id / X-Sdlcma-Attempt to every LLM call and
+    # (b) skips the startup /v1/models name check (the gateway exposes the
+    # union of backend models; it cannot promise which backend a future
+    # request will hit). Unset/false = legacy direct-to-backend path —
+    # zero behaviour change.
+    llm_via_gateway: bool = False
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / f"worker_{_probe.env}.env",
         env_file_encoding="utf-8",
