@@ -889,6 +889,19 @@ orchestrator's HealthMonitor owns retries; `ttlSecondsAfterFinished` self-GC;
 - cloudflared is a dedicated Deployment dialing OUT to Cloudflare's edge
   for a quick `trycloudflare.com` URL — new URL on each pod restart; use
   a named tunnel + credentials Secret if you need stability.
+- Bare-host prereqs (codified in `infra/k8s/setup.sh`): cgroup v2 must be
+  enabled (`systemd.unified_cgroup_hierarchy=1` in grub on Ubuntu ≤21.04
+  — k8s 1.35 kubelet refuses cgroup v1), swap off, and the bf-worker host
+  needs to be able to docker-pull `redis:7-alpine` + `cloudflare/cloudflared`
+  before kind-loading them (the kind worker's containerd does NOT inherit
+  the host's docker `registry-mirrors`).
+- Concurrent-worker scaling: verified 2026-05-27 on a fresh bare-Ubuntu
+  host (56 CPU / 62 GiB) with 7 truly-simultaneous workers (N=8 strict
+  burst via `tools/trigger_concurrent_pipelines.py --concurrency 8`,
+  one bug_id-collision dedup is a known orchestrator race when many
+  webhooks land within the same wall-clock second) — 0 HealthMonitor
+  false-positive restarts, all spawned workers reached `outcome=fixed`
+  except where the LLM itself produced a bad patch.
 
 ```bash
 # 1. populate settings/worker_gitlab_saas.env with GITLAB_PRIVATE_TOKEN + LLM_API_KEY
@@ -899,6 +912,18 @@ bash infra/k8s/setup.sh
 PROJECT_PATH=user/repo bash infra/k8s/gitlab-smoke.sh
 # 5. teardown
 bash infra/k8s/teardown.sh
+```
+
+For multi-repo concurrent stress (N independent fixtures rather than
+re-triggering one repo), use the bundled tools:
+
+```bash
+# create N gitlab.com repos, each with one bundled fixture as the buggy main
+uv run python tools/gitlab_fixture_repos.py --fixtures F01,F02,F03,F04 \
+  setup --webhook-url https://<cloudflared>.trycloudflare.com/webhook
+
+# fire N pipelines truly simultaneously
+uv run python tools/trigger_concurrent_pipelines.py --concurrency 4
 ```
 
 Full runbook in `infra/k8s/README.md`.

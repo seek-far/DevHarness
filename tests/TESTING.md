@@ -137,6 +137,46 @@ Each: `bash infra/<x>/setup.sh` → trigger a failing pipeline → `bash
 infra/<x>/gitlab-smoke.sh` → `bash infra/<x>/teardown.sh`. Exit 0 =
 `(fixed, opened)` within `TIMEOUT`; non-zero on timeout/wrong outcome.
 
+### 5b. Multi-fixture concurrent smoke (`tools/gitlab_fixture_repos.py` + `trigger_concurrent_pipelines.py`)
+
+Per-fixture-repo stress: mirror every `evaluation/fixtures/FXX-name/` to its
+own GitLab project (main = buggy state + `.gitlab-ci.yml` running pytest),
+then fire pipelines on N projects in parallel to load-test the orchestrator
++ spawner concurrency. Independent of the single-project smokes in §5; the
+two are complementary.
+
+```bash
+# one-time (or after fixture set changes): create/sync all fixture repos
+uv run python tools/gitlab_fixture_repos.py setup \
+  --webhook-url https://<your-cloudflared>.trycloudflare.com/webhook
+
+# after every cloudflared restart (URL changes): re-point hooks only
+uv run python tools/gitlab_fixture_repos.py update-webhook \
+  --webhook-url https://<new-cloudflared>.trycloudflare.com/webhook
+
+# fire 5 pipelines at once across fixture repos + order_be (default cc=5)
+uv run python tools/trigger_concurrent_pipelines.py \
+  --fixtures F01,F02,F03,F04 --include-order-be
+
+# stress: all fixtures, no concurrency cap
+uv run python tools/trigger_concurrent_pipelines.py \
+  --fixtures all --include-order-be --concurrency 20
+
+# cleanup
+uv run python tools/gitlab_fixture_repos.py teardown --yes
+```
+
+Defaults target the bundled gitlab.com account (`lishu20161`) but every
+scope-bearing flag (`--gitlab-url`, `--token`, `--namespace`, `--prefix`,
+`--fixtures-dir`) is overridable so the same scripts work against another
+GitLab / account / fixtures set. The trigger script returns as soon as
+every POST lands — it does not poll for `auto/bf/*` MRs (use the GitLab UI
+or the per-deployment `gitlab-smoke.sh` if you need that).
+
+Failures must be on `main` because the worker anchors on `base_branch="main"`
+for source fetch + fix-branch creation + MR target; the setup subcommand
+guarantees this by force-pushing the buggy state to main.
+
 ### 4z. Containerized Stage-1 (`local_docker_compose_http`)
 
 Cloud-track Stage 1: the *whole* stack containerized, proving the

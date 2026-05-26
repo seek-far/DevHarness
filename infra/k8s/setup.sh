@@ -85,6 +85,19 @@ for img in "${IMAGES[@]}"; do
     | tail -2 | sed 's/^/  /'
 done
 
+# Third-party images: kubelet inside the kind worker container has its own
+# containerd that does NOT inherit the host docker daemon's registry-mirrors.
+# On hosts where docker.io is unreachable directly (e.g. CN networks even with
+# a working host-side mirror), the redis/cloudflared Deployments stall in
+# ImagePullBackOff. Mirror the dh-* pattern: pull on the host (which CAN use
+# the host's daemon.json mirror), then kind-load into both nodes.
+THIRD_PARTY_IMAGES=(redis:7-alpine cloudflare/cloudflared:latest)
+for img in "${THIRD_PARTY_IMAGES[@]}"; do
+  docker pull "$img" 2>&1 | tail -1 | sed 's/^/  /'
+  kind load docker-image "$img" --name "$CLUSTER_NAME" 2>&1 \
+    | tail -2 | sed 's/^/  /'
+done
+
 # ── 5: namespace + secret ──────────────────────────────────────────────────
 say "5: namespace + sdlcma-secrets"
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -105,11 +118,26 @@ helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --wait --timeout 3m 2>&1 | tail -5 | sed 's/^/  /'
 
 # ── 7: rollouts ────────────────────────────────────────────────────────────
+# Order matters: wait redis Ready FIRST so orchestrator's startup redis
+# connection (and consumer-group XGROUP CREATE) actually lands against a live
+# redis. Without this, when redis is the slowest pod to come up (observed on
+# bare Ubuntu hosts where the third-party redis:7-alpine pull blocks helm
+# --wait until images are kind-loaded), orchestrator can start with a broken
+# redis client that does NOT auto-reconnect — the gateway:stream piles up
+# but is never consumed. Restart-at-end (below) was the smoking-gun fix.
 say "7: wait rollouts"
-for d in gateway orchestrator redis cloudflared; do
+for d in redis gateway orchestrator cloudflared; do
   kubectl -n "$NAMESPACE" rollout status "deploy/$d" --timeout=90s 2>&1 \
     | sed 's/^/  /'
 done
+
+# Defensive: roll the orchestrator once redis is confirmed Ready, in case its
+# initial redis connection raced past an ImagePullBackOff redis. Idempotent
+# no-op when ordering was already clean.
+say "  refreshing orchestrator (redis-connection insurance)"
+kubectl -n "$NAMESPACE" rollout restart deploy/orchestrator >/dev/null
+kubectl -n "$NAMESPACE" rollout status deploy/orchestrator --timeout=60s 2>&1 \
+  | sed 's/^/  /'
 
 # ── 8: cloudflared URL ─────────────────────────────────────────────────────
 say "8: extract trycloudflare URL"
