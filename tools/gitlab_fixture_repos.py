@@ -138,7 +138,10 @@ def unprotect_main(api: str, token: str, project_id: int) -> None:
 def push_fixture_to_main(project: dict, fixture_dir: Path, token: str) -> str:
     src = fixture_dir / "source"
     repo_url = project["http_url_to_repo"]
-    auth_url = re.sub(r"^https://", f"https://oauth2:{token}@", repo_url)
+    # GitLab can serve clone URLs as either http:// (self-hosted on a custom
+    # port without TLS) or https:// (gitlab.com, TLS-fronted self-hosted) —
+    # preserve whichever scheme this instance returned.
+    auth_url = re.sub(r"^(https?)://", rf"\1://oauth2:{token}@", repo_url)
     workdir = Path(tempfile.mkdtemp(prefix=f"sdlcma-fix-{fixture_dir.name}-"))
     try:
         for entry in src.iterdir():

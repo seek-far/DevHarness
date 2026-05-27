@@ -13,8 +13,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import re
+
 from tools.gitlab_fixture_repos import discover_fixtures, fixture_to_project_name
 from tools.trigger_concurrent_pipelines import filter_fixtures
+
+
+def _embed_token(repo_url: str, token: str) -> str:
+    # Mirror of the auth_url rewrite in gitlab_fixture_repos.push_fixture_to_main.
+    # Keep this function in lockstep with the source — if you change the rewrite
+    # there, change it here too.
+    return re.sub(r"^(https?)://", rf"\1://oauth2:{token}@", repo_url)
 
 
 def test_fixture_to_project_name_lowercases_and_prefixes():
@@ -64,3 +73,20 @@ def test_filter_fixtures_by_full_lowercase_name():
 def test_filter_fixtures_none_returns_all():
     projs = [{"path": "sdlcma-fix-f01-x"}, {"path": "sdlcma-fix-f02-y"}]
     assert filter_fixtures(projs, None, "sdlcma-fix-") == projs
+
+
+def test_push_auth_url_preserves_scheme_https():
+    # gitlab.com / TLS-fronted self-hosted: clone URL is https://, token must
+    # be embedded as https://oauth2:<token>@...
+    assert _embed_token(
+        "https://gitlab.com/user/repo.git", "glpat-abc"
+    ) == "https://oauth2:glpat-abc@gitlab.com/user/repo.git"
+
+
+def test_push_auth_url_preserves_scheme_http():
+    # Self-hosted GitLab on a custom port without TLS (e.g. minus:8929):
+    # clone URL is http://, regex must NOT silently fail — token must be
+    # embedded as http://oauth2:<token>@... or git push prompts for creds.
+    assert _embed_token(
+        "http://minus:8929/root/sdlcma-fix-f01-off-by-one.git", "glpat-xyz"
+    ) == "http://oauth2:glpat-xyz@minus:8929/root/sdlcma-fix-f01-off-by-one.git"
