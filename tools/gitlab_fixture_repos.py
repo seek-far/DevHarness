@@ -190,18 +190,26 @@ def ensure_webhook(api: str, token: str, project_id: int, webhook_url: str) -> i
     return rr.json()["id"]
 
 
-def list_fixture_projects(api: str, token: str, prefix: str) -> list[dict]:
+def list_fixture_projects(
+    api: str, token: str, prefix: str, namespace: str | None = None
+) -> list[dict]:
+    # `owned=true` is unreliable on self-hosted Omnibus for the root admin
+    # token — projects under root/ may not pass GitLab's "owned" predicate
+    # even when the token belongs to root. Scope by namespace (when known)
+    # via path_with_namespace instead; falls back to prefix-only on the
+    # historical no-namespace call sites.
     r = gitlab_api(
         "GET",
         f"{api}/projects",
         token,
-        params={"search": prefix, "owned": "true", "simple": "true", "per_page": 100},
+        params={"search": prefix, "simple": "true", "per_page": 100},
     )
     r.raise_for_status()
-    return sorted(
-        (p for p in r.json() if p["path"].startswith(prefix)),
-        key=lambda p: p["path"],
-    )
+    projs = [p for p in r.json() if p["path"].startswith(prefix)]
+    if namespace:
+        ns_prefix = f"{namespace}/"
+        projs = [p for p in projs if p.get("path_with_namespace", "").startswith(ns_prefix)]
+    return sorted(projs, key=lambda p: p["path"])
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -240,7 +248,7 @@ def cmd_setup(args):
 
 def cmd_update_webhook(args):
     api = f"{args.gitlab_url}/api/v4"
-    projs = list_fixture_projects(api, args.token, args.prefix)
+    projs = list_fixture_projects(api, args.token, args.prefix, args.namespace)
     print(f"update-webhook: {len(projs)} project(s) → {args.webhook_url}")
     for p in projs:
         hid = ensure_webhook(api, args.token, p["id"], args.webhook_url)
@@ -249,7 +257,7 @@ def cmd_update_webhook(args):
 
 def cmd_list(args):
     api = f"{args.gitlab_url}/api/v4"
-    projs = list_fixture_projects(api, args.token, args.prefix)
+    projs = list_fixture_projects(api, args.token, args.prefix, args.namespace)
     for p in projs:
         print(f"  {p['id']:>10}  {p['path_with_namespace']}")
     print(f"total: {len(projs)}")
@@ -257,7 +265,7 @@ def cmd_list(args):
 
 def cmd_teardown(args):
     api = f"{args.gitlab_url}/api/v4"
-    projs = list_fixture_projects(api, args.token, args.prefix)
+    projs = list_fixture_projects(api, args.token, args.prefix, args.namespace)
     print(f"teardown: {len(projs)} project(s)" + ("" if args.yes else " (dry-run; pass --yes)"))
     for p in projs:
         if args.yes:

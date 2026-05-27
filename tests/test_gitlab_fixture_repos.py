@@ -90,3 +90,60 @@ def test_push_auth_url_preserves_scheme_http():
     assert _embed_token(
         "http://minus:8929/root/sdlcma-fix-f01-off-by-one.git", "glpat-xyz"
     ) == "http://oauth2:glpat-xyz@minus:8929/root/sdlcma-fix-f01-off-by-one.git"
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def test_list_fixture_projects_scopes_by_namespace(monkeypatch):
+    # Self-hosted GitLab can return projects from multiple namespaces under
+    # the same search prefix (e.g. someone forked one of the fixtures into
+    # a different group). When --namespace is passed, list must scope to
+    # that namespace via path_with_namespace.
+    from tools import gitlab_fixture_repos as mod
+
+    fake_payload = [
+        {"path": "sdlcma-fix-f01-x", "path_with_namespace": "root/sdlcma-fix-f01-x"},
+        {"path": "sdlcma-fix-f02-y", "path_with_namespace": "root/sdlcma-fix-f02-y"},
+        {"path": "sdlcma-fix-f01-x", "path_with_namespace": "someone-else/sdlcma-fix-f01-x"},
+        {"path": "unrelated-thing", "path_with_namespace": "root/unrelated-thing"},
+    ]
+    captured: dict = {}
+
+    def fake_api(method, url, token, **kw):
+        captured["params"] = kw.get("params")
+        return _FakeResponse(fake_payload)
+
+    monkeypatch.setattr(mod, "gitlab_api", fake_api)
+
+    # With --namespace=root: only the two root/ projects, not the fork.
+    out = mod.list_fixture_projects("http://x/api/v4", "tok", "sdlcma-fix-", "root")
+    assert [p["path_with_namespace"] for p in out] == [
+        "root/sdlcma-fix-f01-x",
+        "root/sdlcma-fix-f02-y",
+    ]
+    # And the query MUST NOT include owned=true (unreliable on self-hosted).
+    assert "owned" not in captured["params"]
+
+
+def test_list_fixture_projects_without_namespace_falls_back_to_prefix(monkeypatch):
+    # Historical no-namespace call shape: still scope by prefix only, no
+    # owned=true. Keeps gitlab.com workflows working.
+    from tools import gitlab_fixture_repos as mod
+
+    fake_payload = [
+        {"path": "sdlcma-fix-f01-x", "path_with_namespace": "a/sdlcma-fix-f01-x"},
+        {"path": "sdlcma-fix-f02-y", "path_with_namespace": "b/sdlcma-fix-f02-y"},
+        {"path": "unrelated", "path_with_namespace": "a/unrelated"},
+    ]
+    monkeypatch.setattr(mod, "gitlab_api", lambda *a, **kw: _FakeResponse(fake_payload))
+    out = mod.list_fixture_projects("http://x/api/v4", "tok", "sdlcma-fix-")
+    assert [p["path"] for p in out] == ["sdlcma-fix-f01-x", "sdlcma-fix-f02-y"]
