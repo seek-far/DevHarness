@@ -19,6 +19,15 @@ import shutil
 import signal
 import stat
 import sys
+from pathlib import Path
+
+# Repo root must be on sys.path BEFORE the cascading imports below — line 28's
+# `from agent_config import ...` reaches into graph/routing.py which needs
+# `from settings import worker_cfg`. Use __file__ (not Path.cwd()) so the
+# worker doesn't depend on the spawner's cwd.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import redis.asyncio as aioredis
 
@@ -28,9 +37,6 @@ from agents.base import BugInput
 from agent_config import load_agent_spec, make_agent, maybe_reexec_for_agent_ref
 from providers.gitlab_provider import GitLabProvider
 from services.llm_model_check import check_or_abort as _check_llm_model
-
-from pathlib import Path
-sys.path.append(str(Path.cwd()))
 
 from settings import worker_cfg as cfg
 
