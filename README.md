@@ -889,6 +889,26 @@ orchestrator's HealthMonitor owns retries; `ttlSecondsAfterFinished` self-GC;
 - cloudflared is a dedicated Deployment dialing OUT to Cloudflare's edge
   for a quick `trycloudflare.com` URL — new URL on each pod restart; use
   a named tunnel + credentials Secret if you need stability.
+- **ingress-nginx (additive; step 4b of `setup.sh`, default ON, skip with
+  `INSTALL_INGRESS_NGINX=0`)** — closes the chain that the chart's
+  existing `Ingress` resource (`ingress.enabled=true` by default) and the
+  kind cluster's `extraPortMappings :18080→:80` already half-wire,
+  exposing the gateway webhook on the host's `:18080` (and any name/IP
+  that routes to the host — tailnet, LAN, public hostname) without
+  cloudflared. Pick cloudflared when GitLab has no direct route to this
+  host; pick the ingress path when it does (tailnet/LAN/hostname). Both
+  paths can coexist; to turn cloudflared off on a host that uses the
+  ingress path only, drop `cloudflared: { enabled: false }` into
+  `infra/helm/sdlcma/values.local.yaml` (gitignored; auto-layered by
+  `setup.sh` on top of the tracked overlay). CN-network gotcha: the upstream manifest pins
+  `controller` + `kube-webhook-certgen` images by `@sha256` digest at
+  `registry.k8s.io`, so `kind load` + retag is silently insufficient
+  (kubelet resolves the digest at the original URL). `setup.sh` rewrites
+  `registry.k8s.io/` → `m.daocloud.io/registry.k8s.io/` in the manifest
+  before applying — override the prefix with `INGRESS_NGINX_PROXY=""` to
+  hit upstream directly on non-CN networks. Verified 2026-05-27 on a CN
+  host over a Tailscale tailnet → `curl http://<tailscale-ip>:18080/healthz`
+  returns 200.
 - Bare-host prereqs (codified in `infra/k8s/setup.sh`): cgroup v2 must be
   enabled (`systemd.unified_cgroup_hierarchy=1` in grub on Ubuntu ≤21.04
   — k8s 1.35 kubelet refuses cgroup v1), swap off, and the bf-worker host
@@ -940,6 +960,7 @@ In your GitLab project → Settings → Webhooks:
 | gitlab.com via cloudflared | `https://<assigned>.trycloudflare.com/webhook` (quick tunnel; direct `http://<host>:8000/webhook` also works if inbound `:8000` is open) |
 | AWS ECS | `https://<assigned>.trycloudflare.com/webhook` (cloudflared sidecar inside the ECS services task; URL changes every service task replacement) |
 | Kubernetes / kind | `https://<assigned>.trycloudflare.com/webhook` (cloudflared Deployment; new URL on each pod restart — use a named tunnel for stability) |
+| Kubernetes / kind (ingress) | `http://<host-or-tailnet-ip-or-hostname>:18080/webhook` (when GitLab can route to the agent host directly — ingress-nginx + kind `:18080→:80` port mapping; CN networks use the `m.daocloud.io` proxy that `infra/k8s/setup.sh` rewrites in) |
 
 Trigger: **Pipeline events**
 
