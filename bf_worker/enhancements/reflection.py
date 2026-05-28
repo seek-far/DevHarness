@@ -275,18 +275,34 @@ def make_reflection_callback(llm: Any = None, max_reflections: int | None = None
         # earlier value.
         from services.llm_client import read_last_seen_backend
         backend_name = read_last_seen_backend() or state.get("llm_backend_name")
+        # Per-call wallclock — append to the running list (copy, don't
+        # mutate prior state). Same carry-forward as the sums.
+        _call_wallclock_ms = int(_call_wallclock_s * 1000)
+        new_per_call = list(state.get("llm_call_wallclock_ms") or [])
+        new_per_call.append(_call_wallclock_ms)
+        new_llm_call_count = int(state.get("llm_call_count") or 0) + 1
+        # Phase-4 marker — same shape as react_loop's emission so a
+        # post-processor can union both sources by phase=llm_call.
+        logger.info(
+            "phase_marker phase=llm_call bug_id=%s source=reflection "
+            "call_index=%d wallclock_ms=%d prompt_tokens=%d completion_tokens=%d "
+            "t_wall_ms=%d",
+            state.get("bug_id", ""), new_llm_call_count, _call_wallclock_ms,
+            in_tok, out_tok, time.time_ns() // 1_000_000,
+        )
         return {
             "reflection_note": _format_note(text),
             "reflection_count": count,
             "reflection_mode": "test",
             "max_input_tokens": new_max,
-            "llm_call_count":          int(state.get("llm_call_count") or 0) + 1,
+            "llm_call_count":          new_llm_call_count,
             "total_prompt_tokens":     int(state.get("total_prompt_tokens") or 0) + in_tok,
             "total_completion_tokens": int(state.get("total_completion_tokens") or 0) + out_tok,
             "total_cached_input_tokens": new_cached,
             "total_llm_wallclock_s":   round(
                 float(state.get("total_llm_wallclock_s") or 0.0) + _call_wallclock_s, 6
             ),
+            "llm_call_wallclock_ms":   new_per_call,
             "llm_backend_name":         backend_name,
         }
 

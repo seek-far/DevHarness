@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from enhancements.hooks import HookName
@@ -42,6 +43,25 @@ def _finalize(
     a callback actually added/changed are returned, keeping this node generic
     (no enhancement-specific keys hard-coded here).
     """
+    # Phase-3 sub-marker. Fires on every exit path (apply rejection, patch
+    # anchor error, pytest run completed, …) so the apply_test_start →
+    # apply_test_end pair brackets the whole node body regardless of which
+    # branch was taken. `attempt` = the fix_retry_count this node entered
+    # with — pairs uniquely with the matching apply_test_start under
+    # multi-attempt fixes. `apply_error_present` lets the analyzer separate
+    # "fast reject" attempts from "ran pytest" attempts.
+    _t0 = state.get("_apply_test_t0_ms")
+    if _t0 is not None:
+        _t_end = time.time_ns() // 1_000_000
+        logger.info(
+            "phase_marker phase=apply_test_end bug_id=%s attempt=%d "
+            "test_passed=%s apply_error_present=%s "
+            "elapsed_ms=%d t_wall_ms=%d",
+            state.get("bug_id", ""), int(state.get("fix_retry_count") or 0),
+            bool(result.get("test_passed")),
+            bool(result.get("apply_error")),
+            _t_end - _t0, _t_end,
+        )
     if result.get("test_passed"):
         return result
     hooks = get_hooks(config)
@@ -60,6 +80,17 @@ def _finalize(
 def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
     provider = get_provider(config)
     bug_id = state["bug_id"]
+
+    # Phase-3 sub-marker. Brackets the node body via _finalize (every exit
+    # path goes through there). Stashing the wallclock-ms start on state
+    # under an `_`-prefixed key keeps it out of the checkpointed delta —
+    # _finalize strips `_`-prefixed keys before returning.
+    _apply_test_t0_ms = time.time_ns() // 1_000_000
+    state = {**state, "_apply_test_t0_ms": _apply_test_t0_ms}
+    logger.info(
+        "phase_marker phase=apply_test_start bug_id=%s attempt=%d t_wall_ms=%d",
+        bug_id, int(state.get("fix_retry_count") or 0), _apply_test_t0_ms,
+    )
 
     # Resolve repo path — provider.ensure_repo_ready was already called in
     # create_fix_branch, so we reconstruct the path the same way.
@@ -163,6 +194,21 @@ def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] =
             [str(venv_python), "-m", "pip", "install", "-r", str(req_file), "-q"],
             check=True,
         )
+
+    # Phase-3 sub-marker. Splits the apply_change_and_test interval into
+    # "setup" (venv create + pip install — usually the giant chunk,
+    # especially on the first attempt where pip has to fetch wheels) and
+    # "pytest" (apply_test_venv_done → apply_test_end). `had_requirements`
+    # flags fixtures that triggered a pip install vs ones that ran pytest
+    # against the vanilla venv, so the analyzer can keep those two
+    # populations apart when reporting the venv stage cost.
+    _venv_done_ms = time.time_ns() // 1_000_000
+    logger.info(
+        "phase_marker phase=apply_test_venv_done bug_id=%s attempt=%d "
+        "had_requirements=%s t_wall_ms=%d",
+        bug_id, int(state.get("fix_retry_count") or 0),
+        bool(req_file.exists()), _venv_done_ms,
+    )
 
     # ── 3. Run pytest ──────────���────────────────────────────────���─────────────
     logger.info("running pytest in %s", repo_path)

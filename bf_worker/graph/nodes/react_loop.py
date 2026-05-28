@@ -540,6 +540,10 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
     total_completion_tokens = int(state.get("total_completion_tokens") or 0)
     total_llm_wallclock_s   = float(state.get("total_llm_wallclock_s") or 0.0)
     total_cached_input_tokens: int | None = state.get("total_cached_input_tokens")
+    # Per-call wallclock list — carries forward across react_loop re-entries
+    # the same way the sums do. Copy so we don't mutate the prior state's
+    # list in place (state dicts are passed by reference in LangGraph).
+    llm_call_wallclock_ms: list = list(state.get("llm_call_wallclock_ms") or [])
 
     while step_count < MAX_STEPS:
 
@@ -567,10 +571,22 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         total_prompt_tokens     += in_tok
         total_completion_tokens += out_tok
         total_llm_wallclock_s   += _call_wallclock_s
+        _call_wallclock_ms = int(_call_wallclock_s * 1000)
+        llm_call_wallclock_ms.append(_call_wallclock_ms)
         if cached_tok is not None:
             total_cached_input_tokens = (total_cached_input_tokens or 0) + cached_tok
         if budget is not None:
             budget.record_call(in_tok, out_tok)
+        # Phase-4 marker. Indexed by llm_call_count (1-based, run-wide
+        # across react_loop + reflection) so a post-processor can compute
+        # per-call p50/p95 latency and spot which call dominated each fix.
+        logger.info(
+            "phase_marker phase=llm_call bug_id=%s source=react_loop "
+            "call_index=%d wallclock_ms=%d prompt_tokens=%d completion_tokens=%d "
+            "t_wall_ms=%d",
+            state.get("bug_id", ""), llm_call_count, _call_wallclock_ms,
+            in_tok, out_tok, time.time_ns() // 1_000_000,
+        )
 
         # Append the full assistant message (including tool_calls field)
         # so the next LLM call has a valid conversation history.
@@ -689,6 +705,7 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         "total_completion_tokens":   total_completion_tokens,
         "total_cached_input_tokens": total_cached_input_tokens,
         "total_llm_wallclock_s":     round(total_llm_wallclock_s, 6),
+        "llm_call_wallclock_ms":     llm_call_wallclock_ms,
         "llm_backend_name":          backend_name,
         "no_fix_retry_count":        next_no_fix_retry_count,
         # Surface memory-related fields for journaling/telemetry (no-op when

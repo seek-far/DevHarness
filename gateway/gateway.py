@@ -2,6 +2,7 @@
 import json
 import logging
 import sys
+import time
 
 import redis
 from fastapi import FastAPI
@@ -61,6 +62,19 @@ async def webhook(payload: dict):
     logger.debug(f"{payload=}")
 
     raw: bytes = json.dumps(payload).encode("utf-8")
+
+    # Phase-1 marker. bug_id doesn't exist yet (orchestrator mints it on
+    # spawn). job_id + ref join this line to the downstream
+    # `phase=spawn_start` line emitted by orchestrator on the same event.
+    # Stays a single line so a post-processor can grep `phase_marker`
+    # across all three services and rebuild per-bug timelines.
+    ref = (payload.get("object_attributes") or {}).get("ref", "")
+    builds = payload.get("builds") or [{}]
+    job_id = builds[0].get("id", "") if builds else ""
+    logger.info(
+        "phase_marker phase=gateway_received job_id=%s ref=%s t_wall_ms=%d",
+        job_id, ref, time.time_ns() // 1_000_000,
+    )
 
     if cfg.use_redis and redis_client is not None:
         redis_client.xadd(cfg.gateway_stream, {"data": raw})

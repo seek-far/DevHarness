@@ -346,6 +346,7 @@ Enhancements are translated from JSON spec entries (`{"kind": "memory", ...}` or
 - Review output: `review_status`, `review_url`, `review_id`, `review_iid`, `review_branch`, `patch_file`, `report_file`, `review_result`
 - Enhancement telemetry: `reflection_count` — how many reflection post-mortems the reflection enhancement produced this run; `reflection_mode` — the last lens used (`"apply"` deterministic patch-mechanics note | `"test"` LLM causal post-mortem | `None` when not wired / never fired). Additive and backward-compatible, so `SCHEMA_VERSION` stays `"1"`.
 - LLM context telemetry: `max_input_tokens` — the largest `prompt_tokens` the backend reported across every LLM call this run (react_loop + reflection). `0` means the backend never returned a usage block; `None` means no LLM call ever ran. Useful for spotting when a run brushes a finite-window self-hosted backend's context limit. Additive, `SCHEMA_VERSION` unchanged.
+- Per-LLM-call wallclock: `llm_call_wallclock_ms` — list of per-call wallclock (ms), ordered by call, summed across react_loop re-entries and reflection callbacks. Same shape pattern as `total_llm_wallclock_s` but per-call instead of aggregate, so a post-hoc analysis can derive p50/p95/p99 per call and spot which call dominated each run. `None` when no LLM call ever ran. Additive, `SCHEMA_VERSION` unchanged. Each call also emits a one-line structured `phase_marker phase=llm_call …` log for ad-hoc grep during stress runs.
 
 GitLab runs populate commit and merge-request fields, local-git runs populate local commit fields, and no-git runs populate patch/report fields.
 
@@ -951,9 +952,37 @@ uv run python tools/gitlab_fixture_repos.py --fixtures F01,F02,F03,F04 \
 # burst rather than a thread-pool-paced trickle
 uv run python tools/trigger_concurrent_pipelines.py \
   --fixtures F01,F02,F03,F04 --concurrency 4
+
+# in a separate terminal, sample queue depth + active workers +
+# heartbeat freshness every 500ms while the burst runs. Join the TSV
+# with the gateway/orchestrator/worker `phase_marker` log lines by
+# bug_id for the four-phase latency view.
+uv run python tools/load_sampler.py --interval-ms 500 \
+  --out /tmp/burst.tsv
+
+# once the burst settles, ingest the logs + sampler TSV and print a
+# per-bug + aggregate latency report (phase 1 / 2 / 3 + per-LLM-call
+# percentiles, achieved concurrency from the sampler).
+uv run python tools/analyze_phase_log.py \
+  --log /tmp/gateway.log --log /tmp/orchestrator.log \
+  --sampler /tmp/burst.tsv
 ```
 
-Full runbook in `infra/k8s/README.md`.
+Capturing logs: redirect each service's stdout to a file at start time
+(`uvicorn … >/tmp/gateway.log 2>&1`, `python -m orchestrator.orchestrator
+>/tmp/orchestrator.log 2>&1`). In process-spawner mode workers inherit
+the orchestrator's stdout so worker `phase_marker` lines land in the
+same log; for Docker / ECS / K8s spawners use `docker logs` /
+`aws logs tail` / `kubectl logs` per worker and pass each file with a
+repeated `--log` flag (globs are supported, e.g. `--log "/tmp/worker-*.log"`).
+
+Reference run: see [**Stress test #1 — N=19 on WSL**](tests/stress_test_1.md)
+for the procedure, environment specs (CPU/RAM/OS/LLM), reported numbers,
+and findings (TL;DR: ~17 s phase 2 is overwhelmingly cold-Python import
+under WSL+NTFS, and CI wait dominates phase 3 — neither is a worker
+bug).
+
+Full K8s deployment runbook in `infra/k8s/README.md`.
 
 ### GitLab Webhook Setup
 

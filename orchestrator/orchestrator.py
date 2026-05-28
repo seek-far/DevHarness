@@ -3,6 +3,7 @@ import asyncio
 import logging
 import secrets
 import sys
+import time
 from datetime import datetime
 
 import redis.asyncio as aioredis
@@ -132,6 +133,15 @@ class Orchestrator:
                 + f"_{secrets.token_hex(2)}"
             )
             logger.info("[Orchestrator] generate bug_id=%s source_branch=%s", bug_id, source_branch)
+            # Phase-1 end / phase-2 start marker. job_id + ref join this
+            # line to the gateway's `phase=gateway_received` line; bug_id
+            # joins this line to every downstream worker marker. Same
+            # `phase_marker` prefix everywhere so one grep rebuilds the
+            # whole per-bug timeline across the three services.
+            logger.info(
+                "phase_marker phase=spawn_start bug_id=%s job_id=%s ref=%s t_wall_ms=%d",
+                bug_id, job_id, source_branch, time.time_ns() // 1_000_000,
+            )
             await self._spawner.spawn(bug_id, project_id, project_web_url, job_id, source_branch=source_branch)
 
         elif isinstance(event, ValidationStatusEvent):

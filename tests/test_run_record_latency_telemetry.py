@@ -205,6 +205,35 @@ def test_run_record_defaults_all_latency_fields_to_none():
     assert rec.total_cached_input_tokens is None
     assert rec.total_llm_wallclock_s is None
     assert rec.llm_model_served is None
+    # Per-call list defaults to None (no LLM calls happened) — distinct
+    # from [] which would say "the LLM was invoked but produced zero
+    # per-call observations", a shape that can't occur.
+    assert rec.llm_call_wallclock_ms is None
+
+
+# ── Per-call wallclock list (additive observability field) ──────────────────
+
+
+def test_run_record_pulls_llm_call_wallclock_ms_from_state():
+    rec = RunRecord.from_outputs(
+        agent_name="LangGraphAgent",
+        bug_id="BUG-1",
+        outcome="fixed",
+        error=None,
+        iterations=0,
+        final_state={
+            "llm_call_count": 3,
+            "llm_call_wallclock_ms": [120, 540, 80],
+            "total_llm_wallclock_s": 0.74,
+        },
+    )
+    assert rec.llm_call_wallclock_ms == [120, 540, 80]
+    # Sum of the per-call ms should be within rounding of the total — the two
+    # fields come from the SAME perf_counter deltas, so this cross-check
+    # surfaces accumulator drift if a future refactor splits them apart.
+    assert sum(rec.llm_call_wallclock_ms) / 1000 == pytest.approx(
+        rec.total_llm_wallclock_s, abs=0.01
+    )
 
 
 # ── react_loop: accumulates totals across calls + carries forward ────────────
@@ -295,6 +324,62 @@ def test_react_loop_carries_forward_prior_totals(monkeypatch):
     assert out["total_llm_wallclock_s"] > 3.0
     # No cache_read on this call — prior cached carries forward unchanged
     assert out["total_cached_input_tokens"] == 400
+
+
+def test_react_loop_appends_to_llm_call_wallclock_ms(monkeypatch):
+    """Each LLM call adds one ms entry to the running list, in call order."""
+    rl = _stub_react_loop(monkeypatch, [100, 200, 150])
+    out = rl.react_loop(_minimal_state(), _minimal_config())
+    per_call = out["llm_call_wallclock_ms"]
+    assert isinstance(per_call, list)
+    assert len(per_call) == 3
+    assert all(isinstance(x, int) and x >= 0 for x in per_call)
+    # The list and the sum come from the same perf_counter deltas — keep
+    # them in lockstep so post-hoc analysis isn't lying.
+    assert sum(per_call) / 1000 == pytest.approx(out["total_llm_wallclock_s"], abs=0.05)
+
+
+def test_react_loop_per_call_list_carries_forward_on_reentry(monkeypatch):
+    """Same carry-forward as the sums: a re-entry under retry / acting-mode
+    reviewer feedback must extend the prior list, not replace it. Without
+    this, p95 latency post-hoc would only see the last sub-run."""
+    rl = _stub_react_loop(monkeypatch, [50])
+    state = _minimal_state()
+    state.update({
+        "llm_call_count": 2,
+        "llm_call_wallclock_ms": [300, 410],
+        "total_llm_wallclock_s": 0.710,
+    })
+    out = rl.react_loop(state, _minimal_config())
+    per_call = out["llm_call_wallclock_ms"]
+    assert len(per_call) == 3
+    assert per_call[:2] == [300, 410]
+    # The prior state's list must not be mutated in place — verifies the
+    # `list(state.get(...) or [])` copy at the top of react_loop.
+    assert state["llm_call_wallclock_ms"] == [300, 410]
+
+
+def test_reflection_appends_to_per_call_wallclock_list():
+    reflect = make_reflection_callback(llm=_FakeLLM(input_tokens=80, output_tokens=3))
+    out = reflect(_failed_state(
+        llm_call_count=2,
+        llm_call_wallclock_ms=[120, 540],
+        total_llm_wallclock_s=0.660,
+    ))
+    per_call = out["llm_call_wallclock_ms"]
+    assert len(per_call) == 3
+    assert per_call[:2] == [120, 540]
+    assert per_call[2] >= 0
+
+
+def test_reflection_creates_per_call_list_when_absent():
+    """First LLM call ever (no prior react_loop entries — rare, but
+    plausible if reflection somehow fires before react_loop): list goes
+    from absent → one-element."""
+    reflect = make_reflection_callback(llm=_FakeLLM(input_tokens=80, output_tokens=3))
+    out = reflect(_failed_state())
+    assert out["llm_call_wallclock_ms"] is not None
+    assert len(out["llm_call_wallclock_ms"]) == 1
 
 
 # ── metrics.aggregate handles mixed reporting ────────────────────────────────

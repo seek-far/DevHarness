@@ -129,6 +129,13 @@ class RunRecord:
     total_completion_tokens:    int   | None = None
     total_cached_input_tokens:  int   | None = None
     total_llm_wallclock_s:      float | None = None
+    # Per-call wallclock breakdown (ms, ordered). Surface for p50/p95/p99
+    # per-call latency and for spotting which calls dominated the run
+    # without parsing logs. Accumulates across react_loop + reflection
+    # the same way total_llm_wallclock_s does, and stays None when no LLM
+    # call ever ran (R10 short-circuit). SCHEMA_VERSION unchanged
+    # (additive, backward-compatible).
+    llm_call_wallclock_ms:      list  | None = None
     # vLLM /v1/models actually-served name (self-hosted only; None for cloud
     # backends). Distinct from llm_model (which is what the env file declared)
     # so a silent mismatch is recoverable post-hoc; mismatches at startup
@@ -237,6 +244,7 @@ class RunRecord:
             total_completion_tokens    = s.get("total_completion_tokens"),
             total_cached_input_tokens  = s.get("total_cached_input_tokens"),
             total_llm_wallclock_s      = s.get("total_llm_wallclock_s"),
+            llm_call_wallclock_ms      = s.get("llm_call_wallclock_ms"),
             llm_model_served           = llm_model_served,
             llm_backend_name           = s.get("llm_backend_name"),
             no_fix_retry_count         = s.get("no_fix_retry_count"),

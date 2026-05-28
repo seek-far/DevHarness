@@ -59,6 +59,13 @@ class BugFixState(TypedDict, total=False):
     total_completion_tokens: int | None
     total_cached_input_tokens: int | None
     total_llm_wallclock_s: float | None
+    # Per-call wallclock breakdown — one int (ms) per LLM call, ordered by
+    # call. Carries forward across react_loop re-entries (retries, acting-
+    # mode reviewer feedback) and reflection callbacks, same shape as the
+    # sums above. None until the first call, list grows from there. Surface
+    # for p50/p95/p99 per-call latency without parsing logs, and for cost
+    # attribution post-hoc (which calls dominated the wallclock).
+    llm_call_wallclock_ms: list | None
     # ── llm_gateway routing telemetry (additive 2026-05-25) ──────────────────
     # Set by react_loop / reflection when the worker is talking to an SDLCMA
     # llm_gateway. Reflects the backend name reported on the last LLM call's

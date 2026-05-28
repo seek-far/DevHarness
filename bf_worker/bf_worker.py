@@ -19,6 +19,7 @@ import shutil
 import signal
 import stat
 import sys
+import time
 from pathlib import Path
 
 # Repo root must be on sys.path BEFORE the cascading imports below — line 28's
@@ -49,9 +50,18 @@ def _rm_readonly(func, path, exc_info):
 # ── heartbeat ──────────────────────────────────────────────────────────────────
 
 async def _heartbeat_loop(r: aioredis.Redis, hb_key: str) -> None:
+    # Heartbeat VALUE is a unix-ms timestamp (string-encoded). HealthMonitor
+    # only checks TTL liveness (value-format-agnostic), so any consumer that
+    # also wants "when did the worker last refresh" (load_sampler, phase-2
+    # latency reporter) can GET the value and parse — no separate channel
+    # needed. First write fires immediately (loop body runs before sleep),
+    # so the FIRST timestamp written is also the worker-ready marker for
+    # phase-2 latency.
     while True:
-        await r.setex(hb_key, cfg.worker_heartbeat_ttl * 2, "alive")
-        logger.debug("heartbeat refreshed key=%s ttl=%ds", hb_key, cfg.worker_heartbeat_ttl)
+        ts_ms = str(time.time_ns() // 1_000_000).encode()
+        await r.setex(hb_key, cfg.worker_heartbeat_ttl * 2, ts_ms)
+        logger.debug("heartbeat refreshed key=%s ttl=%ds ts_ms=%s",
+                     hb_key, cfg.worker_heartbeat_ttl, ts_ms.decode())
         await asyncio.sleep(cfg.worker_heartbeat_interval)
 
 
@@ -66,7 +76,20 @@ class BugFixWorker:
     async def run(self) -> None:
         logger.info("worker started  env=%s  bug_id=%s", cfg.env, self.bug_id)
 
-        # Start heartbeat as a background task.
+        # Phase-2 end marker. Fires after Python init + imports + optional
+        # agent_ref reexec + LLM model probe — i.e. the worker is *ready to
+        # do work*. Paired with orchestrator's `phase=spawn_start` to give
+        # exact phase-2 latency without HealthMonitor's 5s poll-cadence
+        # noise.
+        logger.info(
+            "phase_marker phase=worker_ready bug_id=%s t_wall_ms=%d",
+            self.bug_id, time.time_ns() // 1_000_000,
+        )
+
+        # Start heartbeat as a background task. First SETEX (in the loop
+        # body, before any sleep) writes the same unix_ms timestamp, so a
+        # consumer that doesn't see this log line can still read the
+        # heartbeat value for an approximate worker_ready timestamp.
         hb_task = asyncio.create_task(
             _heartbeat_loop(self._redis, self._hb_key), name="heartbeat"
         )
@@ -124,9 +147,35 @@ class BugFixWorker:
 
         agent_spec = load_agent_spec(os.getenv("BF_AGENT_CONFIG"))
         served = _check_llm_model(cfg)  # SystemExit on self-hosted mismatch
+        # Phase-2 sub-marker. Diff vs worker_ready = BugInput construction
+        # + load_agent_spec + the HTTP `GET /v1/models` probe against the
+        # self-hosted backend (cloud backends skip the probe → ~0 delta).
+        # Under burst, a backend that's already saturated with concurrent
+        # LLM calls will make THIS marker the bottleneck — the probe
+        # queues behind real inference. Skipped on cloud-backend mode.
+        logger.info(
+            "phase_marker phase=worker_llm_probe_done bug_id=%s t_wall_ms=%d",
+            self.bug_id, time.time_ns() // 1_000_000,
+        )
         agent = make_agent(agent_spec, llm_model_served=served)
         logger.info("invoking agent=%s ...", agent.name)
+        # Phase-3 markers. fix_start/fix_end bracket agent.fix(); elapsed_ms
+        # on fix_end is the same wallclock RunRecord.elapsed_s would round
+        # to, but emitted as a log line so a post-processor can compute
+        # per-N p50/p95 phase-3 latency without parsing every journal entry.
+        _t_fix0 = time.perf_counter()
+        logger.info(
+            "phase_marker phase=fix_start bug_id=%s t_wall_ms=%d",
+            self.bug_id, time.time_ns() // 1_000_000,
+        )
         fix_output = agent.fix(bug_input)
+        _fix_elapsed_ms = int((time.perf_counter() - _t_fix0) * 1000)
+        logger.info(
+            "phase_marker phase=fix_end bug_id=%s outcome=%s iterations=%d "
+            "elapsed_ms=%d t_wall_ms=%d",
+            self.bug_id, fix_output.outcome, fix_output.iterations,
+            _fix_elapsed_ms, time.time_ns() // 1_000_000,
+        )
 
         if fix_output.outcome == "error":
             logger.error("agent finished with error: %s", fix_output.error)
@@ -181,7 +230,21 @@ if __name__ == "__main__":
         stream=sys.stdout,
         force=True,
     )
-    
+
+    # Phase-2 sub-marker. By the time logging.basicConfig returns, every
+    # top-level `from agents.base import …` / `from providers… import …`
+    # has run — langgraph / openai / langchain all eager-load on import,
+    # and that's the biggest chunk of cold-Python-startup cost. So this
+    # marker fires exactly when "imports are done, ready to enter main
+    # code". Diff vs spawn_start = pure Python startup + library
+    # eager-load. Under burst this is the one most likely to balloon
+    # from CPU/disk contention as N parallel workers fault in the same
+    # modules.
+    logger.info(
+        "phase_marker phase=worker_imports_done bug_id=%s t_wall_ms=%d",
+        _bug_id, time.time_ns() // 1_000_000,
+    )
+
     logger.debug("cfg=%s", cfg)
 
     _agent_ref_exit = maybe_reexec_for_agent_ref(
@@ -190,5 +253,15 @@ if __name__ == "__main__":
     )
     if _agent_ref_exit is not None:
         raise SystemExit(_agent_ref_exit)
+
+    # Phase-2 sub-marker. Diff vs worker_imports_done = agent_ref reexec
+    # cost (effectively 0 when no agent_ref is pinned — the common case;
+    # in the reexec child this marker fires from the new process after
+    # the child's own check returns None, so a non-zero delta isolates
+    # the worktree-creation + child-process restart).
+    logger.info(
+        "phase_marker phase=worker_agent_ref_done bug_id=%s t_wall_ms=%d",
+        _bug_id, time.time_ns() // 1_000_000,
+    )
 
     asyncio.run(main())
