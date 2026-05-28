@@ -115,12 +115,14 @@ class LangGraphAgent(Agent):
                 "hooks":     hooks,
                 "budget":    budget,
                 "code_review": self._code_review,
-                # thread_id keys the checkpoint store. bug_id is the natural
-                # choice — same bug across restarts shares a thread, which is
-                # how resume works. Same key as the idempotency layer's dedup
-                # key (intentional: "this bug fix" is one logical unit
-                # everywhere in the system).
-                "thread_id": bug_input.bug_id,
+                # thread_id keys the checkpoint store. Default = bug_id, so
+                # running modes (GitLab worker, standalone) behave byte-
+                # identically — same bug across restarts shares a thread,
+                # which is how resume works, and it's the same key as the
+                # idempotency layer's dedup key. Callers needing finer
+                # scoping (evaluation: per-cell, where bug_id = fixture_id
+                # collides across specs) override via BugInput.thread_id.
+                "thread_id": bug_input.thread_id or bug_input.bug_id,
             }
         }
 

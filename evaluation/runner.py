@@ -132,7 +132,24 @@ def run_sweep(
             logger.info("eval cell: agent=%s fixture=%s", spec_name, fixture.fixture_id)
 
             provider = make_provider(fixture, output_dir=cell_dir / "patch_output")
-            bug_input = BugInput(bug_id=fixture.fixture_id, provider=provider)
+            # Composite thread_id per cell. bug_id stays = fixture.fixture_id
+            # so journal/RunRecord/log lines callers grep on don't shift, but
+            # the LangGraph checkpoint key gets the spec_name suffix so a
+            # future sweep with checkpointing turned back ON can't cross-
+            # contaminate cells that share a fixture_id but run under
+            # different agent specs. spec_name is already unique within the
+            # sweep (it's the per-cell output-dir component above).
+            # Defense-in-depth today: `make_agent` still forces
+            # checkpointer=None for every eval cell, so this seam is unused
+            # until someone re-enables checkpointing — at which point this
+            # split is what keeps the comparison valid. See
+            # [[project_eval_checkpoint_contamination]].
+            thread_id = f"{fixture.fixture_id}::{spec_name}"
+            bug_input = BugInput(
+                bug_id=fixture.fixture_id,
+                provider=provider,
+                thread_id=thread_id,
+            )
 
             t0 = time.monotonic()
             err = None

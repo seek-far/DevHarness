@@ -37,6 +37,16 @@ class BugInput:
     # (standalone, local-git, eval fixtures) leave it unset and behaviour is
     # unchanged.
     source_branch: str = ""
+    # Optional LangGraph checkpoint key. Empty string ⇒ fall back to bug_id
+    # (the legacy default — same bug across worker restarts shares one
+    # thread, which is how resume works). Set ONLY by callers that need
+    # finer scoping than bug_id: today the evaluation runner uses
+    # f"{fixture_id}::{spec_name}" so a future checkpointing-on sweep
+    # can't cross-contaminate cells that share a fixture_id but run
+    # under different agent specs. Defense-in-depth: eval currently
+    # forces checkpointer=None, so this seam is unused until that
+    # changes — see [[project_eval_checkpoint_contamination]].
+    thread_id: str = ""
     metadata: dict = field(default_factory=dict)
 
 
