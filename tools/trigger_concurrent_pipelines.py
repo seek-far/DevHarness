@@ -2,25 +2,47 @@
 """
 tools/trigger_concurrent_pipelines.py — fire failed pipelines on multiple repos at once.
 
-For each selected target project, POST /pipeline?ref=main concurrently and
+For each selected target project, POST /pipeline?ref=<ref> concurrently and
 print one row per target. Trigger-only: returns immediately, does not poll
 for resulting auto/bf/* MRs.
 
 Target selection:
-  --fixtures all|F01,F02,...   restrict to subset of repos under --prefix
-                               (default: all). Match by short id (F01) or
-                               full directory name (F01-off-by-one).
-  --include-order-be           also fire on lishu20161/order_be (or
-                               override the path via --order-be-path).
+  --fixtures all|F01,F02,...    restrict to subset of repos under --prefix
+                                inside --namespace (default: all). Match by
+                                short id (F01) or full directory name
+                                (F01-off-by-one).
+  --extra-projects PATH,...     additional non-fixture projects to fire on.
+                                Each entry is either a bare project name
+                                (resolved as {namespace}/{name}) or a full
+                                path_with_namespace (taken as-is). Useful
+                                for mixing real-world repos with the
+                                synthetic fixtures in one stress run.
 
 Tuning:
-  --concurrency 5              size of the thread pool used for POSTs.
-                               Default 5 keeps simultaneous worker spawns
-                               manageable on a single t3.micro; raise for
-                               stress testing.
+  --concurrency N               size of the thread pool used for POSTs.
+                                For a "strict N simultaneous webhooks"
+                                stress test (the K8s memory-note pattern),
+                                pick N == concurrency == len(targets) so
+                                every POST is actually in flight at once;
+                                with more targets than concurrency the
+                                later POSTs wait for slots and the burst
+                                is no longer strict.
 
 Configuration is GitLab-/account-agnostic — pass --gitlab-url, --token,
---namespace, --prefix. Defaults match the bundled gitlab.com test account.
+--namespace, --prefix. Defaults match the bundled gitlab.com test
+account (lishu20161 / sdlcma-fix-).
+
+Example — two strict-simultaneous pipelines from two fixtures under the
+self-hosted GitLab's root namespace:
+
+  python tools/trigger_concurrent_pipelines.py \\
+      --gitlab-url http://gitlab.local --namespace root \\
+      --fixtures F01,F02 --concurrency 2
+
+Example — eight strict-simultaneous on the bundled gitlab.com account:
+
+  python tools/trigger_concurrent_pipelines.py \\
+      --fixtures F01,F02,F03,F04,F05,F06,F07,F08 --concurrency 8
 """
 
 from __future__ import annotations
@@ -36,8 +58,8 @@ from pathlib import Path
 import requests
 
 DEFAULT_GITLAB_URL = "https://gitlab.com"
+DEFAULT_NAMESPACE = "lishu20161"
 DEFAULT_PREFIX = "sdlcma-fix-"
-DEFAULT_ORDER_BE = "lishu20161/order_be"
 
 
 def load_token_default() -> str | None:
@@ -52,18 +74,27 @@ def load_token_default() -> str | None:
     return None
 
 
-def list_fixture_projects(api: str, token: str, prefix: str) -> list[dict]:
+def list_fixture_projects(
+    api: str, token: str, prefix: str, namespace: str | None = None
+) -> list[dict]:
+    # `owned=true` is unreliable on self-hosted Omnibus for the root admin
+    # token — projects under root/ may not pass GitLab's "owned" predicate
+    # even when the token belongs to root. Scope by namespace (when known)
+    # via path_with_namespace instead; falls back to prefix-only on the
+    # historical no-namespace call sites. Mirrors the equivalent function
+    # in tools/gitlab_fixture_repos.py (commit 82908c3).
     r = requests.get(
         f"{api}/projects",
         headers={"PRIVATE-TOKEN": token},
-        params={"search": prefix, "owned": "true", "simple": "true", "per_page": 100},
+        params={"search": prefix, "simple": "true", "per_page": 100},
         timeout=30,
     )
     r.raise_for_status()
-    return sorted(
-        (p for p in r.json() if p["path"].startswith(prefix)),
-        key=lambda p: p["path"],
-    )
+    projs = [p for p in r.json() if p["path"].startswith(prefix)]
+    if namespace:
+        ns_prefix = f"{namespace}/"
+        projs = [p for p in projs if p.get("path_with_namespace", "").startswith(ns_prefix)]
+    return sorted(projs, key=lambda p: p["path"])
 
 
 def filter_fixtures(projs: list[dict], wanted: list[str] | None, prefix: str) -> list[dict]:
@@ -77,6 +108,41 @@ def filter_fixtures(projs: list[dict], wanted: list[str] | None, prefix: str) ->
         if short.upper() in wanted_upper or rest in wanted or rest.upper() in wanted_upper:
             out.append(p)
     return out
+
+
+def resolve_extra_projects(entries: list[str], namespace: str | None) -> list[str]:
+    """Turn each --extra-projects entry into a full path_with_namespace.
+
+    Bare names (no slash) resolve as ``{namespace}/{name}`` — the common
+    case (e.g. ``--extra-projects order_be``). Entries that already carry
+    a slash are taken as-is, so cross-namespace targets stay possible
+    (``--extra-projects other-group/their-repo``).
+    """
+    resolved: list[str] = []
+    for entry in entries:
+        e = entry.strip()
+        if not e:
+            continue
+        if "/" in e:
+            resolved.append(e)
+        else:
+            if not namespace:
+                raise SystemExit(
+                    f"--extra-projects entry {e!r} is a bare name but no --namespace was given"
+                )
+            resolved.append(f"{namespace}/{e}")
+    return resolved
+
+
+def fetch_project_id(api: str, token: str, path_with_namespace: str) -> int:
+    enc = urllib.parse.quote(path_with_namespace, safe="")
+    r = requests.get(
+        f"{api}/projects/{enc}",
+        headers={"PRIVATE-TOKEN": token},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["id"]
 
 
 def trigger_pipeline(api: str, token: str, project_id: int, ref: str):
@@ -100,12 +166,18 @@ def main(argv=None):
     )
     p.add_argument("--gitlab-url", default=DEFAULT_GITLAB_URL)
     p.add_argument("--token", default=None)
+    p.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     p.add_argument("--prefix", default=DEFAULT_PREFIX)
     p.add_argument(
         "--fixtures", default="all", help="all | comma list (F01,F02 or F01-off-by-one,...)"
     )
-    p.add_argument("--include-order-be", action="store_true")
-    p.add_argument("--order-be-path", default=DEFAULT_ORDER_BE)
+    p.add_argument(
+        "--extra-projects",
+        default="",
+        help="comma list of additional projects to fire on; bare names "
+             "resolve as {namespace}/{name}, slash-bearing entries are "
+             "taken as full path_with_namespace",
+    )
     p.add_argument("--ref", default="main")
     p.add_argument("--concurrency", type=int, default=5)
     args = p.parse_args(argv)
@@ -121,19 +193,13 @@ def main(argv=None):
         wanted = [s.strip() for s in args.fixtures.split(",") if s.strip()]
 
     targets: list[tuple[str, int]] = []
-    fixture_projs = list_fixture_projects(api, args.token, args.prefix)
+    fixture_projs = list_fixture_projects(api, args.token, args.prefix, args.namespace)
     for fp in filter_fixtures(fixture_projs, wanted, args.prefix):
         targets.append((fp["path_with_namespace"], fp["id"]))
 
-    if args.include_order_be:
-        enc = urllib.parse.quote(args.order_be_path, safe="")
-        r = requests.get(
-            f"{api}/projects/{enc}",
-            headers={"PRIVATE-TOKEN": args.token},
-            timeout=30,
-        )
-        r.raise_for_status()
-        targets.append((args.order_be_path, r.json()["id"]))
+    extra_entries = [s for s in (args.extra_projects or "").split(",") if s.strip()]
+    for path in resolve_extra_projects(extra_entries, args.namespace):
+        targets.append((path, fetch_project_id(api, args.token, path)))
 
     if not targets:
         raise SystemExit("no targets matched")

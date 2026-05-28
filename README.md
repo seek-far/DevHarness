@@ -944,8 +944,13 @@ re-triggering one repo), use the bundled tools:
 uv run python tools/gitlab_fixture_repos.py --fixtures F01,F02,F03,F04 \
   setup --webhook-url https://<cloudflared>.trycloudflare.com/webhook
 
-# fire N pipelines truly simultaneously
-uv run python tools/trigger_concurrent_pipelines.py --concurrency 4
+# fire N pipelines truly simultaneously — pass --namespace/--fixtures so
+# the script can scope the project search (the trigger script no longer
+# uses owned=true, which is unreliable for the root admin token on
+# self-hosted Omnibus); pick --concurrency == len(fixtures) for a strict
+# burst rather than a thread-pool-paced trickle
+uv run python tools/trigger_concurrent_pipelines.py \
+  --fixtures F01,F02,F03,F04 --concurrency 4
 ```
 
 Full runbook in `infra/k8s/README.md`.

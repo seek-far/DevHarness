@@ -23,11 +23,18 @@ Subcommands:
   list             show project_path → project_id for all fixture repos
   teardown         delete fixture repos (default dry-run; pass --yes to delete)
 
-Why force-push main: the worker's bug-fix pipeline anchors on
-`base_branch="main"` (ensure_base_branch / create_fix_branch / fetch_file /
-gitlab_create_merge_request — see bf_worker/providers/gitlab_provider.py), so
-the failing pipeline must be on main; the easiest way to guarantee that is
-to make main itself the buggy state.
+Why force-push main: as of Item 3 (orchestrator threads source_branch from
+the failing pipeline's ref → worker), the worker rebases the fix branch
+off whatever ref the failing pipeline ran on; "main" is no longer
+hard-anchored in the bug-fix path. We still push fixture repos to main
+because (a) it's GitLab's default branch so the failing pipeline fires
+immediately after the first push without needing a separate "switch
+default branch" step, (b) it keeps the deterministic fix-branch name
+identical across repeated runs (auto/bf/{bug_id}-{main_head[:8]}), and
+(c) it matches the simplest demo a reader expects. To smoke-test the
+non-main path (Item 3), push the buggy state to a feature branch instead
+and trigger the pipeline against that ref; the worker will fix-and-MR
+back to that same feature branch.
 """
 
 from __future__ import annotations
