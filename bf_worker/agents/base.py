@@ -32,6 +32,11 @@ class BugInput:
     project_id: str = ""
     project_web_url: str = ""
     job_id: str = ""
+    # Branch the failing pipeline ran on; the worker rebases/MRs against it.
+    # Empty string preserves the legacy "main" default — non-GitLab modes
+    # (standalone, local-git, eval fixtures) leave it unset and behaviour is
+    # unchanged.
+    source_branch: str = ""
     metadata: dict = field(default_factory=dict)
 
 

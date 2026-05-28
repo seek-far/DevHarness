@@ -116,6 +116,10 @@ class BugFixWorker:
             project_id=os.environ["project_id"],
             project_web_url=project_web_url,
             job_id=os.environ["job_id"],
+            # Orchestrator sets this from the failed pipeline's ref. Empty
+            # string preserves the legacy "main" default downstream so
+            # local-git / standalone callers keep working.
+            source_branch=os.environ.get("BUG_SOURCE_BRANCH", ""),
         )
 
         agent_spec = load_agent_spec(os.getenv("BF_AGENT_CONFIG"))

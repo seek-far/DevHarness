@@ -11,6 +11,10 @@ class BugReportedEvent:
     project_web_url: str
     job_id: str
     raw: dict
+    # The branch the failed pipeline ran on (payload["object_attributes"]["ref"]).
+    # Empty string preserves the historical default ("main") downstream when
+    # an older payload / test omits the ref.
+    source_branch: str = ""
 
 
 @dataclass
@@ -35,6 +39,10 @@ class WorkerEntry:
     project_id: str = ""
     project_web_url: str = ""
     job_id: str = ""
+    # Source branch the failed pipeline ran on. Stored so HealthMonitor
+    # restarts re-spawn the worker against the same base (Item 3).
+    # Empty string falls back to "main" in the worker.
+    source_branch: str = ""
     started_at: float = field(default_factory=time.time)
     warmup_deadline: float = 0.0
     restart_count: int = 0

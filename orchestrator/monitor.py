@@ -98,7 +98,13 @@ class HealthMonitor:
     async def _restart(self, bug_id: str) -> None:
         entry = self._registry.get(bug_id)
         try:
-            await self._spawner.restart(bug_id, entry.project_id, entry.project_web_url, entry.job_id)
+            await self._spawner.restart(
+                bug_id, entry.project_id, entry.project_web_url, entry.job_id,
+                # getattr fallback keeps the existing fake-entry test fixtures
+                # working (SimpleNamespace without source_branch) — real
+                # WorkerEntry instances always carry the field.
+                source_branch=getattr(entry, "source_branch", "") or "",
+            )
         except Exception as e:
             logger.error(f"[Monitor] restart failed bug_id={bug_id}: {e}")
             self._registry.update_status(bug_id, "failed")

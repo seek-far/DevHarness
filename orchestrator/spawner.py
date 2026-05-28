@@ -21,16 +21,19 @@ class WorkerSpawner:
         self._registry = registry
         self._redis_url = redis_url
 
-    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                    source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[Spawner] bug_id=%s already running, skip", bug_id)
             return self._registry.get(bug_id)
 
-        entry = await self._start_process(bug_id, project_id, project_web_url, job_id)
+        entry = await self._start_process(bug_id, project_id, project_web_url, job_id,
+                                          source_branch=source_branch)
         self._registry.register(entry)
         return entry
 
-    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                      source_branch: str = "") -> WorkerEntry:
         old = self._registry.get(bug_id)
         restart_count = (old.restart_count + 1) if old else 1
 
@@ -45,25 +48,31 @@ class WorkerSpawner:
                 except Exception:
                     pass
 
-        entry = await self._start_process(bug_id, project_id, project_web_url, job_id, restart_count=restart_count)
+        entry = await self._start_process(bug_id, project_id, project_web_url, job_id,
+                                          source_branch=source_branch,
+                                          restart_count=restart_count)
         self._registry.register(entry)
         logger.info("[Spawner] restarted bug_id=%s restart_count=%d", bug_id, restart_count)
         return entry
 
-    async def _start_process(self, bug_id: str, project_id: str, project_web_url: str, job_id: str    , restart_count: int = 0) -> WorkerEntry:
+    async def _start_process(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                             source_branch: str = "", restart_count: int = 0) -> WorkerEntry:
         env = os.environ.copy()
         env["REDIS_URL"] = self._redis_url
         env["BUG_ID"] = bug_id
         env["project_id"] = project_id
         env["project_web_url"] = project_web_url
         env["job_id"] = job_id
+        # Empty string keeps the historical default ("main") in the worker.
+        env["BUG_SOURCE_BRANCH"] = source_branch or ""
         if os.getenv("BF_AGENT_CONFIG"):
             env["BF_AGENT_CONFIG"] = os.environ["BF_AGENT_CONFIG"]
         process = await asyncio.create_subprocess_exec(
             sys.executable, WORKER_SCRIPT, "--bug-id", bug_id,
             env=env,
         )
-        logger.info("[Spawner] started bug_id=%s pid=%s", bug_id, process.pid)
+        logger.info("[Spawner] started bug_id=%s pid=%s source_branch=%s",
+                    bug_id, process.pid, source_branch or "<main-default>")
         now = time.time()
         return WorkerEntry(
             bug_id=bug_id,
@@ -71,6 +80,7 @@ class WorkerSpawner:
             project_id=project_id,
             project_web_url=project_web_url,
             job_id=job_id,
+            source_branch=source_branch,
             started_at=now,
             warmup_deadline=now + WARMUP_GRACE,
             restart_count=restart_count,
@@ -148,16 +158,19 @@ class DockerWorkerSpawner:
         import docker
         self._docker = docker.from_env()
 
-    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                    source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[DockerSpawner] bug_id=%s already running, skip", bug_id)
             return self._registry.get(bug_id)
 
-        entry = await self._start_container(bug_id, project_id, project_web_url, job_id)
+        entry = await self._start_container(bug_id, project_id, project_web_url, job_id,
+                                            source_branch=source_branch)
         self._registry.register(entry)
         return entry
 
-    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                      source_branch: str = "") -> WorkerEntry:
         old = self._registry.get(bug_id)
         restart_count = (old.restart_count + 1) if old else 1
 
@@ -172,19 +185,23 @@ class DockerWorkerSpawner:
                 except Exception:
                     pass
 
-        entry = await self._start_container(bug_id, project_id, project_web_url, job_id, restart_count=restart_count)
+        entry = await self._start_container(bug_id, project_id, project_web_url, job_id,
+                                            source_branch=source_branch,
+                                            restart_count=restart_count)
         self._registry.register(entry)
         logger.info("[DockerSpawner] restarted bug_id=%s restart_count=%d", bug_id, restart_count)
         return entry
 
     async def _start_container(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
-                               restart_count: int = 0) -> WorkerEntry:
+                               source_branch: str = "", restart_count: int = 0) -> WorkerEntry:
         environment = {
             "BUG_ID": bug_id,
             "REDIS_URL": self._redis_url,
             "project_id": project_id,
             "project_web_url": project_web_url,
             "job_id": job_id,
+            # Empty string keeps the historical default ("main") in the worker.
+            "BUG_SOURCE_BRANCH": source_branch or "",
             "ENV": self._env,
             # Per-bug worker containers are ephemeral — a persistent sqlite
             # checkpoint has no resume value and re-creates the shared-state
@@ -221,6 +238,7 @@ class DockerWorkerSpawner:
             project_id=project_id,
             project_web_url=project_web_url,
             job_id=job_id,
+            source_branch=source_branch,
             started_at=now,
             warmup_deadline=now + WARMUP_GRACE,
             restart_count=restart_count,
@@ -354,16 +372,19 @@ class EcsWorkerSpawner:
         import boto3
         self._ecs = boto3.client("ecs", region_name=region)
 
-    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                    source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[EcsSpawner] bug_id=%s already running, skip", bug_id)
             return self._registry.get(bug_id)
 
-        entry = await self._start_task(bug_id, project_id, project_web_url, job_id)
+        entry = await self._start_task(bug_id, project_id, project_web_url, job_id,
+                                       source_branch=source_branch)
         self._registry.register(entry)
         return entry
 
-    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                      source_branch: str = "") -> WorkerEntry:
         old = self._registry.get(bug_id)
         restart_count = (old.restart_count + 1) if old else 1
 
@@ -374,19 +395,22 @@ class EcsWorkerSpawner:
                 logger.warning("[EcsSpawner] terminate bug_id=%s: %s", bug_id, e)
 
         entry = await self._start_task(bug_id, project_id, project_web_url, job_id,
+                                       source_branch=source_branch,
                                        restart_count=restart_count)
         self._registry.register(entry)
         logger.info("[EcsSpawner] restarted bug_id=%s restart_count=%d", bug_id, restart_count)
         return entry
 
     async def _start_task(self, bug_id: str, project_id: str, project_web_url: str,
-                          job_id: str, restart_count: int = 0) -> WorkerEntry:
+                          job_id: str, source_branch: str = "", restart_count: int = 0) -> WorkerEntry:
         environment = {
             "BUG_ID": bug_id,
             "REDIS_URL": self._redis_url,
             "project_id": project_id,
             "project_web_url": project_web_url,
             "job_id": job_id,
+            # Empty string keeps the historical default ("main") in the worker.
+            "BUG_SOURCE_BRANCH": source_branch or "",
             # Worker uses the same GitLab-auth env as host-mode gitlab.com runs
             # (HTTPS + oauth2:<token>, no SSH). The spawner choice is decoupled
             # from this via WORKER_SPAWNER on the orchestrator side.
@@ -454,6 +478,7 @@ class EcsWorkerSpawner:
             project_id=project_id,
             project_web_url=project_web_url,
             job_id=job_id,
+            source_branch=source_branch,
             started_at=now,
             warmup_deadline=now + WARMUP_GRACE,
             restart_count=restart_count,
@@ -561,16 +586,19 @@ class K8sJobSpawner:
             logger.info("[K8sSpawner] using local kubeconfig")
         self._batch = client.BatchV1Api()
 
-    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                    source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[K8sSpawner] bug_id=%s already running, skip", bug_id)
             return self._registry.get(bug_id)
 
-        entry = await self._start_job(bug_id, project_id, project_web_url, job_id)
+        entry = await self._start_job(bug_id, project_id, project_web_url, job_id,
+                                      source_branch=source_branch)
         self._registry.register(entry)
         return entry
 
-    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str) -> WorkerEntry:
+    async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
+                      source_branch: str = "") -> WorkerEntry:
         old = self._registry.get(bug_id)
         restart_count = (old.restart_count + 1) if old else 1
 
@@ -581,13 +609,14 @@ class K8sJobSpawner:
                 logger.warning("[K8sSpawner] terminate bug_id=%s: %s", bug_id, e)
 
         entry = await self._start_job(bug_id, project_id, project_web_url, job_id,
+                                      source_branch=source_branch,
                                       restart_count=restart_count)
         self._registry.register(entry)
         logger.info("[K8sSpawner] restarted bug_id=%s restart_count=%d", bug_id, restart_count)
         return entry
 
     def _build_job(self, job_name: str, bug_id: str, project_id: str,
-                   project_web_url: str, job_id: str):
+                   project_web_url: str, job_id: str, source_branch: str = ""):
         from kubernetes import client
 
         env = [
@@ -596,6 +625,8 @@ class K8sJobSpawner:
             client.V1EnvVar(name="project_web_url", value=project_web_url),
             client.V1EnvVar(name="job_id", value=job_id),
             client.V1EnvVar(name="REDIS_URL", value=self._redis_url),
+            # Empty string keeps the historical default ("main") in the worker.
+            client.V1EnvVar(name="BUG_SOURCE_BRANCH", value=source_branch or ""),
             # Per-bug Job pod is ephemeral — sqlite checkpoint has no resume
             # value here AND re-creates the shared-state contamination hazard
             # (project invariant #4). Same rationale as Docker/ECS spawners.
@@ -645,11 +676,12 @@ class K8sJobSpawner:
         )
 
     async def _start_job(self, bug_id: str, project_id: str, project_web_url: str,
-                          job_id: str, restart_count: int = 0) -> WorkerEntry:
+                          job_id: str, source_branch: str = "", restart_count: int = 0) -> WorkerEntry:
         from kubernetes.client.rest import ApiException
 
         job_name = _k8s_job_name(bug_id, restart_count)
-        job = self._build_job(job_name, bug_id, project_id, project_web_url, job_id)
+        job = self._build_job(job_name, bug_id, project_id, project_web_url, job_id,
+                              source_branch=source_branch)
 
         loop = asyncio.get_event_loop()
         try:
@@ -677,6 +709,7 @@ class K8sJobSpawner:
             project_id=project_id,
             project_web_url=project_web_url,
             job_id=job_id,
+            source_branch=source_branch,
             started_at=now,
             warmup_deadline=now + WARMUP_GRACE,
             restart_count=restart_count,

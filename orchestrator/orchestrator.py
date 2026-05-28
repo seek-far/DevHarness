@@ -1,6 +1,7 @@
 #python -m orchestrator.orchestrator
 import asyncio
 import logging
+import secrets
 import sys
 from datetime import datetime
 
@@ -115,10 +116,23 @@ class Orchestrator:
             project_id = str(event.project_id)
             project_web_url = event.project_web_url
             job_id = str(event.job_id)
+            source_branch = event.source_branch or ""
             now = datetime.now()
-            bug_id = now.strftime("%Y_%m_%d-%H_%M_%S") + f"_{now.microsecond // 100000}"
-            logger.info("[Orchestrator] generate bug_id=%s", bug_id)
-            await self._spawner.spawn(bug_id, project_id, project_web_url, job_id)
+            # The deciseconds component (`now.microsecond // 100000`) gives
+            # 100 ms resolution — concurrent webhooks within that window
+            # collide (verified at N=8 burst; memory project_orchestrator_
+            # bug_id_race). Append a 4-hex-char tail drawn from
+            # `secrets.token_hex` (urandom-backed, not time-based, so it
+            # can't collide with the timestamp's own derivation) to make
+            # bug_id unique-per-webhook with overwhelming probability
+            # (collision odds 1/65536 per same-decisecond webhook pair).
+            bug_id = (
+                now.strftime("%Y_%m_%d-%H_%M_%S")
+                + f"_{now.microsecond // 100000}"
+                + f"_{secrets.token_hex(2)}"
+            )
+            logger.info("[Orchestrator] generate bug_id=%s source_branch=%s", bug_id, source_branch)
+            await self._spawner.spawn(bug_id, project_id, project_web_url, job_id, source_branch=source_branch)
 
         elif isinstance(event, ValidationStatusEvent):
             logger.info(

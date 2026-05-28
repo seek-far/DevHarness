@@ -21,6 +21,11 @@ class BugFixState(TypedDict, total=False):
     project_id: str
     project_web_url: str
     job_id: str
+    # The branch the failing CI pipeline ran on (GitLab mode); empty string
+    # in standalone/local-git/eval, which means "use the legacy 'main'
+    # default" in create_fix_branch / create_review. Threaded in by the
+    # orchestrator → spawner → worker chain (Item 3).
+    source_branch: str
 
     # ── trace / parse ─────────────────────────────────────────────────────────
     trace: str

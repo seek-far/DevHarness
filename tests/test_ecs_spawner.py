@@ -131,6 +131,9 @@ def test_spawn_calls_run_task_with_expected_overrides():
     assert env["project_id"] == "42"
     assert env["project_web_url"] == "https://gitlab.com/g/p"
     assert env["job_id"] == "job-9"
+    # Empty default keeps worker behaviour byte-identical on legacy callers
+    # that don't pass source_branch (worker uses "main" as fallback).
+    assert env["BUG_SOURCE_BRANCH"] == ""
     # Reuse the established gitlab.com auth path — NOT a new "ecs" worker env.
     assert env["ENV"] == "gitlab_saas"
     # Ephemeral task; persistent checkpoint would re-create the shared-state
@@ -139,6 +142,25 @@ def test_spawn_calls_run_task_with_expected_overrides():
 
     assert entry.bug_id == "bug-1"
     assert entry.process.pid == "abc123"
+
+
+def test_spawn_propagates_source_branch_to_container_env():
+    """Item 3: orchestrator threads source_branch from BugReportedEvent
+    through spawn() → BUG_SOURCE_BRANCH on the worker task. The worker
+    reads this to pick the right base for fix-branch + MR target."""
+    spawner, ecs = _make_spawner()
+    ecs.run_task.return_value = _run_task_success()
+
+    entry = asyncio.run(spawner.spawn(
+        bug_id="bug-fb", project_id="42",
+        project_web_url="https://gitlab.com/g/p", job_id="job-9",
+        source_branch="feature/login",
+    ))
+
+    override = ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]
+    env = {e["name"]: e["value"] for e in override["environment"]}
+    assert env["BUG_SOURCE_BRANCH"] == "feature/login"
+    assert entry.source_branch == "feature/login"
 
 
 def test_host_network_mode_omits_networkconfiguration():

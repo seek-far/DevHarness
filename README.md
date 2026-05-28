@@ -68,7 +68,7 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
 
 ### GitLab Mode (Full Pipeline)
 
-Listens for GitLab CI failure webhooks, diagnoses and fixes the bug automatically, then opens a merge request — no human intervention needed.
+Listens for GitLab CI failure webhooks, diagnoses and fixes the bug automatically, then opens a merge request — no human intervention needed. A failing pipeline on any branch *other than* one starting with `auto/` (the bot's own namespace) is treated as a bug; the fix branch is created off the failing pipeline's ref and the MR is opened back into that same ref, so a `feature/login` failure produces an MR targeting `feature/login`, not main.
 
 ```
 GitLab CI fails
@@ -918,10 +918,12 @@ orchestrator's HealthMonitor owns retries; `ttlSecondsAfterFinished` self-GC;
 - Concurrent-worker scaling: verified 2026-05-27 on a fresh bare-Ubuntu
   host (56 CPU / 62 GiB) with 7 truly-simultaneous workers (N=8 strict
   burst via `tools/trigger_concurrent_pipelines.py --concurrency 8`,
-  one bug_id-collision dedup is a known orchestrator race when many
-  webhooks land within the same wall-clock second) — 0 HealthMonitor
-  false-positive restarts, all spawned workers reached `outcome=fixed`
-  except where the LLM itself produced a bad patch.
+  one bug_id-collision dedup was a known orchestrator race when many
+  webhooks land within the same wall-clock second; closed by the
+  urandom 4-hex tail now appended to every orchestrator-minted bug_id)
+  — 0 HealthMonitor false-positive restarts, all spawned workers
+  reached `outcome=fixed` except where the LLM itself produced a bad
+  patch.
 
 ```bash
 # 1. populate settings/worker_gitlab_saas.env with GITLAB_PRIVATE_TOKEN + LLM_API_KEY

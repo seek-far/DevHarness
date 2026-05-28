@@ -105,6 +105,7 @@ class LangGraphAgent(Agent):
             "project_id":      bug_input.project_id,
             "project_web_url": bug_input.project_web_url,
             "job_id":          bug_input.job_id,
+            "source_branch":   bug_input.source_branch or "",
             "llm_retry_count": 0,
             "fix_retry_count": 0,
         }

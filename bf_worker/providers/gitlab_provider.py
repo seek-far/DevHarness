@@ -661,12 +661,18 @@ class GitLabProvider(SourceProvider, VCSProvider, ReviewProvider):
         self._repo_ready[bug_id] = repo_path
         return repo_path
 
-    def create_fix_branch(self, bug_id: str, repo_path: Path) -> dict:
+    def create_fix_branch(self, bug_id: str, repo_path: Path, base_branch: str = "main") -> dict:
         """Idempotent. Also probes for an existing open/merged MR on the
         deterministic branch and returns it under `existing_mr` so the graph
-        can short-circuit (R10) when the fix is already merged."""
+        can short-circuit (R10) when the fix is already merged.
+
+        `base_branch` defaults to "main" so legacy callers (eval, local-git,
+        any caller that doesn't pass it) behave byte-identically; GitLab-mode
+        callers thread the failing pipeline's ref through from
+        BugReportedEvent so feature-branch pipelines get a feature-branch
+        baseline + MR target."""
         repo = Repo(repo_path=str(repo_path), repo_url=self._project_web_url)
-        result = repo.create_fix_branch(bug_id=bug_id)
+        result = repo.create_fix_branch(bug_id=bug_id, base_branch=base_branch or "main")
 
         # R10 probe: if a remote branch already exists, look up its MR. Only
         # a remote branch (not a local-only one) can have an MR attached, so
@@ -689,8 +695,17 @@ class GitLabProvider(SourceProvider, VCSProvider, ReviewProvider):
 
     def create_review(self, repo_path: Path, state: dict) -> dict:
         repo = Repo(repo_path=str(repo_path), repo_url=self._project_web_url)
+        # `base_branch` lands in state via create_fix_branch (it's the
+        # branch we rebased off). MR target = same branch, so a fix for
+        # a feature-branch pipeline MRs back to that feature branch, not
+        # to main. Falls back to "main" when state didn't carry it
+        # (legacy / eval). state["source_branch"] is the orchestrator-
+        # threaded value; base_branch wins because it reflects what
+        # create_fix_branch actually used.
+        target_branch = state.get("base_branch") or state.get("source_branch") or "main"
         return repo.gitlab_create_merge_request(
             source_branch=state["fix_branch_name"],
+            target_branch=target_branch,
             title=f"[auto-fix] bug {state['bug_id']}",
             description=(
                 f"Automatically generated fix for bug `{state['bug_id']}`.\n\n"

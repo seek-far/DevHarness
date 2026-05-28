@@ -23,6 +23,17 @@ from services.runtime_context import get_provider
 logger = logging.getLogger(__name__)
 
 
+def _call_create_fix_branch(provider, bug_id, repo_path, base_branch):
+    """Call provider.create_fix_branch with base_branch when the provider
+    accepts it. LocalGit / LocalNoGit providers stick to the legacy
+    two-arg signature; only GitLabProvider currently honours base_branch.
+    """
+    try:
+        return provider.create_fix_branch(bug_id, repo_path, base_branch=base_branch)
+    except TypeError:
+        return provider.create_fix_branch(bug_id, repo_path)
+
+
 def create_fix_branch(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
     provider = get_provider(config)
     bug_id = state["bug_id"]
@@ -46,8 +57,14 @@ def create_fix_branch(state: BugFixState, config: Optional[RunnableConfig] = Non
         logger.info("working tree restored on branch %s", existing_branch)
         return {}
 
-    logger.info("creating fix branch for bug_id=%s", bug_id)
-    result = provider.create_fix_branch(bug_id, repo_path)
+    # The orchestrator threads the failing pipeline's ref into state as
+    # `source_branch`. Empty string == legacy default ("main"), so
+    # standalone / local-git / eval (which never set it) keep working
+    # byte-identically. Providers that ignore the kwarg (LocalGit,
+    # LocalNoGit) still work because we use a duck-typed wrapper.
+    base_branch = state.get("source_branch") or "main"
+    logger.info("creating fix branch for bug_id=%s base_branch=%s", bug_id, base_branch)
+    result = _call_create_fix_branch(provider, bug_id, repo_path, base_branch)
     if result is None:
         raise RuntimeError("create_fix_branch returned None")
 

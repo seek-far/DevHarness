@@ -41,7 +41,12 @@ class ParseError(Exception):
 #        (f"auto/bf/{bug_id}-{base_commit[:8]}"). Without this the fix-branch
 #        CI result was misclassified as OtherEvent and never routed back to
 #        the waiting worker (wait_ci_result timeout, no MR).
-_BUG_ID_RE = r"\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}_\d{1}"
+#
+# The trailing `_[0-9a-f]{4}` is the urandom anti-collision tail appended
+# by Orchestrator._handle_message. Pre-tail bug_ids (legacy fixtures /
+# old integration_test runs) still match because the tail group is
+# optional.
+_BUG_ID_RE = r"\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}_\d{1}(?:_[0-9a-f]{4})?"
 _FIX_BRANCH_PATTERNS = (
     re.compile(rf"^auto/bug_({_BUG_ID_RE})-patch_(\d{{2}}_\d{{2}}_\d{{2}}_\d{{1}})$"),
     re.compile(rf"^auto/bf/({_BUG_ID_RE})-[0-9a-f]{{8}}$"),
@@ -59,27 +64,44 @@ def parse_branch(branch_name: str):
 def parse_message(raw_bytes: bytes) -> ParsedEvent:
     payload = json.loads(raw_bytes)
     logger.debug(f"{payload=}")
-    
+
     if "object_attributes" not in payload:
         raise ParseError("payload does not have key object_attributes.")
     branch_name = payload["object_attributes"]["ref"]
     object_attributes_status = payload["object_attributes"]["status"]
     parse_branch_res = parse_branch(branch_name)
     is_auto_fix_branch = bool(parse_branch_res)
-    logger.debug(f"branch_name={branch_name}, is_auto_fix_branch={is_auto_fix_branch}, object_attributes_status={object_attributes_status}")
-    if not is_auto_fix_branch:
-        if payload["object_kind"] == "pipeline" and  object_attributes_status== "failed":
-            logger.info("BugReportedEvent")
-            project_id = payload.get("project",{}).get("id","")
-            project_web_url = payload.get("project",{}).get("web_url","")
-            job_id = payload.get("builds",[{}])[0].get("id","")
-            return BugReportedEvent(project_id=project_id, project_web_url=project_web_url, job_id=job_id, raw=payload)
-    else:
+    # Any ref under `auto/` is the worker's own namespace — either a
+    # recognised fix-branch (handled by parse_branch above) or some
+    # transient auto-* ref we should never treat as a bug source.
+    # Without this guard, a failed pipeline on `auto/something-unknown`
+    # would (a) wrongly spawn a worker and (b) recurse if that worker
+    # later pushed its own auto/bf/... branch.
+    is_auto_ref = branch_name.startswith("auto/")
+    logger.debug(f"branch_name={branch_name}, is_auto_fix_branch={is_auto_fix_branch}, is_auto_ref={is_auto_ref}, object_attributes_status={object_attributes_status}")
+    if is_auto_fix_branch:
         bug_id = parse_branch_res.groups()[0]
         logger.info("ValidationStatusEvent")
-        
         return ValidationStatusEvent(bug_id=bug_id, status=object_attributes_status, raw=payload)
-    logger.info("OtherEvent")       
+    if is_auto_ref:
+        logger.info("OtherEvent (auto/* ref, not a recognised fix-branch shape)")
+        return OtherEvent(raw=payload)
+    if payload["object_kind"] == "pipeline" and  object_attributes_status== "failed":
+        logger.info("BugReportedEvent")
+        project_id = payload.get("project",{}).get("id","")
+        project_web_url = payload.get("project",{}).get("web_url","")
+        job_id = payload.get("builds",[{}])[0].get("id","")
+        # `ref` is the branch the failed pipeline ran on. Threading it
+        # through lets the worker rebase/MR against the right base
+        # (Item 3 — was hardcoded to "main" everywhere downstream).
+        return BugReportedEvent(
+            project_id=project_id,
+            project_web_url=project_web_url,
+            job_id=job_id,
+            source_branch=branch_name,
+            raw=payload,
+        )
+    logger.info("OtherEvent")
     return OtherEvent(raw=payload)
     
 """    
