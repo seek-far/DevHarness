@@ -6,8 +6,19 @@ While a stress test fires N concurrent webhooks, this script samples Redis
 every --interval-ms ticks and writes one TSV row per sample with:
 
   t_wall_ms             unix-ms wall clock at sample time
-  queue_depth           XLEN gateway:stream — work the orchestrator hasn't
-                        XREADGROUP'd off yet (post-ACK)
+  stream_total          XLEN gateway:stream — TOTAL entries ever XADD'd to
+                        the stream. Monotonic; NOT a backlog. Redis Streams
+                        don't auto-trim on ACK, so this grows forever
+                        across test runs. Useful for throughput trends, not
+                        for "how much work is queued".
+  consumer_pending      XPENDING total — entries delivered to a consumer
+                        but not yet ACK'd. = "work in flight that an
+                        XREADGROUP returned but the handler hasn't
+                        completed".
+  consumer_lag          XINFO GROUPS lag — entries present in the stream
+                        but never delivered to the consumer group yet.
+                        = "work the orchestrator hasn't even read".
+                        TRUE backlog = consumer_pending + consumer_lag.
   active_workers        count of keys matching `worker:heartbeat:*` — workers
                         with a still-live heartbeat TTL (the same liveness
                         signal HealthMonitor checks)
@@ -22,15 +33,17 @@ every --interval-ms ticks and writes one TSV row per sample with:
 Post-process for the four-phase view: join the TSV's t_wall_ms with
 phase_marker INFO log lines (grep `phase_marker` across gateway / orchestrator
 / worker stdout) by bug_id. Achieved concurrency = max(active_workers) over
-the run; time-weighted average = mean(active_workers) across samples.
+the run; time-weighted average = mean(active_workers) across samples. Real
+queue backlog = max(consumer_pending + consumer_lag).
 
-Configuration is GitLab-mode-aware via --redis-url; defaults to the
-local_multi_process Redis DB so the script works out of the box against the
-bundled dev stack. Stops cleanly on SIGINT.
+Configuration is GitLab-mode-aware via --redis-url + --consumer-group; both
+default to the local_multi_process stack so the script works out of the box
+against the bundled dev stack. Stops cleanly on SIGINT.
 
 Usage:
   # baseline run, sample every 500ms, write to TSV
   python tools/load_sampler.py --redis-url redis://localhost:6379/1 \\
+      --consumer-group orchestrator-group-mp \\
       --out /tmp/sample-$(date +%s).tsv
 
   # tighter cadence for a quick burst
@@ -52,13 +65,19 @@ import redis
 DEFAULT_REDIS_URL = "redis://localhost:6379/1"
 DEFAULT_INTERVAL_MS = 500
 DEFAULT_GATEWAY_STREAM = "gateway:stream"
+DEFAULT_CONSUMER_GROUP = "orchestrator-group-mp"
 DEFAULT_HEARTBEAT_PATTERN = "worker:heartbeat:*"
 
 # TSV columns. Keep this list stable — downstream parsers depend on the
-# order. Add new columns at the end.
+# order. Add new columns at the end. NOTE: 2026-05-28 column rename —
+# `queue_depth` → `stream_total` + new `consumer_pending` + `consumer_lag`
+# columns to distinguish "historical XLEN" from "real backlog"; old TSVs
+# from before that change won't parse without manual remapping.
 COLUMNS = (
     "t_wall_ms",
-    "queue_depth",
+    "stream_total",
+    "consumer_pending",
+    "consumer_lag",
     "active_workers",
     "active_workers_csv",
     "hb_age_ms_p50",
@@ -87,15 +106,78 @@ def scan_heartbeats(r: redis.Redis, pattern: str) -> list[tuple[str, bytes | Non
     return out
 
 
+def _stream_metrics(
+    r: redis.Redis, gateway_stream: str, consumer_group: str
+) -> tuple[int, int, int]:
+    """Return (stream_total, consumer_pending, consumer_lag).
+
+    stream_total = XLEN — total entries ever added (monotonic across runs,
+                   because Redis Streams don't auto-trim on ACK).
+    consumer_pending = XPENDING total — entries delivered to a consumer in
+                       the group but not yet ACK'd. Stuck or in-progress
+                       handlers show up here.
+    consumer_lag = XINFO GROUPS `lag` — entries in the stream the group
+                   hasn't read at all yet (= un-delivered backlog). On
+                   Redis < 7.0 `lag` may be reported as None; we surface
+                   that as -1 so the analyzer can flag it rather than
+                   silently treat as 0.
+
+    Any branch that hits a "stream/group doesn't exist yet" returns zeros
+    (no webhooks landed = no work = no backlog), the only soft-error path.
+    Real Redis errors propagate.
+    """
+    try:
+        stream_total = int(r.xlen(gateway_stream))
+    except redis.ResponseError:
+        return (0, 0, 0)
+
+    try:
+        xp = r.xpending(gateway_stream, consumer_group)
+        # XPENDING (summary form) returns a dict in redis-py:
+        #   {"pending": int, "min": id, "max": id, "consumers": [...]}
+        # or in earlier versions a 4-tuple. Handle both.
+        if isinstance(xp, dict):
+            consumer_pending = int(xp.get("pending", 0))
+        elif isinstance(xp, (list, tuple)) and xp:
+            consumer_pending = int(xp[0])
+        else:
+            consumer_pending = 0
+    except redis.ResponseError:
+        # Group doesn't exist yet — orchestrator hasn't started consuming.
+        return (stream_total, 0, 0)
+
+    consumer_lag = -1
+    try:
+        groups = r.xinfo_groups(gateway_stream)
+        for g in groups:
+            # xinfo_groups returns a list of dicts (keys may be bytes
+            # depending on decode_responses); normalise to str.
+            name = g.get(b"name") if b"name" in g else g.get("name")
+            if isinstance(name, bytes):
+                name = name.decode()
+            if name == consumer_group:
+                lag = g.get(b"lag") if b"lag" in g else g.get("lag")
+                if lag is None:
+                    consumer_lag = -1   # Redis < 7.0; lag unknown
+                else:
+                    consumer_lag = int(lag)
+                break
+    except redis.ResponseError:
+        pass
+
+    return (stream_total, consumer_pending, consumer_lag)
+
+
 def compute_sample(
-    r: redis.Redis, gateway_stream: str, heartbeat_pattern: str
+    r: redis.Redis,
+    gateway_stream: str,
+    heartbeat_pattern: str,
+    consumer_group: str = DEFAULT_CONSUMER_GROUP,
 ) -> dict:
     t_wall_ms = time.time_ns() // 1_000_000
-    try:
-        queue_depth = int(r.xlen(gateway_stream))
-    except redis.ResponseError:
-        # Stream doesn't exist yet (no webhooks landed) — treat as 0.
-        queue_depth = 0
+    stream_total, consumer_pending, consumer_lag = _stream_metrics(
+        r, gateway_stream, consumer_group
+    )
     hbs = scan_heartbeats(r, heartbeat_pattern)
     bug_ids = sorted(b for b, _ in hbs)
     ages_ms: list[int] = []
@@ -110,7 +192,9 @@ def compute_sample(
         ages_ms.append(max(0, t_wall_ms - hb_ts_ms))
     return {
         "t_wall_ms": t_wall_ms,
-        "queue_depth": queue_depth,
+        "stream_total": stream_total,
+        "consumer_pending": consumer_pending,
+        "consumer_lag": consumer_lag,
         "active_workers": len(hbs),
         "active_workers_csv": ",".join(bug_ids),
         "hb_age_ms_p50": int(statistics.median(ages_ms)) if ages_ms else "",
@@ -129,6 +213,11 @@ def main(argv=None) -> int:
     p.add_argument("--interval-ms", type=int, default=DEFAULT_INTERVAL_MS,
                    help=f"sample cadence in ms (default: {DEFAULT_INTERVAL_MS})")
     p.add_argument("--gateway-stream", default=DEFAULT_GATEWAY_STREAM)
+    p.add_argument("--consumer-group", default=DEFAULT_CONSUMER_GROUP,
+                   help="orchestrator consumer group (depends on ENV: "
+                        "orchestrator-group-mp / orchestrator-group-saas / "
+                        "orchestrator-group). The XPENDING+lag metrics are "
+                        "scoped to this group.")
     p.add_argument("--heartbeat-pattern", default=DEFAULT_HEARTBEAT_PATTERN)
     p.add_argument("--out", type=Path, default=None,
                    help="TSV output path (default: stdout)")
@@ -159,7 +248,9 @@ def main(argv=None) -> int:
     samples = 0
     next_tick = time.monotonic()
     while not stop["flag"] and time.monotonic() < t_end:
-        sample = compute_sample(r, args.gateway_stream, args.heartbeat_pattern)
+        sample = compute_sample(
+            r, args.gateway_stream, args.heartbeat_pattern, args.consumer_group
+        )
         write_row(out, sample)
         samples += 1
         # Pace by absolute targets, not sleep(interval) — keeps the cadence

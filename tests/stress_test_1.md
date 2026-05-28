@@ -167,14 +167,17 @@ across attempts within the same `fix()` would halve `apply_test`
 wallclock on multi-attempt fixes. Not a problem on this run (every fix
 landed first-try) but a known multiplier for harder bugs.
 
-### 5. `queue_depth` of 313 is misleading (caveat)
+### 5. `queue_depth` of 313 was misleading (now fixed)
 
-`load_sampler.compute_sample` calls `XLEN gateway:stream`. This returns
-the **total entries** ever added, not the **consumer-group backlog**.
-Validation events (CI result webhooks) and prior-test residue inflate
-the number. A consumer-backlog metric would require
-`XPENDING gateway:stream orchestrator-group` — additive change worth
-making in the next iteration.
+The original `queue_depth` column was `XLEN gateway:stream` — total
+entries ever XADD'd, not consumer-group backlog. Validation events and
+prior-test residue inflated the number; the 313 looked alarming but was
+just stream-history accumulation. **Fixed 2026-05-28**: the sampler now
+writes three separate columns — `stream_total` (XLEN, monotonic
+throughput proxy), `consumer_pending` (XPENDING), `consumer_lag`
+(XINFO GROUPS lag). The analyzer reports real backlog =
+`consumer_pending + consumer_lag`. On a healthy run both should stay
+~0; `stream_total` deltas are throughput, not a backlog metric.
 
 ### 6. LLM call distribution is healthy
 
@@ -193,9 +196,9 @@ distribution, not a stress symptom.
 
 ## Recommendations (priority-ordered)
 
-1. **Fix the `queue_depth` semantic** in `load_sampler`: switch to
-   `XPENDING <stream> <group>` (or both, labelled separately). Cheap,
-   removes the 313 false alarm.
+1. ~~**Fix the `queue_depth` semantic** in `load_sampler`.~~ Done
+   2026-05-28: split into `stream_total` / `consumer_pending` /
+   `consumer_lag`, with backlog = pending + lag as the headline.
 2. **Cache `venv` across `apply_test` attempts** within one `fix()` —
    re-use the venv if `requirements.txt` hasn't changed. Saves ~4 s per
    retry on multi-attempt fixes.

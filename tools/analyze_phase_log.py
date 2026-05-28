@@ -361,6 +361,18 @@ def aggregate_phase3_subphases(bugs: dict[str, dict]) -> list[tuple[str, dict]]:
 
 def parse_sampler_tsv(path: Path) -> list[dict]:
     rows: list[dict] = []
+    # All integer-valued columns the sampler may emit. New columns
+    # (stream_total/consumer_pending/consumer_lag) coexist with the
+    # legacy column name (queue_depth) so a TSV written before the
+    # 2026-05-28 rename still parses without crashing — `sampler_summary`
+    # then promotes legacy queue_depth into stream_total for display.
+    int_cols = (
+        "t_wall_ms",
+        "stream_total", "consumer_pending", "consumer_lag",
+        "queue_depth",   # legacy
+        "active_workers",
+    )
+    nullable_int_cols = ("hb_age_ms_p50", "hb_age_ms_max")
     with path.open("r", encoding="utf-8") as fp:
         header = fp.readline().rstrip("\n").split("\t")
         for line in fp:
@@ -368,13 +380,13 @@ def parse_sampler_tsv(path: Path) -> list[dict]:
             if len(cells) != len(header):
                 continue
             row = dict(zip(header, cells))
-            for k in ("t_wall_ms", "queue_depth", "active_workers"):
+            for k in int_cols:
                 if k in row and row[k] != "":
                     try:
                         row[k] = int(row[k])
                     except ValueError:
                         row[k] = None
-            for k in ("hb_age_ms_p50", "hb_age_ms_max"):
+            for k in nullable_int_cols:
                 if k in row and row[k] != "":
                     try:
                         row[k] = int(row[k])
@@ -389,13 +401,45 @@ def parse_sampler_tsv(path: Path) -> list[dict]:
 def sampler_summary(rows: list[dict]) -> dict:
     """Achieved concurrency + queue + heartbeat stats from the TSV.
 
+    The TRUE backlog (orchestrator falling behind) is reported as
+    `backlog_max` = max(consumer_pending + consumer_lag) across samples.
+    `stream_total` is reported separately (and as a delta over the run)
+    because XLEN is monotonic — it grows even when the orchestrator is
+    keeping up perfectly. Don't conflate them.
+
+    Backward compat: a TSV from before the 2026-05-28 rename carries
+    `queue_depth` (= XLEN), which we map to stream_total. Pending/lag are
+    reported as None because the old TSV didn't capture them.
+
     Achieved concurrency intentionally distinguishes "max" (peak parallel
     workers, the burst metric) from "time-weighted mean" (the average
     in-flight count weighted by inter-sample interval — closer to "effective
     parallelism" than a simple sample-mean when sampling cadence varies).
     """
     aw = [r["active_workers"] for r in rows if isinstance(r.get("active_workers"), int)]
-    qd = [r["queue_depth"] for r in rows if isinstance(r.get("queue_depth"), int)]
+    # Legacy column promotion: old TSVs carry queue_depth, new carry
+    # stream_total. Fall back so old runs still render.
+    def _stream_total(r: dict):
+        v = r.get("stream_total")
+        if isinstance(v, int):
+            return v
+        v = r.get("queue_depth")
+        return v if isinstance(v, int) else None
+
+    st = [v for v in (_stream_total(r) for r in rows) if v is not None]
+    pending = [r["consumer_pending"] for r in rows if isinstance(r.get("consumer_pending"), int)]
+    # consumer_lag = -1 means Redis < 7.0 (couldn't measure); exclude from stats.
+    lag = [r["consumer_lag"] for r in rows
+           if isinstance(r.get("consumer_lag"), int) and r["consumer_lag"] >= 0]
+    # Real backlog = pending + lag, sample by sample. Skip samples where
+    # either is missing/unknown so the max isn't quietly understated.
+    backlog = []
+    for r in rows:
+        p = r.get("consumer_pending")
+        l = r.get("consumer_lag")
+        if isinstance(p, int) and isinstance(l, int) and l >= 0:
+            backlog.append(p + l)
+
     hb_p50 = [r["hb_age_ms_p50"] for r in rows if isinstance(r.get("hb_age_ms_p50"), int)]
     hb_max = [r["hb_age_ms_max"] for r in rows if isinstance(r.get("hb_age_ms_max"), int)]
 
@@ -418,8 +462,20 @@ def sampler_summary(rows: list[dict]) -> dict:
         "active_workers_max": max(aw) if aw else None,
         "active_workers_mean": (statistics.mean(aw) if aw else None),
         "active_workers_time_weighted_mean": tw_mean,
-        "queue_depth_max": max(qd) if qd else None,
-        "queue_depth_mean": (statistics.mean(qd) if qd else None),
+        # Real backlog (the metric you actually want to alert on).
+        "backlog_max":            max(backlog) if backlog else None,
+        "consumer_pending_max":   max(pending) if pending else None,
+        "consumer_lag_max":       max(lag) if lag else None,
+        "consumer_lag_supported": bool(lag) or any(
+            isinstance(r.get("consumer_lag"), int) and r["consumer_lag"] >= 0
+            for r in rows
+        ),
+        # Stream-level monotonic info, NOT backlog. Delta over the run
+        # ≈ webhook throughput; absolute value is meaningless across runs
+        # because the stream isn't trimmed.
+        "stream_total_first":     st[0] if st else None,
+        "stream_total_last":      st[-1] if st else None,
+        "stream_total_delta":     (st[-1] - st[0]) if st else None,
         "hb_age_ms_p50": int(statistics.median(hb_p50)) if hb_p50 else None,
         "hb_age_ms_max": max(hb_max) if hb_max else None,
     }
@@ -485,16 +541,32 @@ def render_report(bugs: dict[str, dict], agg: dict, sampler: dict | None) -> str
         )
     if sampler is not None:
         lines.append("")
-        lines.append("=== Achieved concurrency (from sampler) ===")
+        lines.append("=== Achieved concurrency + backlog (from sampler) ===")
         lines.append(f"samples: {sampler['samples']}")
         lines.append(
             f"active_workers   max={_fmt(sampler['active_workers_max']):>5s}  "
             f"mean={_fmt(sampler['active_workers_mean']):>6s}  "
             f"time_weighted_mean={_fmt(sampler['active_workers_time_weighted_mean']):>6s}"
         )
+        # Real backlog headline. = orchestrator falling behind. Healthy
+        # run should keep this ~0; non-zero peak means the consumer loop
+        # lagged the producer.
         lines.append(
-            f"queue_depth      max={_fmt(sampler['queue_depth_max']):>5s}  "
-            f"mean={_fmt(sampler['queue_depth_mean']):>6s}"
+            f"backlog (pending+lag)  max={_fmt(sampler['backlog_max']):>5s}  "
+            f"  (pending max={_fmt(sampler['consumer_pending_max']):>4s}, "
+            f"lag max={_fmt(sampler['consumer_lag_max']):>4s})"
+        )
+        if not sampler.get("consumer_lag_supported"):
+            lines.append(
+                "                       (note: consumer_lag unavailable — "
+                "Redis < 7.0 doesn't expose XINFO GROUPS lag; pending only)"
+            )
+        # Stream throughput. NOT backlog — purely "how many webhooks
+        # landed on the stream during the run". Stream is never trimmed,
+        # so the absolute value is meaningless across runs.
+        lines.append(
+            f"stream_total     delta={_fmt(sampler['stream_total_delta']):>5s}  "
+            f"  (XLEN first→last; monotonic, NOT a backlog)"
         )
         lines.append(
             f"hb_age_ms        p50={_fmt(sampler['hb_age_ms_p50']):>5s}  "

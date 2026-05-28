@@ -169,10 +169,11 @@ def test_sampler_summary_time_weighted_mean(tmp_path):
 
     tsv = tmp_path / "s.tsv"
     tsv.write_text(
-        "t_wall_ms\tqueue_depth\tactive_workers\tactive_workers_csv\thb_age_ms_p50\thb_age_ms_max\n"
-        "1000\t1\t4\tBUG-A,BUG-B,BUG-C,BUG-D\t100\t200\n"
-        "1200\t0\t0\t\t\t\n"
-        "2000\t0\t0\t\t\t\n",
+        "t_wall_ms\tstream_total\tconsumer_pending\tconsumer_lag\tactive_workers\t"
+        "active_workers_csv\thb_age_ms_p50\thb_age_ms_max\n"
+        "1000\t1\t0\t1\t4\tBUG-A,BUG-B,BUG-C,BUG-D\t100\t200\n"
+        "1200\t1\t0\t0\t0\t\t\t\n"
+        "2000\t1\t0\t0\t0\t\t\t\n",
         encoding="utf-8",
     )
     rows = mod.parse_sampler_tsv(tsv)
@@ -182,6 +183,52 @@ def test_sampler_summary_time_weighted_mean(tmp_path):
     # Weighted: 4 * 200 ms + 0 * 800 ms = 800 active-worker-ms over 1000 ms
     # ≈ 0.8 mean concurrency — the right way to talk about achieved parallelism.
     assert summary["active_workers_time_weighted_mean"] == 0.8
+
+
+def test_sampler_summary_separates_backlog_from_stream_total(tmp_path):
+    """Real backlog = pending + lag; stream_total is monotonic XLEN, NOT
+    a backlog. The summary must report them separately so a non-zero
+    stream_total doesn't get mistaken for "the orchestrator is falling
+    behind"."""
+    from tools import analyze_phase_log as mod
+
+    tsv = tmp_path / "s.tsv"
+    tsv.write_text(
+        "t_wall_ms\tstream_total\tconsumer_pending\tconsumer_lag\tactive_workers\t"
+        "active_workers_csv\thb_age_ms_p50\thb_age_ms_max\n"
+        # Sample 1: 100 messages ever, 2 in flight + 3 unread = backlog 5
+        "1000\t100\t2\t3\t1\tBUG-A\t100\t200\n"
+        # Sample 2: 105 messages now (5 new arrived), 0 in flight + 0 unread
+        "1500\t105\t0\t0\t2\tBUG-A,BUG-B\t150\t250\n",
+        encoding="utf-8",
+    )
+    summary = mod.sampler_summary(mod.parse_sampler_tsv(tsv))
+    assert summary["backlog_max"] == 5
+    assert summary["consumer_pending_max"] == 2
+    assert summary["consumer_lag_max"] == 3
+    # stream_total grew by 5 (105 - 100) — this is throughput, not backlog.
+    assert summary["stream_total_delta"] == 5
+
+
+def test_sampler_summary_legacy_queue_depth_column_still_renders(tmp_path):
+    """A TSV produced by the pre-2026-05-28 sampler carries `queue_depth`
+    only. The summary should promote it to stream_total for display so
+    historical runs still produce a usable report (pending/lag stay None,
+    correctly indicating the data isn't there)."""
+    from tools import analyze_phase_log as mod
+
+    tsv = tmp_path / "legacy.tsv"
+    tsv.write_text(
+        "t_wall_ms\tqueue_depth\tactive_workers\tactive_workers_csv\t"
+        "hb_age_ms_p50\thb_age_ms_max\n"
+        "1000\t10\t1\tBUG-A\t100\t200\n"
+        "2000\t12\t2\tBUG-A,BUG-B\t150\t250\n",
+        encoding="utf-8",
+    )
+    summary = mod.sampler_summary(mod.parse_sampler_tsv(tsv))
+    assert summary["stream_total_delta"] == 2
+    assert summary["backlog_max"] is None
+    assert summary["consumer_pending_max"] is None
 
 
 # ── render ──────────────────────────────────────────────────────────────────
@@ -313,8 +360,9 @@ def test_render_report_includes_all_sections(tmp_path):
 
     tsv = tmp_path / "s.tsv"
     tsv.write_text(
-        "t_wall_ms\tqueue_depth\tactive_workers\tactive_workers_csv\thb_age_ms_p50\thb_age_ms_max\n"
-        "1000\t1\t1\tBUG-A\t100\t200\n",
+        "t_wall_ms\tstream_total\tconsumer_pending\tconsumer_lag\tactive_workers\t"
+        "active_workers_csv\thb_age_ms_p50\thb_age_ms_max\n"
+        "1000\t1\t0\t0\t1\tBUG-A\t100\t200\n",
         encoding="utf-8",
     )
     sampler = mod.sampler_summary(mod.parse_sampler_tsv(tsv))
@@ -326,4 +374,7 @@ def test_render_report_includes_all_sections(tmp_path):
     assert "Phase-2 sub-breakdown" in report
     assert "Phase-3 sub-breakdown" in report
     assert "Achieved concurrency" in report
-    assert "active_workers" in report
+    # The renamed sampler section uses "backlog" as the headline — pin so
+    # a regression to a "queue_depth" label trips this test.
+    assert "backlog" in report
+    assert "stream_total" in report
