@@ -1,0 +1,43 @@
+# Single-backend gateway config: Qwen3 (Alibaba Dashscope) + persistent
+# response cache. Same backend layout as `qwen3_api.yaml`; the only
+# difference is the `cache:` block below.
+#
+# Mode semantics (see llm_gateway/config.py docstring for details):
+#   disabled — pass-through (legacy)
+#   record   — pass-through, but persist every successful response
+#   replay   — strict cache-only; miss returns 409, never touches LLM
+#   cache    — replay on hit, record on miss
+#
+# For stress testing: run once in `record` to warm the cache, then flip
+# to `cache` (or `replay` for deterministic regression) and the second
+# pass costs zero tokens. The sqlite file at db_path is the entire
+# cache — copy it to another machine with cp / scp / rsync to share.
+#
+# replay_with_latency = true makes a cache hit sleep to the original
+# recorded wallclock before returning — keeps stress-test phase-3
+# latency realistic even though no token is being spent.
+
+backends:
+  - name: qwen3_dashscope
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3-coder-480b-a35b-instruct
+    api_key_env: DASHSCOPE_API_KEY
+    request_timeout: 60
+
+inference_policy:
+  type: ordered
+  order: [qwen3_dashscope]
+
+cache:
+  mode: cache                        # disabled | record | replay | cache
+  db_path: /var/lib/sdlcma/llm_cache.db
+  replay_with_latency: true
+  log_every_n: 100                   # 0 = never emit phase=cache_summary
+  # When true, the cache key strips per-run volatile patterns (ISO-8601
+  # timestamps, runner IDs, Docker SHAs, detached-HEAD commit, GitLab
+  # correlation IDs, section_start epoch) from message content before
+  # hashing. Required for stress-test replay against GitLab CI — every
+  # webhook stamps the trace with fresh timestamps, so without this
+  # the cache key drifts every run and hit rate stays at 0. See
+  # tests/test_llm_gateway_cache_normalize.py for the pattern set.
+  normalize_content: true

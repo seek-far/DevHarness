@@ -697,13 +697,16 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 
 `llm_gateway/` is an independent FastAPI service that routes OpenAI-compatible requests to one of N configured backends per a **stateless inference policy** (today: ordered ladder — the worker's `X-Sdlcma-Attempt` header is treated as a difficulty coefficient, attempt=0 picks the primary backend and each retry climbs one rung). It is fully orthogonal to the deployment mode below — turn it on for any deployment, or leave it off; the worker code path is byte-identical with it off.
 
-Three bundled configs in `configs/llm_gateway/`:
+Four bundled configs in `configs/llm_gateway/`:
 
 | File | Backends | Use case |
 |---|---|---|
 | `qwen3_api.yaml` | Dashscope only | Cloud-only; gateway in the path for telemetry / future multi-worker fan-out |
 | `self_hosted.yaml` | local vLLM only | All self-hosted |
 | `qwen3_plus_local.yaml` | Dashscope primary + local vLLM fallback | Try cloud first, escalate to self-hosted on retry or cloud outage |
+| `qwen3_api_cached.yaml` | Dashscope + persistent response cache | Replay + stress testing (zero tokens after the first warm run) |
+
+**Response cache (opt-in).** The gateway can persist every successful upstream response to a sqlite file and replay matching requests without touching the LLM. Four modes — `disabled` (default), `record` (write-through), `replay` (strict cache-only; miss → 409), `cache` (replay-on-hit, record-on-miss). The cache key hashes the worker-controlled inputs only — `system` / `user` / `tool` messages, `tools` schema, `model`, sampling params — and deliberately drops `assistant` messages + `tool_call_id`, so a multi-turn ReAct loop hashes to the same key on replay despite the LLM's stochastic prior-turn output and the SDK's per-call random IDs. The sqlite file *is* the portability contract — copy it with `cp`/`scp`/`rsync` to share between machines (record on dev, replay on a soak machine with no LLM credentials). Live counters at `GET /cache/stats`; periodic `phase_marker phase=cache_summary` log line every `log_every_n` requests. `replay_with_latency: true` sleeps to the originally-recorded wallclock on hit so stress-test phase-3 numbers stay realistic at zero token spend.
 
 Switching it on:
 

@@ -51,10 +51,59 @@ class InferencePolicyConfig:
 
 
 @dataclass(frozen=True)
+class CacheConfig:
+    """Optional response cache, see llm_gateway/cache.py.
+
+    mode:
+      * disabled — pass-through, no cache touched (the safe default).
+      * record   — pass-through, but persist each successful response.
+                   Use during the first "warm" run that you want to
+                   replay later.
+      * replay   — strict cache-only. On miss, return 409 (not 502) so
+                   the worker can tell "cache gap" apart from "backend
+                   down". Use for deterministic regression replays.
+      * cache    — replay on hit, record on miss. Use for stress tests
+                   where the first request fills the cache and every
+                   subsequent burst costs zero tokens.
+
+    db_path is the sqlite file. One file is the whole cache → trivially
+    copyable across machines (rsync / scp / cp), which is the intended
+    sharing model.
+
+    replay_with_latency: when True, a cache hit sleeps to the original
+    recorded wallclock before returning. Keeps stress-test phase-3
+    numbers realistic even though no token was spent.
+
+    log_every_n: emit a one-line `phase_marker phase=cache_summary` log
+    every N requests so a long-running run leaves a trail without
+    flooding logs. 0 = never (rely on /cache/stats polling instead).
+    """
+    enabled: bool = False
+    mode: str = "disabled"
+    db_path: str = ""
+    replay_with_latency: bool = False
+    log_every_n: int = 100
+    # When True, the cache key strips per-run volatile patterns from
+    # message content (ISO-8601 timestamps, runner IDs, Docker SHAs,
+    # commit SHAs in detached-HEAD lines, etc.) before hashing — so two
+    # runs of the same fixture hash to the same key even though the
+    # GitLab CI trace machinery metadata differs. Off by default
+    # because it's only relevant for stress-test cacheability and
+    # could theoretically mis-normalise a fixture whose semantic
+    # content matches one of the volatile patterns. Turn on per
+    # `cache.normalize_content: true` in the YAML config.
+    normalize_content: bool = False
+
+
+_CACHE_MODES = ("disabled", "record", "replay", "cache")
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
     backends: tuple[BackendConfig, ...]
     policy: InferencePolicyConfig
     backends_by_name: dict[str, BackendConfig] = field(default_factory=dict)
+    cache: CacheConfig = field(default_factory=CacheConfig)
 
 
 class GatewayConfigError(ValueError):
@@ -183,6 +232,49 @@ def _parse_policy(raw: Any, known_names: set[str]) -> InferencePolicyConfig:
     )
 
 
+def _parse_cache(raw: Any) -> CacheConfig:
+    """Optional. Missing/None → cache disabled (the safe legacy behavior).
+
+    Validating modes up-front matters because a typo (`replat`) shouldn't
+    silently degrade to pass-through and cost real tokens during a run
+    that was intended to be free.
+    """
+    if raw is None:
+        return CacheConfig()
+    if not isinstance(raw, dict):
+        raise GatewayConfigError(
+            f"cache: must be a mapping when present, got {type(raw).__name__}"
+        )
+    mode = str(raw.get("mode", "disabled")).lower()
+    if mode not in _CACHE_MODES:
+        raise GatewayConfigError(
+            f"cache.mode={mode!r} unsupported; pick one of {list(_CACHE_MODES)}"
+        )
+    enabled = mode != "disabled"
+    db_path = raw.get("db_path", "")
+    if enabled and (not isinstance(db_path, str) or not db_path):
+        raise GatewayConfigError(
+            f"cache.mode={mode!r} requires cache.db_path (path to a sqlite file)"
+        )
+    log_every_n = raw.get("log_every_n", 100)
+    try:
+        log_every_n_i = int(log_every_n)
+    except (TypeError, ValueError) as exc:
+        raise GatewayConfigError(
+            f"cache.log_every_n must be an integer, got {log_every_n!r}"
+        ) from exc
+    if log_every_n_i < 0:
+        raise GatewayConfigError("cache.log_every_n must be >= 0")
+    return CacheConfig(
+        enabled=enabled,
+        mode=mode,
+        db_path=db_path,
+        replay_with_latency=bool(raw.get("replay_with_latency", False)),
+        log_every_n=log_every_n_i,
+        normalize_content=bool(raw.get("normalize_content", False)),
+    )
+
+
 def load_config(path: str | Path) -> GatewayConfig:
     """Parse a gateway config file. Raises GatewayConfigError on any problem."""
     p = Path(path)
@@ -198,6 +290,9 @@ def load_config(path: str | Path) -> GatewayConfig:
         dupes = sorted({n for n in names if names.count(n) > 1})
         raise GatewayConfigError(f"duplicate backend names: {dupes}")
     policy = _parse_policy(data.get("inference_policy"), set(names))
+    cache = _parse_cache(data.get("cache"))
     by_name = {b.name: b for b in backends}
-    cfg = GatewayConfig(backends=backends, policy=policy, backends_by_name=by_name)
+    cfg = GatewayConfig(
+        backends=backends, policy=policy, backends_by_name=by_name, cache=cache,
+    )
     return cfg

@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -37,7 +38,25 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from .cache import Cache
 from .config import BackendConfig, GatewayConfig, load_config
+
+# Configure logging at module import so the gateway's own INFO logs
+# (config loaded, cache enabled, per-request phase_marker lines) actually
+# reach stdout when uvicorn imports this module. Uvicorn configures its
+# own `uvicorn` / `uvicorn.error` / `uvicorn.access` loggers but does
+# NOT touch arbitrary application loggers — without this call our
+# `logger.info(...)` would go to the root logger's default handler,
+# which is silent below WARNING. `force=True` so a host process that
+# pre-configured logging differently still gets the right config when
+# running this gateway. Level overridable via LLM_GATEWAY_LOG_LEVEL.
+logging.basicConfig(
+    level=os.environ.get("LLM_GATEWAY_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [gw %(name)s:%(funcName)s:%(lineno)d] %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
+from .keying import derive_key, short_key
 from .policy import InferencePolicy, parse_attempt_header
 
 logger = logging.getLogger(__name__)
@@ -50,12 +69,19 @@ _state: dict[str, Any] = {
     "policy": None,        # InferencePolicy
     "http": None,          # httpx.AsyncClient
     "backend_health": {},  # name -> {"last_ok_ts": float | None, "last_err": str | None}
+    "cache": None,         # llm_gateway.cache.Cache | None
+    "cache_request_count": 0,  # for periodic stats summary log
 }
 
 # Header names — defined once so the worker and gateway never drift.
 HEADER_BUG_ID = "x-sdlcma-bug-id"
 HEADER_ATTEMPT = "x-sdlcma-attempt"
 HEADER_BACKEND = "x-sdlcma-backend-name"
+# Cache-related response headers. The worker doesn't need them today
+# (analyze_phase_log parses the gateway's `phase_marker phase=cache_lookup`
+# log line instead), but they're useful for ad-hoc curl debugging.
+HEADER_CACHE_RESULT = "x-sdlcma-cache"      # hit | miss | disabled
+HEADER_CACHE_KEY = "x-sdlcma-cache-key"     # short prefix only
 
 # Upstream transient retry. The worker side has its own `_invoke_llm_with_retry`
 # but it can't see which backend served the request, so it can't make a sound
@@ -84,6 +110,18 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         _state["backend_health"] = {
             b.name: {"last_ok_ts": None, "last_err": None} for b in cfg.backends
         }
+        # Optional cache. Opening the sqlite happens eagerly so a bad path
+        # (wrong perms, schema mismatch) fails at startup, not 4 hours
+        # into a stress test.
+        if cfg.cache.enabled:
+            _state["cache"] = Cache(cfg.cache.db_path)
+            logger.info(
+                "gateway: cache enabled mode=%s db=%s replay_with_latency=%s",
+                cfg.cache.mode, cfg.cache.db_path, cfg.cache.replay_with_latency,
+            )
+        else:
+            _state["cache"] = None
+        _state["cache_request_count"] = 0
         logger.info(
             "gateway: loaded config %s (%d backend(s), policy=%s, order=%s)",
             path, len(cfg.backends), cfg.policy.type, list(cfg.policy.order),
@@ -94,6 +132,9 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         client: httpx.AsyncClient | None = _state.get("http")
         if client is not None:
             await client.aclose()
+        cache: Cache | None = _state.get("cache")
+        if cache is not None:
+            cache.close()
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -117,6 +158,17 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                 for b in cfg.backends
             ],
         }
+
+    @app.get("/cache/stats")
+    async def cache_stats() -> dict[str, Any]:
+        """Live hit/miss/record counters + on-disk size. Cheap to poll;
+        the underlying COUNT(*) is fast on the indexed cache_entries
+        table even at hundreds of thousands of rows."""
+        c: Cache | None = _state.get("cache")
+        if c is None:
+            return {"enabled": False}
+        snap = c.snapshot_stats()
+        return {"enabled": True, **snap.to_dict()}
 
     @app.get("/v1/models")
     async def list_models() -> dict[str, Any]:
@@ -160,6 +212,72 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         if not isinstance(body_json, dict):
             raise HTTPException(400, "request body must be a JSON object")
 
+        # Cache lookup BEFORE backend selection — a hit means we don't
+        # consult the policy or burn an upstream call. Key is derived from
+        # the body the WORKER sent, not the body after we rewrote `model`
+        # (the worker may pass a placeholder model and the gateway picks
+        # the real one), so keys stay stable across backend swaps as long
+        # as the request's semantic content is the same.
+        cache: Cache | None = _state.get("cache")
+        cache_cfg = cfg.cache
+        cache_key = (
+            derive_key(body_json, normalize_content=cache_cfg.normalize_content)
+            if cache is not None else ""
+        )
+        if cache is not None and cache_cfg.mode in ("replay", "cache"):
+            entry = cache.get(cache_key)
+            if entry is not None:
+                # Optional latency replay: sleep to the original recorded
+                # wallclock so stress-test phase-3 numbers stay realistic
+                # even though we're not paying for tokens. Capped sleep so
+                # a pathologically long original call (timeout = 600s)
+                # doesn't freeze the gateway.
+                if cache_cfg.replay_with_latency and entry.original_wallclock_ms > 0:
+                    await asyncio.sleep(min(entry.original_wallclock_ms / 1000.0, 60.0))
+                _maybe_emit_cache_summary()
+                logger.info(
+                    "phase_marker phase=cache_lookup mode=%s result=hit "
+                    "key=%s bug_id=%s hit_count=%d original_backend=%s",
+                    cache_cfg.mode, short_key(cache_key), bug_id or "",
+                    entry.hit_count, entry.original_backend_name or "",
+                )
+                body = _safe_json(
+                    entry.response_body,
+                    default={"raw": entry.response_body.decode("utf-8", "replace")},
+                )
+                return JSONResponse(
+                    content=body,
+                    status_code=entry.response_status_code,
+                    headers={
+                        HEADER_BACKEND: entry.original_backend_name or "cache",
+                        HEADER_CACHE_RESULT: "hit",
+                        HEADER_CACHE_KEY: short_key(cache_key),
+                    },
+                )
+            # Miss in replay mode = strict failure. 409 Conflict so the
+            # worker can distinguish "cache gap" from "backend down" (502)
+            # by status code alone, without parsing the body.
+            if cache_cfg.mode == "replay":
+                logger.warning(
+                    "phase_marker phase=cache_lookup mode=replay result=miss "
+                    "key=%s bug_id=%s (strict replay; returning 409)",
+                    short_key(cache_key), bug_id or "",
+                )
+                _maybe_emit_cache_summary()
+                return JSONResponse(
+                    content={"error": {
+                        "message": "cache miss in replay mode",
+                        "type": "cache_miss_replay",
+                        "cache_key": short_key(cache_key),
+                    }},
+                    status_code=409,
+                    headers={
+                        HEADER_CACHE_RESULT: "miss",
+                        HEADER_CACHE_KEY: short_key(cache_key),
+                    },
+                )
+            # cache mode + miss → fall through, forward, then store.
+
         # Single backend selection per request. The policy is stateless: it
         # picks one backend based on `attempt`, the gateway forwards (with
         # narrow transient retry per call), and returns whatever the upstream
@@ -169,6 +287,7 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         # wasted call per backend outage; benefit = no per-request advance
         # loop, no per-bug state, no unbounded memory.
         sel = policy.select(attempt)
+        forward_t0 = time.monotonic()
         outcome = await _forward(
             client=client,
             backend=sel.backend,
@@ -176,6 +295,7 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
             attempt=attempt,
             bug_id=bug_id,
         )
+        forward_wallclock_ms = int((time.monotonic() - forward_t0) * 1000)
 
         resp_headers = dict(outcome["headers"])
         resp_headers[HEADER_BACKEND] = sel.backend.name
@@ -186,6 +306,36 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
 
         if outcome["kind"] == "ok":
             _mark_backend_ok(sel.backend.name)
+            # Cache write: only on real upstream success. We DO NOT cache
+            # 4xx/5xx — replaying a stored error would mask real issues
+            # on subsequent runs ("the model returned 400 every time" is a
+            # bug signal, not state to preserve).
+            if cache is not None and cache_cfg.mode in ("record", "cache"):
+                try:
+                    body_bytes = json.dumps(outcome["body"]).encode("utf-8")
+                except (TypeError, ValueError):
+                    body_bytes = b""
+                if body_bytes:
+                    cache.put(
+                        cache_key,
+                        body_bytes,
+                        outcome["status"],
+                        forward_wallclock_ms,
+                        sel.backend.name,
+                    )
+                    logger.info(
+                        "phase_marker phase=cache_lookup mode=%s result=miss "
+                        "key=%s bug_id=%s recorded=1 wallclock_ms=%d backend=%s",
+                        cache_cfg.mode, short_key(cache_key), bug_id or "",
+                        forward_wallclock_ms, sel.backend.name,
+                    )
+                    resp_headers[HEADER_CACHE_RESULT] = "miss"
+                    resp_headers[HEADER_CACHE_KEY] = short_key(cache_key)
+            elif cache is not None:
+                # disabled-by-mode still emits a "disabled" header so curl
+                # can tell cache is wired up but not active.
+                resp_headers[HEADER_CACHE_RESULT] = "disabled"
+            _maybe_emit_cache_summary()
             return JSONResponse(
                 content=outcome["body"],
                 status_code=outcome["status"],
@@ -232,6 +382,28 @@ def _mark_backend_ok(name: str) -> None:
 def _mark_backend_err(name: str, err: str) -> None:
     rec = _state["backend_health"].setdefault(name, {})
     rec["last_err"] = err
+
+
+def _maybe_emit_cache_summary() -> None:
+    """Emit a one-line `phase_marker phase=cache_summary` every
+    `log_every_n` requests. Throttled to keep long runs from flooding
+    logs with cumulative stats lines; live polling goes via /cache/stats."""
+    cfg: GatewayConfig | None = _state.get("config")
+    cache: Cache | None = _state.get("cache")
+    if cfg is None or cache is None or cfg.cache.log_every_n <= 0:
+        return
+    _state["cache_request_count"] = int(_state.get("cache_request_count", 0)) + 1
+    n = _state["cache_request_count"]
+    if n % cfg.cache.log_every_n != 0:
+        return
+    snap = cache.snapshot_stats()
+    logger.info(
+        "phase_marker phase=cache_summary requests=%d hits=%d misses=%d "
+        "records=%d errors=%d hit_rate=%s entries=%d db_size_bytes=%d",
+        n, snap.hits, snap.misses, snap.records, snap.errors,
+        f"{snap.hit_rate:.3f}" if snap.hit_rate is not None else "-",
+        snap.entry_count, snap.db_size_bytes,
+    )
 
 
 async def _forward(

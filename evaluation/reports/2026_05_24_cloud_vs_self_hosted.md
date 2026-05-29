@@ -7,7 +7,7 @@ fixture set, sweeping all 19 fixtures with the baseline agent (no enhancements).
 
 | Backend | fix_rate | avg tokens/cell | avg LLM s/cell | tokens/s | cost(USD) |
 |---|---|---|---|---|---|
-| **Cloud — Dashscope `qwen3-coder-480b-a35b-instruct`** | **0.947** (18/19) | 5,359 | 8.85 | 605 | 0.12 |
+| **Cloud — Dashscope `qwen3-coder-480b-a35b-instruct`** | **0.947** (18/19) | 5,359 | 8.85 | 605 | 0.38 |
 | **Self-hosted — vLLM (+FlashInfer) `qwen2.5-coder-32b-instruct-awq`** | 0.895 (17/19) | 6,179 | 9.70 | 637 | 0 |
 
 Cloud has the higher fix rate and the lower per-cell token / wallclock cost.
