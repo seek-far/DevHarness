@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 
+from .metrics import BUG_ID_COLLISIONS, WORKERS_SPAWNED
 from .models import WorkerEntry, WARMUP_GRACE
 from .registry import WorkerRegistry
 
@@ -25,11 +26,13 @@ class WorkerSpawner:
                     source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[Spawner] bug_id=%s already running, skip", bug_id)
+            BUG_ID_COLLISIONS.inc()
             return self._registry.get(bug_id)
 
         entry = await self._start_process(bug_id, project_id, project_web_url, job_id,
                                           source_branch=source_branch)
         self._registry.register(entry)
+        WORKERS_SPAWNED.labels(spawner="process").inc()
         return entry
 
     async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
@@ -162,11 +165,13 @@ class DockerWorkerSpawner:
                     source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[DockerSpawner] bug_id=%s already running, skip", bug_id)
+            BUG_ID_COLLISIONS.inc()
             return self._registry.get(bug_id)
 
         entry = await self._start_container(bug_id, project_id, project_web_url, job_id,
                                             source_branch=source_branch)
         self._registry.register(entry)
+        WORKERS_SPAWNED.labels(spawner="docker").inc()
         return entry
 
     async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
@@ -376,11 +381,13 @@ class EcsWorkerSpawner:
                     source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[EcsSpawner] bug_id=%s already running, skip", bug_id)
+            BUG_ID_COLLISIONS.inc()
             return self._registry.get(bug_id)
 
         entry = await self._start_task(bug_id, project_id, project_web_url, job_id,
                                        source_branch=source_branch)
         self._registry.register(entry)
+        WORKERS_SPAWNED.labels(spawner="ecs").inc()
         return entry
 
     async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
@@ -590,11 +597,13 @@ class K8sJobSpawner:
                     source_branch: str = "") -> WorkerEntry:
         if self._registry.exists(bug_id):
             logger.warning("[K8sSpawner] bug_id=%s already running, skip", bug_id)
+            BUG_ID_COLLISIONS.inc()
             return self._registry.get(bug_id)
 
         entry = await self._start_job(bug_id, project_id, project_web_url, job_id,
                                       source_branch=source_branch)
         self._registry.register(entry)
+        WORKERS_SPAWNED.labels(spawner="k8s").inc()
         return entry
 
     async def restart(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,

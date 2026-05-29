@@ -47,6 +47,11 @@ class WorkerEntry:
     warmup_deadline: float = 0.0
     restart_count: int = 0
     status: WorkerStatus = "warmup"
+    # Wallclock when status first became terminal (done | failed). None
+    # while still warmup/running. Used by WorkerRegistry.sweep_stale()
+    # to age out terminal entries after a grace period so the registry
+    # doesn't grow unboundedly across a long-running orchestrator.
+    done_at: Optional[float] = None
 
     @property
     def pid(self) -> Optional[Union[int, str]]:

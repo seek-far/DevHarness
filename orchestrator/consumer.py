@@ -14,6 +14,8 @@ from typing import Awaitable, Callable
 
 from redis.asyncio import Redis
 
+from .metrics import DEAD_LETTER
+
 logger = logging.getLogger(__name__)
 
 MessageHandler = Callable[[bytes], Awaitable[None]]
@@ -186,6 +188,7 @@ class StreamConsumer:
                         "origin_id": entry_id,
                     },
                 )
+                DEAD_LETTER.labels(stream=self._stream_key).inc()
                 # Still ack to avoid infinite retry of the same bad message
                 await self._redis.xack(self._stream_key, self._group, entry_id)
             except Exception as re:

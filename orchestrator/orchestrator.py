@@ -1,12 +1,14 @@
 #python -m orchestrator.orchestrator
 import asyncio
 import logging
+import os
 import secrets
 import sys
 import time
 from datetime import datetime
 
 import redis.asyncio as aioredis
+from prometheus_client import start_http_server
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -18,6 +20,7 @@ logging.getLogger("docker").setLevel(logging.WARNING)
 
 from settings import orchestrator_cfg as cfg
 from orchestrator.consumer import StreamConsumer
+from orchestrator.metrics import SPAWN_WALLCLOCK_MS
 from orchestrator.models import BugReportedEvent, ValidationStatusEvent
 from orchestrator.monitor import HealthMonitor
 from orchestrator.parser import ParseError, parse_message
@@ -94,6 +97,17 @@ class Orchestrator:
             heartbeat_key_tpl=self._cfg.worker_heartbeat_key,
             check_interval=self._cfg.health_check_interval,
             completed_key_tpl=self._cfg.worker_completed_key,
+            # Optional: when both are non-empty, the monitor refreshes
+            # sdlcma_stream_pending every check_interval. Empty strings
+            # disable that sampling (e.g. integration tests).
+            gateway_stream=self._cfg.gateway_stream,
+            gateway_consumer_group=self._cfg.gateway_consumer_group,
+            # getattr fallback keeps the SimpleNamespace test fixtures
+            # working without forcing every fake config to declare the
+            # new field. Real OrchestratorSettings always has it.
+            done_grace_seconds=getattr(
+                self._cfg, "worker_registry_done_grace_seconds", 60.0
+            ),
         )
         self._consumer = StreamConsumer(
             redis=self._redis,
@@ -142,7 +156,9 @@ class Orchestrator:
                 "phase_marker phase=spawn_start bug_id=%s job_id=%s ref=%s t_wall_ms=%d",
                 bug_id, job_id, source_branch, time.time_ns() // 1_000_000,
             )
+            _spawn_t0 = time.perf_counter()
             await self._spawner.spawn(bug_id, project_id, project_web_url, job_id, source_branch=source_branch)
+            SPAWN_WALLCLOCK_MS.observe((time.perf_counter() - _spawn_t0) * 1000)
 
         elif isinstance(event, ValidationStatusEvent):
             logger.info(
@@ -153,6 +169,24 @@ class Orchestrator:
 
     async def run(self) -> None:
         logger.info("[Orchestrator] starting env=%s", self._cfg.env)
+        # Prometheus scrape endpoint on a dedicated port. Bind 0.0.0.0 so
+        # a scraper in another pod / host can reach it; if you don't want
+        # that, set METRICS_BIND=127.0.0.1 (or set METRICS_PORT=0 to
+        # disable entirely — useful for unit tests and standalone dev).
+        metrics_port = int(os.environ.get("METRICS_PORT", "9102"))
+        metrics_bind = os.environ.get("METRICS_BIND", "0.0.0.0")
+        if metrics_port > 0:
+            try:
+                start_http_server(metrics_port, addr=metrics_bind)
+                logger.info("[Orchestrator] metrics on http://%s:%d/metrics",
+                            metrics_bind, metrics_port)
+            except OSError as e:
+                # Port collision / permission error — log loudly but don't
+                # block the orchestrator from starting. Metrics off is
+                # better than no orchestrator.
+                logger.error("[Orchestrator] metrics server failed to bind "
+                             "%s:%d: %s (metrics disabled this run)",
+                             metrics_bind, metrics_port, e)
         self._monitor.start()
         self._consumer.start()
         logger.info("[Orchestrator] running")

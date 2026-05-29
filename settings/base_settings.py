@@ -49,6 +49,15 @@ class BaseAppSettings(BaseSettings):
 
     # ── Health Monitor ────────────────────────────────────────
     health_check_interval: int = 20      # seconds
+    # Grace period before a terminally-statused (done/failed) worker
+    # entry is removed from WorkerRegistry. Long enough for a late
+    # ValidationStatusEvent (CI for the fix-branch the worker just
+    # pushed) to still find the bug_id and log a meaningful
+    # "no active worker" rather than a generic miss. 60s = ~3 health
+    # check intervals, comfortably > heartbeat_ttl. Without this
+    # sweep, terminal entries accumulate in _workers forever — a slow
+    # memory leak verified live 2026-05-29.
+    worker_registry_done_grace_seconds: int = 60
 
     # ── Stream reading ────────────────────────────────────────
     stream_block_ms: int = 1000          # XREADGROUP BLOCK timeout (milliseconds)

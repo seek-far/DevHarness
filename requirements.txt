@@ -14,3 +14,4 @@ pytest
 docker>=7.0
 kubernetes>=29.0,<33.0  # 33+ regression: InClusterConfigLoader bearer-token auth is not actually sent, API calls go as system:anonymous (verified 2026-05-22 k8s 1.32 + kubernetes==36.0.0)
 mcp>=1.0  # MCP server (mcp_server/) exposes evaluation state as tools/resources for MCP-aware clients
+prometheus-client>=0.20  # /metrics endpoints on gateway + orchestrator (Tier-1 counters + active_workers / stream_pending gauges)
