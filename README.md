@@ -35,14 +35,26 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   `FLAGGED` markers for heuristically interesting runs; Redis heartbeat keys
   for live worker monitoring; MCP server exposing the evaluation state
   (`list_fixtures`, `read_journal_entry`, ...) to Claude Desktop or any MCP
-  client.
+  client. **Stress-test profiling** — structured `phase_marker` logs across
+  gateway / orchestrator / worker for a 4-phase latency view (gateway→spawn,
+  spawn→worker_ready, fix() wallclock, per-LLM-call); `tools/load_sampler.py`
+  Redis sidecar for achieved concurrency + real backlog (XPENDING + XINFO
+  GROUPS lag, not XLEN); `tools/analyze_phase_log.py` rolls phase markers and
+  the sampler TSV into a per-bug + aggregate p50/p95/max report. Reference
+  run on WSL with 19 concurrent burst:
+  [`tests/stress_test_1.md`](tests/stress_test_1.md).
 
 - **Evaluation & Quality** — `bench` CLI for agent × fixture sweeps; curated
   fixtures (`F01`–`F10`) plus journal-promoted real bugs; `RunRecord`
   aggregation into per-agent fix-rate / iterations / wallclock; regression
   coverage across every surface (unit `pytest`, end-to-end
   `integration_test.py`, eval sweeps, per-deployment real-host smokes —
-  consolidated in `tests/TESTING.md`).
+  consolidated in `tests/TESTING.md`). **Deterministic replay** via the
+  LLM Gateway response cache (sqlite-backed, portable across machines via
+  plain `cp` / `scp` / `rsync`): `mode: record` captures a baseline run,
+  `mode: replay` strict-replays against new code so output drift surfaces
+  as a hit/miss diff — and as a side-effect makes long stress-test bursts
+  affordable (every cached call costs zero tokens).
 
 - **Reliability** — narrow transient-I/O retry shared across 5 nodes; LLM
   transient retry plus a tool-call recovery fallback (vLLM + Qwen wrapper
