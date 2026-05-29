@@ -4,13 +4,12 @@ backends:
     model: qwen3-coder-480b-a35b-instruct
     api_key_env: DASHSCOPE_API_KEY
     request_timeout: 60
-
 inference_policy:
   type: ordered
   order: [qwen3_dashscope]
-
 cache:
-  mode: cache           # ← 第一遍这里写 record；第二遍改成 cache
+  mode: cache # ← 第一遍这里写 record；第二遍改成 cache
   db_path: /tmp/llm_cache.db
   replay_with_latency: true
   log_every_n: 50
+  normalize_content: true
