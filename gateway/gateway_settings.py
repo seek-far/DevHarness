@@ -31,6 +31,18 @@ class GatewaySettings(BaseSettings):
     # Must match gateway_stream in settings/base_settings.py
     gateway_stream: str = "gateway:stream"
 
+    # Cap on `gateway:stream` length, enforced on every XADD via Redis's
+    # `MAXLEN ~ N` (approximate) trim. Without this the stream grows
+    # forever — XLEN includes ACKed entries because Redis Streams don't
+    # auto-trim on ACK. A long-running gateway will eventually OOM Redis
+    # (verified in stress_test_1: 19 bugs left 313 entries in the stream
+    # after the run; multiply by uptime). The default 10000 gives ~500x
+    # headroom over the largest observed burst (38 events), so a healthy
+    # orchestrator never sees trim of un-ACKed PEL entries — trim only
+    # touches already-consumed history. Lower it on memory-constrained
+    # deployments; never set to 0 (= unlimited).
+    gateway_stream_maxlen: int = 10000
+
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / f"gateway_{_probe.env}.env",
         env_file_encoding="utf-8",

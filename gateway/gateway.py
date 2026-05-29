@@ -77,8 +77,21 @@ async def webhook(payload: dict):
     )
 
     if cfg.use_redis and redis_client is not None:
-        redis_client.xadd(cfg.gateway_stream, {"data": raw})
-        logger.debug("msg forwarded to stream=%r", cfg.gateway_stream)
+        # `maxlen=N, approximate=True` enforces a soft cap on every write
+        # (`MAXLEN ~ N` in RESP). Approximate trim — actual length floats
+        # in [N, N+a few hundred] — has constant-time cost regardless of
+        # stream size and is dramatically cheaper than `MAXLEN = N`. The
+        # cap is the gateway's job (producer-side) so orchestrator
+        # restarts never need to play catch-up; see gateway_stream_maxlen
+        # docstring in gateway_settings.py for the headroom rationale.
+        redis_client.xadd(
+            cfg.gateway_stream,
+            {"data": raw},
+            maxlen=cfg.gateway_stream_maxlen,
+            approximate=True,
+        )
+        logger.debug("msg forwarded to stream=%r (maxlen~%d)",
+                     cfg.gateway_stream, cfg.gateway_stream_maxlen)
 
     return {"status": "ok"}
 

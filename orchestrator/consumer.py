@@ -86,6 +86,19 @@ class StreamConsumer:
 
     async def _run(self) -> None:
         await self._ensure_group()
+        # One-shot drain of any PEL entries delivered to this consumer name
+        # but never ACKed — i.e. messages that were in flight when the
+        # previous orchestrator process died. Without this, a webhook that
+        # XREADGROUP'd into the orchestrator's PEL but never got handled
+        # (orchestrator crash between read and ACK) sits there forever,
+        # blocked by the consumer group's last-delivered-id pointer.
+        # XREADGROUP id="0" returns ALL entries currently in this
+        # consumer's PEL; we process + ACK each, and the loop ends when
+        # there are no more. Trimmed entries (Redis-trimmed away while in
+        # PEL) arrive with empty fields; _process_entry's handler will
+        # then raise on the empty `data`, route to dead_letter, and ACK
+        # so they stop reappearing.
+        await self._drain_pending()
         while True:
             try:
                 # Read new messages (">" means only entries not yet delivered to any consumer)
@@ -109,6 +122,46 @@ class StreamConsumer:
             except Exception as e:
                 logger.error("[Consumer] Redis error: %s, retrying in 1s", e)
                 await asyncio.sleep(1)
+
+    async def _drain_pending(self) -> None:
+        """Process this consumer's PEL once at startup. Each pass reads
+        up to `count` entries with id="0"; ACKing entries removes them
+        from PEL, so the next pass sees the rest. Loop terminates when
+        XREADGROUP returns no entries.
+
+        Bounded by a hard iteration cap so a pathological PEL (huge AND
+        every entry handler errors AND every dead-letter write fails)
+        can't deadlock startup."""
+        max_passes = 100
+        for _ in range(max_passes):
+            try:
+                results = await self._redis.xreadgroup(
+                    groupname=self._group,
+                    consumername=self._consumer_name,
+                    streams={self._stream_key: "0"},
+                    count=self._count,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # Group/stream lookup failed — don't block startup on it;
+                # the main `>` loop has its own retry. Log loudly because
+                # this means PEL recovery is silently skipped.
+                logger.warning("[Consumer] PEL drain failed: %s "
+                               "(continuing to main loop)", e)
+                return
+            entries = []
+            for _stream, batch in (results or []):
+                entries.extend(batch)
+            if not entries:
+                return
+            logger.info("[Consumer] PEL drain: processing %d pending entry(ies) "
+                        "from prior process", len(entries))
+            for entry_id, fields in entries:
+                await self._process_entry(entry_id, fields)
+        logger.warning("[Consumer] PEL drain hit max_passes=%d; "
+                       "remaining entries will be handled by the main loop",
+                       max_passes)
 
     async def _process_entry(self, entry_id: bytes, fields: dict) -> None:
         """Process a single stream entry: XACK on success, write to dead-letter on failure."""
