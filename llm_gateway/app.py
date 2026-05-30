@@ -36,10 +36,12 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .cache import Cache
 from .config import BackendConfig, GatewayConfig, load_config
+from .metrics import CACHE_LOOKUPS, UPSTREAM_WALLCLOCK_MS
 
 # Configure logging at module import so the gateway's own INFO logs
 # (config loaded, cache enabled, per-request phase_marker lines) actually
@@ -135,6 +137,15 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         cache: Cache | None = _state.get("cache")
         if cache is not None:
             cache.close()
+
+    @app.get("/metrics")
+    async def metrics_endpoint():
+        """Prometheus scrape endpoint. Explicit GET route (not
+        app.mount) to avoid the 307 redirect that mount(/metrics)
+        triggers — same anti-friction reasoning as the gateway."""
+        return Response(
+            content=generate_latest(), media_type=CONTENT_TYPE_LATEST
+        )
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -241,6 +252,7 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                     cache_cfg.mode, short_key(cache_key), bug_id or "",
                     entry.hit_count, entry.original_backend_name or "",
                 )
+                CACHE_LOOKUPS.labels(result="hit", mode=cache_cfg.mode).inc()
                 body = _safe_json(
                     entry.response_body,
                     default={"raw": entry.response_body.decode("utf-8", "replace")},
@@ -263,6 +275,7 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                     "key=%s bug_id=%s (strict replay; returning 409)",
                     short_key(cache_key), bug_id or "",
                 )
+                CACHE_LOOKUPS.labels(result="miss", mode="replay").inc()
                 _maybe_emit_cache_summary()
                 return JSONResponse(
                     content={"error": {
@@ -276,7 +289,8 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                         HEADER_CACHE_KEY: short_key(cache_key),
                     },
                 )
-            # cache mode + miss → fall through, forward, then store.
+            # cache mode + miss → count it, fall through, forward, then store.
+            CACHE_LOOKUPS.labels(result="miss", mode=cache_cfg.mode).inc()
 
         # Single backend selection per request. The policy is stateless: it
         # picks one backend based on `attempt`, the gateway forwards (with
@@ -296,6 +310,12 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
             bug_id=bug_id,
         )
         forward_wallclock_ms = int((time.monotonic() - forward_t0) * 1000)
+        # Observe upstream wallclock regardless of success/failure —
+        # both shape the operator's view of backend health. Cache hits
+        # never reach here, so this histogram is strictly upstream time.
+        UPSTREAM_WALLCLOCK_MS.labels(backend=sel.backend.name).observe(
+            forward_wallclock_ms
+        )
 
         resp_headers = dict(outcome["headers"])
         resp_headers[HEADER_BACKEND] = sel.backend.name
@@ -331,10 +351,23 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                     )
                     resp_headers[HEADER_CACHE_RESULT] = "miss"
                     resp_headers[HEADER_CACHE_KEY] = short_key(cache_key)
+                    # In `record` mode we count miss only here — the
+                    # lookup-side path skips for record mode. For
+                    # `cache` mode the miss was already counted at the
+                    # fall-through, so don't double-count.
+                    if cache_cfg.mode == "record":
+                        CACHE_LOOKUPS.labels(
+                            result="miss", mode="record"
+                        ).inc()
             elif cache is not None:
                 # disabled-by-mode still emits a "disabled" header so curl
                 # can tell cache is wired up but not active.
                 resp_headers[HEADER_CACHE_RESULT] = "disabled"
+                CACHE_LOOKUPS.labels(result="disabled", mode="disabled").inc()
+            else:
+                # Cache config absent entirely (cache.enabled=False). Still
+                # track for "what % of LLM calls went through gateway" totals.
+                CACHE_LOOKUPS.labels(result="disabled", mode="disabled").inc()
             _maybe_emit_cache_summary()
             return JSONResponse(
                 content=outcome["body"],
