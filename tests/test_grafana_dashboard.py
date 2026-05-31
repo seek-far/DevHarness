@@ -173,6 +173,44 @@ def test_uid_and_title_for_provisioning():
     assert data.get("uid") == "sdlcma-main"
 
 
+# Metrics rendered by tools/runrecord_to_metrics.py — the runrecord-exporter
+# recomputes these cumulative totals from the journal on every scrape. A
+# series is BORN at its full value when its first record appears and then
+# stays flat, so rate()/increase() over any window that doesn't straddle that
+# single step return ~0 (incident 2026-05-31: Tokens-per-fix and Fix-rate read
+# 0 after a real fix). Use absolute sums / ratios for these; rate/increase is
+# only meaningful for the in-process event-stream counters (webhooks, dead
+# letter, cache lookups, …) which have a real 0 baseline and change over time.
+_JOURNAL_DERIVED_METRICS = {
+    "sdlcma_fixes_completed_total",
+    "sdlcma_fix_elapsed_seconds_total",
+    "sdlcma_llm_tokens_total",
+    "sdlcma_llm_calls_total",
+    "sdlcma_parse_trace_fallback_total",
+    "sdlcma_reflection_fires_total",
+}
+
+
+def test_journal_metrics_not_wrapped_in_rate_or_increase(dashboard):
+    """journal-recompute counters must not be inside rate()/increase() — those
+    collapse to ~0 for the sparse, born-at-value series the exporter emits."""
+    # Match rate(...) / increase(...) call bodies and check for a journal metric.
+    call_re = re.compile(r"\b(?:rate|increase)\s*\(([^)]*)\)")
+    for panel in dashboard["panels"]:
+        if panel["type"] == "row":
+            continue
+        for t in panel.get("targets") or []:
+            for body in call_re.findall(t.get("expr", "")):
+                bad = _JOURNAL_DERIVED_METRICS.intersection(
+                    re.findall(r"\bsdlcma_[A-Za-z0-9_]+", body)
+                )
+                assert not bad, (
+                    f"panel id={panel['id']} wraps journal-recompute metric(s) "
+                    f"{sorted(bad)} in rate()/increase(); these read ~0 for "
+                    f"sparse fixes — use absolute sum()/ratio instead"
+                )
+
+
 def test_chart_copy_matches_canonical():
     """The chart ships a mirror of this file at infra/helm/sdlcma/dashboards/
     so Helm's `Files.Get` can embed it into a ConfigMap (helm package can
