@@ -40,9 +40,15 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   spawn→worker_ready, fix() wallclock, per-LLM-call); `tools/load_sampler.py`
   Redis sidecar for achieved concurrency + real backlog (XPENDING + XINFO
   GROUPS lag, not XLEN); `tools/analyze_phase_log.py` rolls phase markers and
-  the sampler TSV into a per-bug + aggregate p50/p95/max report. Reference
-  run on WSL with 19 concurrent burst:
-  [`tests/stress_test_1.md`](tests/stress_test_1.md).
+  the sampler TSV into a per-bug + aggregate p50/p95/max report. The kind/Helm
+  observability stack (`kube-prometheus-stack` + a seven-row Grafana dashboard
+  incl. node-level CPU / memory) has been driven to **95 concurrent pipelines**
+  against a self-hosted GitLab — live dashboard under that load:
+
+  ![SDLCMA Grafana dashboard under a 95-concurrent pipeline burst on the kind/Helm stack](assets/grafana_dashboard_95_concurrent_2026-05-31.png)
+
+  (Earlier bare-WSL baseline at N=19:
+  [`tests/stress_test_1.md`](tests/stress_test_1.md).)
 
 - **Evaluation & Quality** — `bench` CLI for agent × fixture sweeps; curated
   fixtures (`F01`–`F10`) plus journal-promoted real bugs; `RunRecord`
@@ -966,8 +972,14 @@ and `kube-prometheus-stack` as a conditional Helm dependency (Prometheus
 + Grafana + node-exporter + KSM; Alertmanager off + retention=2d to fit
 single-node kind). The Grafana dashboard ships as a labeled ConfigMap
 that the kube-prometheus-stack sidecar auto-loads (`grafana_dashboard:
-"1"`). `setup.sh` defaults to this overlay; running it on a host that's
-a tailscale peer with `minus` is one command:
+"1"`) — seven rows: health, capacity & backlog, throughput, latency,
+LLM cost & cache, fix quality, and node-level CPU / memory (node-exporter).
+Journal-derived panels (fix success rate, tokens-per-fix, …) read cumulative
+`sum()` ratios rather than `rate()`/`increase()`, because the runrecord
+exporter recomputes totals from the journal on every scrape (a born-at-value
+counter, so a rate window collapses to ~0 for sparse fixes). `setup.sh`
+defaults to this overlay; running it on a host that's a tailscale peer with
+`minus` is one command:
 
 ```bash
 bash infra/k8s/setup.sh         # ← uses values-gitlab-minus.yaml by default
