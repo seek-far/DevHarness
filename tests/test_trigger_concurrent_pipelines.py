@@ -136,3 +136,88 @@ def test_resolve_extra_projects_empty_list_returns_empty():
 
     assert mod.resolve_extra_projects([], namespace="root") == []
     assert mod.resolve_extra_projects(["", "  "], namespace="root") == []
+
+
+# ── --repeat / --interval (sustained / soak load) ───────────────────────────
+
+
+def _run_main(monkeypatch, argv, *, n_targets=2, trigger_result=(123, 201, "")):
+    """Drive main() with list_fixture_projects + trigger_pipeline + sleep
+    stubbed out, so the repeat loop is exercised without any HTTP. Returns a
+    dict recording the per-target triggers, the inter-round sleeps, and the
+    process exit code."""
+    from tools import trigger_concurrent_pipelines as mod
+
+    projs = [
+        {
+            "id": i + 1,
+            "path": f"sdlcma-fix-f0{i + 1}-x",
+            "path_with_namespace": f"root/sdlcma-fix-f0{i + 1}-x",
+        }
+        for i in range(n_targets)
+    ]
+    rec = {"triggers": [], "sleeps": []}  # list.append is atomic under the GIL
+    monkeypatch.setattr(mod, "list_fixture_projects", lambda *a, **k: projs)
+    monkeypatch.setattr(
+        mod, "trigger_pipeline",
+        lambda api, token, pid, ref: (rec["triggers"].append(pid) or trigger_result),
+    )
+    monkeypatch.setattr(mod.time, "sleep", lambda s: rec["sleeps"].append(s))
+
+    with pytest.raises(SystemExit) as ei:
+        mod.main(argv)
+    rec["exit"] = ei.value.code
+    return rec
+
+
+def test_repeat_fires_the_burst_each_round(monkeypatch):
+    """--repeat N re-triggers a pipeline on every target, N times."""
+    rec = _run_main(
+        monkeypatch,
+        ["--token", "t", "--namespace", "root", "--repeat", "3", "--concurrency", "2"],
+        n_targets=2,
+    )
+    assert len(rec["triggers"]) == 6  # 2 targets × 3 rounds
+    assert rec["exit"] == 0
+
+
+def test_interval_sleeps_between_rounds_only(monkeypatch):
+    """--interval sleeps BETWEEN rounds — repeat-1 times, never after last."""
+    rec = _run_main(
+        monkeypatch,
+        ["--token", "t", "--namespace", "root", "--repeat", "3", "--interval", "5"],
+        n_targets=1,
+    )
+    assert rec["sleeps"] == [5, 5]  # 2 gaps for 3 rounds; no trailing sleep
+
+
+def test_default_is_single_shot_no_sleep(monkeypatch):
+    """Omitting the flags preserves the historical one-burst behaviour."""
+    rec = _run_main(
+        monkeypatch, ["--token", "t", "--namespace", "root"], n_targets=2
+    )
+    assert len(rec["triggers"]) == 2
+    assert rec["sleeps"] == []
+
+
+def test_interval_ignored_when_repeat_one(monkeypatch):
+    rec = _run_main(
+        monkeypatch,
+        ["--token", "t", "--namespace", "root", "--repeat", "1", "--interval", "30"],
+        n_targets=2,
+    )
+    assert rec["sleeps"] == []
+
+
+def test_repeat_must_be_positive():
+    from tools import trigger_concurrent_pipelines as mod
+
+    with pytest.raises(SystemExit, match="repeat must be"):
+        mod.main(["--token", "t", "--namespace", "root", "--repeat", "0"])
+
+
+def test_interval_must_be_nonnegative():
+    from tools import trigger_concurrent_pipelines as mod
+
+    with pytest.raises(SystemExit, match="interval must be"):
+        mod.main(["--token", "t", "--namespace", "root", "--interval", "-1"])

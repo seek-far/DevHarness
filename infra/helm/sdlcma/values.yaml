@@ -394,3 +394,15 @@ kube-prometheus-stack:
         memory: 256Mi
   # node-exporter / kube-state-metrics: fine on (small footprint, free
   # cluster-level CPU/mem/pod-state panels).
+  prometheus-node-exporter:
+    prometheus:
+      monitor:
+        # Scrape node-exporter at 15s (the stack default is the global 30s)
+        # so short CPU/mem spikes fall between fewer samples. Caveat: a spike
+        # briefer than the interval is still under-sampled — sampled
+        # monitoring can't reproduce `top`'s instantaneous peaks; the
+        # System-resources panels use rate(...[1m]) to surface what it can.
+        # (No `instance`→node-name relabel: the System-resources panels
+        # aggregate across instances into a single line — single shared WSL2
+        # host on kind — so the per-node label isn't shown.)
+        interval: 15s

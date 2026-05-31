@@ -28,6 +28,15 @@ Tuning:
                                 later POSTs wait for slots and the burst
                                 is no longer strict.
 
+Repetition (sustained / soak load):
+  --repeat N                    fire the whole burst N times (default 1 =
+                                the historical single-shot behaviour). Each
+                                round re-triggers a pipeline on every target.
+  --interval SECONDS            wait SECONDS between rounds (default 0;
+                                ignored when --repeat 1). The sleep is
+                                BETWEEN rounds only, never after the last, so
+                                --repeat 3 --interval 60 spans ~120s + work.
+
 Configuration is GitLab-/account-agnostic — pass --gitlab-url, --token,
 --namespace, --prefix. Defaults match the bundled gitlab.com test
 account (lishu20161 / sdlcma-fix-).
@@ -43,6 +52,11 @@ Example — eight strict-simultaneous on the bundled gitlab.com account:
 
   python tools/trigger_concurrent_pipelines.py \\
       --fixtures F01,F02,F03,F04,F05,F06,F07,F08 --concurrency 8
+
+Example — soak: two pipelines every 60s for 10 rounds (~10 min):
+
+  python tools/trigger_concurrent_pipelines.py \\
+      --fixtures F01,F02 --concurrency 2 --repeat 10 --interval 60
 """
 
 from __future__ import annotations
@@ -160,6 +174,43 @@ def trigger_pipeline(api: str, token: str, project_id: int, ref: str):
         return None, 0, repr(e)
 
 
+def run_round(api, token, targets, ref, concurrency, round_label=""):
+    """Fire one concurrent burst at every target, print a result table, and
+    return ``(ok_count, total, elapsed_s)``. One round = one pipeline POST
+    per target; the repeat loop in main() calls this N times."""
+    prefix = f"[{round_label}] " if round_label else ""
+    print(
+        f"{prefix}triggering {len(targets)} pipeline(s) @ ref={ref} "
+        f"concurrency={concurrency}"
+    )
+    t0 = time.time()
+    results: list[tuple[str, int | None, int, str]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futs = {
+            ex.submit(trigger_pipeline, api, token, pid, ref): path
+            for path, pid in targets
+        }
+        for f in concurrent.futures.as_completed(futs):
+            path = futs[f]
+            pid, status, err = f.result()
+            results.append((path, pid, status, err))
+
+    elapsed = time.time() - t0
+    results.sort(key=lambda r: r[0])
+    print(f"\n{'project':50s} {'status':>7} {'pipeline':>10}  notes")
+    print("-" * 90)
+    ok = 0
+    for path, pid, status, err in results:
+        marker = "OK " if pid else "ERR"
+        msg = err[:30] if err else ""
+        print(f"{path:50s} {status:>7} {str(pid or '-'):>10}  {marker} {msg}")
+        if pid:
+            ok += 1
+    print("-" * 90)
+    print(f"{ok}/{len(results)} triggered in {elapsed:.2f}s")
+    return ok, len(results), elapsed
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description="Concurrently trigger pipelines for SDLCMA smoke testing"
@@ -180,7 +231,26 @@ def main(argv=None):
     )
     p.add_argument("--ref", default="main")
     p.add_argument("--concurrency", type=int, default=5)
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="number of times to fire the whole burst (default 1). Each "
+             "round re-triggers a pipeline on every target.",
+    )
+    p.add_argument(
+        "--interval",
+        type=float,
+        default=0.0,
+        help="seconds to wait between rounds (default 0; ignored when "
+             "--repeat 1). Sleep is between rounds only, not after the last.",
+    )
     args = p.parse_args(argv)
+
+    if args.repeat < 1:
+        raise SystemExit("--repeat must be >= 1")
+    if args.interval < 0:
+        raise SystemExit("--interval must be >= 0")
 
     if args.token is None:
         args.token = load_token_default()
@@ -204,35 +274,27 @@ def main(argv=None):
     if not targets:
         raise SystemExit("no targets matched")
 
-    print(
-        f"triggering {len(targets)} pipeline(s) @ ref={args.ref} concurrency={args.concurrency}"
-    )
-    t0 = time.time()
-    results: list[tuple[str, int | None, int, str]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-        futs = {
-            ex.submit(trigger_pipeline, api, args.token, pid, args.ref): path
-            for path, pid in targets
-        }
-        for f in concurrent.futures.as_completed(futs):
-            path = futs[f]
-            pid, status, err = f.result()
-            results.append((path, pid, status, err))
+    total_ok = 0
+    total_triggered = 0
+    for i in range(args.repeat):
+        label = f"round {i + 1}/{args.repeat}" if args.repeat > 1 else ""
+        if label:
+            print(f"\n===== {label} =====")
+        ok, total, _ = run_round(
+            api, args.token, targets, args.ref, args.concurrency, label
+        )
+        total_ok += ok
+        total_triggered += total
+        if i < args.repeat - 1 and args.interval > 0:
+            print(f"\nsleeping {args.interval:g}s before next round...")
+            time.sleep(args.interval)
 
-    elapsed = time.time() - t0
-    results.sort(key=lambda r: r[0])
-    print(f"\n{'project':50s} {'status':>7} {'pipeline':>10}  notes")
-    print("-" * 90)
-    ok = 0
-    for path, pid, status, err in results:
-        marker = "OK " if pid else "ERR"
-        msg = err[:30] if err else ""
-        print(f"{path:50s} {status:>7} {str(pid or '-'):>10}  {marker} {msg}")
-        if pid:
-            ok += 1
-    print("-" * 90)
-    print(f"{ok}/{len(results)} triggered in {elapsed:.2f}s")
-    sys.exit(0 if ok == len(results) else 2)
+    if args.repeat > 1:
+        print(
+            f"\n===== total: {total_ok}/{total_triggered} triggered across "
+            f"{args.repeat} round(s) ====="
+        )
+    sys.exit(0 if total_ok == total_triggered else 2)
 
 
 if __name__ == "__main__":

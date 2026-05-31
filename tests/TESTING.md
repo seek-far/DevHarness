@@ -162,6 +162,13 @@ uv run python tools/trigger_concurrent_pipelines.py \
 uv run python tools/trigger_concurrent_pipelines.py \
   --fixtures all --include-order-be --concurrency 20
 
+# soak / sustained load: re-fire the burst every 60s for 10 rounds
+# (--repeat = total rounds, --interval = seconds between rounds; the sleep
+#  is between rounds only, so this spans ~9*60s + work). Use to watch the
+#  Grafana rate/latency panels under a steady trickle rather than one spike.
+uv run python tools/trigger_concurrent_pipelines.py \
+  --fixtures F01,F02 --concurrency 2 --repeat 10 --interval 60
+
 # cleanup
 uv run python tools/gitlab_fixture_repos.py teardown --yes
 ```

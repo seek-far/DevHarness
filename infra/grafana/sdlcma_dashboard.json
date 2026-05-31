@@ -408,6 +408,66 @@
         }
       ],
       "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "System resources (node-exporter)",
+      "gridPos": {"x": 0, "y": 50, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Node CPU usage (%)",
+      "description": "Aggregated to a single value: the kind nodes share one WSL2 host, so node-exporter reports the same VM. 100 * (1 - idle), rate over 1m. On a real multi-node cluster, switch to avg by (instance) for per-node lines.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 51, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])))",
+          "refId": "A",
+          "legendFormat": "usage"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}}
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "Node memory total vs used",
+      "description": "total = MemTotal; used = MemTotal - MemAvailable (excludes reclaimable cache, matches what `free`/k8s call used).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 8, "y": 51, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "max(node_memory_MemTotal_bytes)",
+          "refId": "A",
+          "legendFormat": "total"
+        },
+        {
+          "expr": "max(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)",
+          "refId": "B",
+          "legendFormat": "used"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "min": 0}}
+    },
+    {
+      "id": 63,
+      "type": "timeseries",
+      "title": "Node memory usage (%)",
+      "description": "100 * (1 - MemAvailable / MemTotal).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 16, "y": 51, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "avg(100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
+          "refId": "A",
+          "legendFormat": "usage"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}}
     }
   ]
 }
