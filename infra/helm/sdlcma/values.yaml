@@ -376,6 +376,15 @@ kube-prometheus-stack:
       dashboards:
         enabled: true
         searchNamespace: ALL
+      datasources:
+        # Grafana's Prometheus datasource `timeInterval` = the query step
+        # FLOOR. kube-prometheus-stack defaults it to the global scrape
+        # interval (30s), which capped every panel at 30s resolution even
+        # though our ServiceMonitors scrape at monitoring.scrapeInterval=15s.
+        # Pin it to 15s so panels render at the resolution we actually
+        # collect — purely a query-step change, NOT an extra scrape (no
+        # added Prometheus load; 30s-scraped metrics just repeat last value).
+        defaultDatasourceScrapeInterval: 15s
     resources:
       requests:
         cpu: 50m

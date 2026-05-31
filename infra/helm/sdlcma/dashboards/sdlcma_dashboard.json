@@ -70,6 +70,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
+          "noValue": "0",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -97,6 +98,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
+          "noValue": "0",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -400,25 +402,9 @@
       "gridPos": {"x": 8, "y": 42, "w": 8, "h": 8},
       "targets": [
         {
-          "expr": "sum(sdlcma_parse_trace_fallback_total)",
+          "expr": "sum(sdlcma_parse_trace_fallback_total) or vector(0)",
           "refId": "A",
           "legendFormat": "fallback count"
-        }
-      ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
-    },
-    {
-      "id": 53,
-      "type": "timeseries",
-      "title": "Reflection fires (cumulative)",
-      "description": "Fraction of fixes where the reflection enhancement fired ≥1 time. A/B telemetry for reflection vs baseline configs.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 16, "y": 42, "w": 8, "h": 8},
-      "targets": [
-        {
-          "expr": "sum by (agent) (sdlcma_reflection_fires_total)",
-          "refId": "A",
-          "legendFormat": "{{agent}}"
         }
       ],
       "fieldConfig": {"defaults": {"unit": "short"}}
