@@ -29,26 +29,48 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   hook system; built-in enhancements (memory, reflection); `agent_ref` pins a
   spec to an SDLCMA git ref for cross-version comparison.
 
-- **Observability** — versioned `RunRecord` telemetry (timings, retry counts,
-  branch / commit / MR fields, `max_input_tokens`, agent-code git status,
-  reflection and code-review counters); always-on journal writer with
-  `FLAGGED` markers for heuristically interesting runs; Redis heartbeat keys
-  for live worker monitoring; MCP server exposing the evaluation state
-  (`list_fixtures`, `read_journal_entry`, ...) to Claude Desktop or any MCP
-  client. **Stress-test profiling** — structured `phase_marker` logs across
-  gateway / orchestrator / worker for a 4-phase latency view (gateway→spawn,
-  spawn→worker_ready, fix() wallclock, per-LLM-call); `tools/load_sampler.py`
-  Redis sidecar for achieved concurrency + real backlog (XPENDING + XINFO
-  GROUPS lag, not XLEN); `tools/analyze_phase_log.py` rolls phase markers and
-  the sampler TSV into a per-bug + aggregate p50/p95/max report. The kind/Helm
-  observability stack (`kube-prometheus-stack` + a seven-row Grafana dashboard
-  incl. node-level CPU / memory) has been driven to **95 concurrent pipelines**
-  against a self-hosted GitLab — live dashboard under that load:
+- **Observability** — organized as three pillars (per-event **logs**,
+  per-run **RunRecord**, fleet-level **metrics**); full design in
+  [`docs/obs_en.md`](docs/obs_en.md):
+
+  - **Logs** — structured per-service logging plus single-line `phase_marker`
+    markers across gateway / orchestrator / worker that form a 4-phase latency
+    view (gateway→spawn, spawn→worker_ready, `fix()` wallclock, per-LLM-call).
+    `tools/load_sampler.py` is a Redis sidecar for achieved concurrency + real
+    backlog (XPENDING + XINFO GROUPS lag, **not** XLEN); `tools/analyze_phase_log.py`
+    rolls the markers and the sampler TSV into a per-bug + aggregate p50/p95/max
+    report. Redis heartbeat keys (unix-ms value) double as a live-worker liveness
+    signal and a freshness gauge.
+  - **RunRecord** — versioned (`SCHEMA_VERSION`, additive-only) per-`fix()`
+    telemetry: timings, retry counts, branch / commit / MR fields, LLM cost /
+    latency (`llm_call_count`, token totals, `llm_call_wallclock_ms`,
+    `max_input_tokens`), agent-code git status, reflection and code-review
+    counters. Written by the always-on journal writer (`FLAGGED` markers for
+    heuristically interesting runs) and by the eval runner — one shape, so
+    downstream tooling handles one schema. An MCP server exposes the evaluation
+    state (`list_fixtures`, `read_journal_entry`, ...) to Claude Desktop or any
+    MCP client.
+  - **Metrics** — gateway / orchestrator / LLM-gateway each export a Prometheus
+    `/metrics` surface (low-cardinality labels only — never `bug_id` /
+    `project_id`); the one-shot worker has no live counter, so its RunRecords are
+    re-scanned into metrics by `tools/runrecord_to_metrics.py` (bare-host
+    node_exporter textfile) or `tools/runrecord_exporter.py` (K8s HTTP exporter,
+    same metric shape). The kind/Helm observability stack (`kube-prometheus-stack`
+    + a seven-row Grafana dashboard incl. node-level CPU / memory) has been driven
+    to **95 concurrent pipelines** against a self-hosted GitLab — live dashboard
+    under that load:
 
   ![SDLCMA Grafana dashboard under a 95-concurrent pipeline burst on the kind/Helm stack](assets/grafana_dashboard_95_concurrent_2026-05-31.png)
 
   (Earlier bare-WSL baseline at N=19:
   [`tests/stress_test_1.md`](tests/stress_test_1.md).)
+
+  - **Tracing** — not built in, but the agent runs on **LangGraph** with LLM
+    calls through `langchain_openai`, so request-level tracing can be turned on
+    with no code change by setting the standard LangSmith env vars
+    (`LANGCHAIN_TRACING_V2=true`, `LANGCHAIN_API_KEY=...`, optional
+    `LANGCHAIN_PROJECT`); LangSmith then captures the per-node graph spans and
+    the underlying LLM calls.
 
 - **Evaluation & Quality** — `bench` CLI for agent × fixture sweeps; curated
   fixtures (`F01`–`F10`) plus journal-promoted real bugs; `RunRecord`
