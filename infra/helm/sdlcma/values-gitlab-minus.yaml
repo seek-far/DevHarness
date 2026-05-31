@@ -1,0 +1,92 @@
+# Overlay: K8s deployment against a self-hosted GitLab reachable on the
+# operator's tailnet (the "gitlab@minus" config in settings/). Composes
+# the kind chart with:
+#   * ENV=local_multi_process on every component (matches the worker env
+#     file shape — see settings/worker_local_multi_process.env.gitlab@minus)
+#   * WORKER_SPAWNER=k8s (project invariant #1: never invent a new ENV
+#     name for a spawner; the spawner is decoupled)
+#   * hostAliases injected at deploy time by setup.sh (`tailscale ip -4
+#     minus` → IP) — kind pods route the SNAT'd egress through the host's
+#     tailscale interface, reaching minus across intranet boundaries.
+#   * The "production rehearsal on ls4900" capacity envelope: LLM gateway
+#     (persistent cache, opt-in routing for the worker), runrecord
+#     exporter, kube-prometheus-stack (single-node-friendly tuning) ALL
+#     ENABLED.
+#
+# AWS ECS is unaffected — ECS uses its own CloudFormation stack, does not
+# consume this chart, and is intentionally kept minimal (just gateway +
+# orchestrator + worker) to fit the t3.micro capacity envelope.
+#
+# Use:
+#   helm install sdlcma infra/helm/sdlcma \
+#     -n sdlcma --create-namespace \
+#     -f infra/helm/sdlcma/values-gitlab-minus.yaml \
+#     --set "extraHostAliases[0].ip=$(tailscale ip -4 minus | head -1)" \
+#     --set "extraHostAliases[0].hostnames[0]=minus"
+#   (setup.sh does the tailscale lookup + --set automatically)
+#
+# Prereqs (out-of-band, never templated):
+#   kubectl -n sdlcma create secret generic sdlcma-secrets \
+#     --from-literal=GITLAB_PRIVATE_TOKEN=glpat-xxx \
+#     --from-literal=LLM_API_KEY=sk-xxx
+#   (setup.sh creates this from settings/worker_local_multi_process.env.gitlab@minus)
+
+# ── webhook ingress ──────────────────────────────────────────────────────────
+# minus is reachable from ls4900 (and ls4900 from minus) over tailnet, so
+# GitLab can call our webhook directly via the ingress-nginx URL — no
+# cloudflared tunnel needed.
+cloudflared:
+  enabled: false
+
+# ── ConfigMap overrides ──────────────────────────────────────────────────────
+configMaps:
+  gateway:
+    ENV: local_multi_process
+  orchestrator:
+    ENV: local_multi_process
+    # Decouple spawner from env (invariant #1). Without this the by-env
+    # mapping picks `process` for local_multi_process — wrong here.
+    WORKER_SPAWNER: k8s
+    # K8S_HOST_ALIASES + K8S_JOURNAL_HOST_PATH are NOT set here —
+    # configmap.yaml derives both from .Values.extraHostAliases and
+    # .Values.journal.persistence (single source of truth). setup.sh
+    # only has to inject extraHostAliases via --set.
+  worker:
+    ENV: local_multi_process
+    # Drop LocalGitlab leftovers from values.yaml's worker default. Helm 3
+    # removes null-valued keys on merge.
+    GITLAB_API: http://minus:8929/api/v4
+    GITLAB_USERNAME: root
+    # No SSH for this deployment — HTTP+token push, same as gitlab_saas.
+    GITLAB_SSH_PORT: null
+
+# ── observability stack ON ───────────────────────────────────────────────────
+# Single-node-kind sized; values.yaml's `monitoring.kube-prometheus-stack`
+# defaults (Alertmanager off, retention=2d, modest resources) keep this
+# fitting on a dev-class machine.
+monitoring:
+  enabled: true
+
+# ── LLM gateway ON (cache + worker auto-routing) ─────────────────────────────
+# configmap.yaml automatically seeds LLM_VIA_GATEWAY=true and
+# LLM_API_BASE_URL=http://llm-gateway:9000/v1 into worker-config when this
+# is true. Default config (qwen3 Dashscope + persistent cache, normalize_
+# content on) suits the stress-test replay workflow.
+llmGateway:
+  enabled: true
+
+# ── Journal volume + exporter ON ─────────────────────────────────────────────
+# hostPath is fine for single-node kind. Multi-node migration would flip
+# this off and route runrecord metrics through a different aggregator
+# (see CLAUDE.md "production rehearsal" caveats).
+journal:
+  persistence:
+    enabled: true
+runrecordExporter:
+  enabled: true
+
+# ── extraHostAliases injected by setup.sh ────────────────────────────────────
+# Empty here on purpose; the tailscale IP is dynamic per-machine and only
+# known at deploy time. setup.sh runs `tailscale ip -4 minus` and layers
+# the value in via --set, so the chart never bakes a host-specific IP.
+extraHostAliases: []

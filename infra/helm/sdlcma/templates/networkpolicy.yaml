@@ -9,25 +9,38 @@ GitLab, image pulls). Doing egress correctly means enumerating those with
 DNS + ipBlock rules — deferred (documented in NOTES §6e). Ingress lockdown
 is the high-value, low-risk half and is what we ship here.
 
-Pod labels this keys off (must stay in sync with the chart + spawner):
+POD-SCOPE decision (incident 2026-05-31): the deny policy selects ONLY the
+first-party core app pods it was written for —
   app=gateway / app=orchestrator / app=redis / app=bf-worker
-(the worker Job pods get app=bf-worker from K8sJobSpawner._build_job).
+(worker Job pods get app=bf-worker from K8sJobSpawner._build_job). It must
+NOT use an empty podSelector (namespace-wide deny): the observability stack
+added later (kube-prometheus-stack grafana/prometheus/kube-state-metrics/
+node-exporter — pods we don't own and don't label) plus llm-gateway /
+runrecord-exporter would be silently blackholed. A namespace-wide deny here
+broke the grafana ingress (504), the grafana→Prometheus datasource, every
+/metrics scrape, AND worker→llm-gateway (LLM_VIA_GATEWAY). Pods outside this
+selector fall back to the k8s default (allow ingress). Kept enforceable by
+tests/test_helm_chart.py. NEVER widen the podSelector back to {}.
 */ -}}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: default-deny-ingress
+  name: deny-core-app-ingress
   namespace: {{ include "sdlcma.namespace" . }}
   labels:
     {{- include "sdlcma.labels" . | nindent 4 }}
 spec:
-  # Empty podSelector = every pod in the namespace.
-  podSelector: {}
+  # Scoped to the first-party core app pods (NOT empty = NOT namespace-wide —
+  # see header). The allow-* policies below are additive (OR-combined).
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["gateway", "orchestrator", "redis", "bf-worker"]
   policyTypes:
     - Ingress
-  # No ingress rules → deny all inbound. The allow-* policies below are
-  # additive (NetworkPolicies are OR-combined).
+  # No ingress rules → deny all inbound to the selected pods.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -45,7 +58,8 @@ spec:
     - Ingress
   ingress:
     # Webhook traffic — reaches the gateway via ingress-nginx (a different
-    # namespace) or kubectl port-forward. Empty `from` = any source.
+    # namespace) or kubectl port-forward. Empty `from` = any source. This
+    # port also carries the gateway's /metrics surface (scraped by Prometheus).
     - ports:
         - protocol: TCP
           port: {{ .Values.gateway.service.port }}
@@ -74,4 +88,31 @@ spec:
       ports:
         - protocol: TCP
           port: 6379
+{{- if .Values.monitoring.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-orchestrator-metrics
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    # Prometheus (kube-prometheus-stack) scrapes the orchestrator's headless
+    # orchestrator-metrics Service. The orchestrator is in the deny set above
+    # (it takes no other inbound), so without this the scrape is blackholed
+    # and orchestrator panels stay empty. Non-sensitive counters → allow from
+    # any source (mirrors allow-gateway-ingress) rather than coupling to the
+    # kube-prometheus-stack Prometheus pod labels.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.monitoring.orchestratorMetricsPort | default 9102 }}
+{{- end }}
 {{- end }}

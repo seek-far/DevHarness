@@ -31,8 +31,15 @@ from orchestrator.spawner import (  # noqa: E402
 NS = "sdlcma"
 
 
-def _make_spawner(registry=None, batch=None):
-    """Build a K8sJobSpawner with kubeconfig + BatchV1Api mocked out."""
+def _make_spawner(registry=None, batch=None, *, host_aliases=None,
+                  journal_host_path=""):
+    """Build a K8sJobSpawner with kubeconfig + BatchV1Api mocked out.
+
+    `host_aliases` / `journal_host_path` default to the pre-2026-05-30 shape
+    (no hostAliases, no journal mount) so every existing test exercises the
+    byte-identical Job spec. The two new opt-in tests below pass these to
+    exercise the additive paths.
+    """
     registry = registry or WorkerRegistry()
     batch = batch or MagicMock()
     with patch("kubernetes.config.load_incluster_config",
@@ -47,6 +54,8 @@ def _make_spawner(registry=None, batch=None):
             worker_config_map="worker-config",
             secret_name="sdlcma-secrets",
             job_ttl_seconds=600,
+            host_aliases=host_aliases,
+            journal_host_path=journal_host_path,
         )
     return spawner, registry, batch
 
@@ -215,3 +224,93 @@ def test_proxy_terminate_deletes_job():
     proxy.terminate()
     assert batch.delete_namespaced_job.call_count == 1
     assert batch.delete_namespaced_job.call_args.kwargs["name"] == "bf-worker-x"
+
+
+# ── hostAliases + journal hostPath (additive, default no-op) ────────────────
+#
+# These exercise the 2026-05-30 additions to K8sJobSpawner: optional pod-level
+# hostAliases (so worker Jobs can reach `minus` over the operator's tailnet)
+# and an optional hostPath journal mount (so runrecord-exporter can read the
+# journal that workers write). Both default empty / "" → the produced Job
+# spec is byte-identical to the pre-2026-05-30 shape, which the existing
+# test_spawn_creates_job_with_expected_spec test already pins.
+
+def test_spawn_no_host_aliases_no_volumes_by_default():
+    """Regression guard: with neither new param passed, the Job spec must
+    NOT carry hostAliases / volumes / volumeMounts / BF_JOURNAL_DIR. AWS ECS
+    and existing K8s deployments depend on this byte-identical default."""
+    spawner, _, batch = _make_spawner()
+    asyncio.run(spawner.spawn("BUG-DEF", "1", "u", "1"))
+    job = batch.create_namespaced_job.call_args.kwargs["body"]
+    pod = job.spec.template.spec
+    assert pod.host_aliases is None
+    assert pod.volumes is None
+    c = pod.containers[0]
+    assert c.volume_mounts is None
+    env = {e.name: e.value for e in c.env}
+    assert "BF_JOURNAL_DIR" not in env
+
+
+def test_spawn_with_host_aliases_injects_pod_field():
+    """When host_aliases is non-empty, every spawned Job carries a V1HostAlias
+    list translated 1:1 from the operator-supplied dicts. Inside a kind
+    cluster this is the mechanism that lets `git clone http://minus:8929/...`
+    resolve to the operator's tailscale IP (kindnet SNATs the egress through
+    the host's tailscale interface)."""
+    spawner, _, batch = _make_spawner(host_aliases=[
+        {"ip": "100.64.0.5", "hostnames": ["minus"]},
+        {"ip": "100.64.0.6", "hostnames": ["registry", "registry.lan"]},
+    ])
+    asyncio.run(spawner.spawn("BUG-HA", "1", "u", "1"))
+    pod = batch.create_namespaced_job.call_args.kwargs["body"].spec.template.spec
+    assert pod.host_aliases is not None
+    assert len(pod.host_aliases) == 2
+    assert pod.host_aliases[0].ip == "100.64.0.5"
+    assert pod.host_aliases[0].hostnames == ["minus"]
+    assert pod.host_aliases[1].ip == "100.64.0.6"
+    assert pod.host_aliases[1].hostnames == ["registry", "registry.lan"]
+
+
+def test_spawn_with_journal_host_path_mounts_volume_and_sets_env():
+    """When journal_host_path is non-empty, the Pod gets a hostPath Volume
+    mounted at the SAME path inside the container, and BF_JOURNAL_DIR points
+    there — that's what makes per-worker RunRecord files survive Pod
+    termination (Pod is ephemeral; the node-local directory persists), which
+    in turn is what lets runrecord-exporter render Prometheus metrics from
+    the accumulated journal."""
+    spawner, _, batch = _make_spawner(journal_host_path="/var/sdlcma/journal")
+    asyncio.run(spawner.spawn("BUG-J", "1", "u", "1"))
+    pod = batch.create_namespaced_job.call_args.kwargs["body"].spec.template.spec
+    assert pod.volumes is not None
+    assert len(pod.volumes) == 1
+    vol = pod.volumes[0]
+    assert vol.name == "journal"
+    assert vol.host_path.path == "/var/sdlcma/journal"
+    # DirectoryOrCreate auto-creates on the node so setup.sh / cluster admin
+    # doesn't need a pre-bootstrap mkdir step before the first worker runs.
+    assert vol.host_path.type == "DirectoryOrCreate"
+
+    c = pod.containers[0]
+    mounts = c.volume_mounts
+    assert mounts is not None
+    assert len(mounts) == 1
+    assert mounts[0].name == "journal"
+    assert mounts[0].mount_path == "/var/sdlcma/journal"
+
+    env = {e.name: e.value for e in c.env}
+    assert env["BF_JOURNAL_DIR"] == "/var/sdlcma/journal"
+
+
+def test_spawn_with_both_host_aliases_and_journal_does_not_drop_either():
+    """ls4900-shaped config: both options enabled. Belt-and-braces that the
+    two features don't shadow each other in _build_job."""
+    spawner, _, batch = _make_spawner(
+        host_aliases=[{"ip": "100.64.0.5", "hostnames": ["minus"]}],
+        journal_host_path="/var/sdlcma/journal",
+    )
+    asyncio.run(spawner.spawn("BUG-BOTH", "1", "u", "1"))
+    pod = batch.create_namespaced_job.call_args.kwargs["body"].spec.template.spec
+    assert pod.host_aliases is not None and len(pod.host_aliases) == 1
+    assert pod.volumes is not None and len(pod.volumes) == 1
+    env = {e.name: e.value for e in pod.containers[0].env}
+    assert env["BF_JOURNAL_DIR"] == "/var/sdlcma/journal"

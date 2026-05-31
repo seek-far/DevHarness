@@ -17,6 +17,11 @@ COPY settings/ /app/settings/
 # (Phase-2 reviewer); it is NOT under bf_worker/, so without this COPY the
 # worker crashes on import (ModuleNotFoundError: No module named 'inspection').
 COPY inspection/ /app/inspection/
+# tools/ holds runrecord_exporter + runrecord_to_metrics. The runrecord-exporter
+# Deployment (infra/helm) reuses THIS image and overrides the command to
+# `python -m tools.runrecord_exporter`; without this COPY it crashes
+# (ModuleNotFoundError: No module named 'tools'). /app is already on PYTHONPATH.
+COPY tools/ /app/tools/
 
 ENV PYTHONPATH="/app:/app/bf_worker"
 

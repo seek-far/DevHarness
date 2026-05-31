@@ -1,10 +1,39 @@
 {{- /*
 Three independent ConfigMaps (gateway / orchestrator / worker), one per
 service, so each rolls independently and the blast radius stays small —
-same rationale as the raw configmap.yaml. data: is rendered verbatim from
+same rationale as the raw configmap.yaml. data: is rendered from
 .Values.configMaps.<svc> (UPPERCASE env-var keys).
+
+When .Values.llmGateway.enabled is true, the worker ConfigMap is seeded
+with LLM_VIA_GATEWAY=true + LLM_API_BASE_URL pointing at the in-cluster
+llm-gateway Service — automatically routing every worker pod through the
+cache. User-supplied values in .Values.configMaps.worker still win
+(mergeOverwrite is right-biased), so an explicit `LLM_VIA_GATEWAY: "false"`
+in the overlay opts out without disabling the gateway itself.
 */ -}}
 {{- range $svc := list "gateway" "orchestrator" "worker" }}
+{{- $data := dict }}
+{{- if and (eq $svc "worker") $.Values.llmGateway.enabled }}
+{{-   $_ := set $data "LLM_VIA_GATEWAY" "true" }}
+{{-   $_ := set $data "LLM_API_BASE_URL" (printf "http://llm-gateway:%v/v1" $.Values.llmGateway.service.port) }}
+{{- end }}
+{{- /* Orchestrator-side: derive the K8sJobSpawner inputs from the same
+       single source of truth the chart-rendered Pods consume
+       (.Values.extraHostAliases, .Values.journal.persistence). This way
+       setup.sh only has to inject extraHostAliases via --set; the chart
+       fans it out to (a) gateway/orchestrator/llm-gw/exporter PodSpecs
+       and (b) every spawned bf-worker Job (via this env var). One
+       source of truth for "kind pods reach `minus` via the host's
+       tailscale interface." */}}
+{{- if eq $svc "orchestrator" }}
+{{-   if gt (len $.Values.extraHostAliases) 0 }}
+{{-     $_ := set $data "K8S_HOST_ALIASES" ($.Values.extraHostAliases | toJson) }}
+{{-   end }}
+{{-   if $.Values.journal.persistence.enabled }}
+{{-     $_ := set $data "K8S_JOURNAL_HOST_PATH" $.Values.journal.persistence.hostPath }}
+{{-   end }}
+{{- end }}
+{{- $_ := mergeOverwrite $data (index $.Values.configMaps $svc) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,6 +43,6 @@ metadata:
     app: {{ $svc }}
     {{- include "sdlcma.labels" $ | nindent 4 }}
 data:
-  {{- toYaml (index $.Values.configMaps $svc) | nindent 2 }}
+  {{- toYaml $data | nindent 2 }}
 ---
 {{- end }}

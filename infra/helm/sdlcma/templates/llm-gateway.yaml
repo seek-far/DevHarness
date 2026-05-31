@@ -1,0 +1,141 @@
+{{- if .Values.llmGateway.enabled }}
+{{- /*
+LLM gateway: opt-in OpenAI-compatible proxy + persistent response cache.
+Worker → gateway over plain OpenAI; gateway → backends (Dashscope, vLLM,
+etc.) over the same protocol. configmap.yaml seeds worker-config to route
+the worker through this Service when llmGateway.enabled is true.
+
+Single replica because the cache is a sqlite file; horizontal scaling
+would break cache coherency. The cache db lives on a PVC so it survives
+pod restarts and can be rsync'd between machines (the file IS the
+portability contract — see CLAUDE.md "LLM Gateway response cache").
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-gateway-config
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: llm-gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- toYaml .Values.llmGateway.config | nindent 4 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-gateway-cache
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: llm-gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.llmGateway.pvcSize }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gateway
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: llm-gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.llmGateway.replicas }}
+  strategy:
+    # The cache file backend has a single writer; two live pods would
+    # corrupt the sqlite WAL. Recreate guarantees clean handover.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llm-gateway
+  template:
+    metadata:
+      labels:
+        app: llm-gateway
+      annotations:
+        # Roll the pod when the gateway YAML changes — without this,
+        # `helm upgrade` leaves a stale config loaded in memory. Hash the
+        # values block directly (NOT `include` on this same file — that
+        # self-recurses).
+        checksum/config: {{ .Values.llmGateway.config | toJson | sha256sum }}
+    spec:
+      # Kubernetes injects Docker-link legacy env vars for every Service in the
+      # namespace: a Service named `llm-gateway` yields LLM_GATEWAY_PORT=
+      # tcp://<clusterIP>:9000, which clobbers the image's ENV LLM_GATEWAY_PORT=
+      # 9000 that the Dockerfile CMD feeds to `uvicorn --port` → uvicorn aborts
+      # ("not a valid integer"). This pod reaches its backends via config.yaml
+      # URLs, never via service-link vars, so disabling them is safe and removes
+      # the whole class of name-collision footguns.
+      enableServiceLinks: false
+      {{- with .Values.extraHostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: llm-gateway
+          image: "{{ .Values.llmGateway.image.repository }}:{{ .Values.llmGateway.image.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          env:
+            - name: LLM_GATEWAY_CONFIG
+              value: /etc/llm_gateway/config.yaml
+            # Selectively pull only the LLM API key from the shared Secret —
+            # the gitlab token doesn't need to be in the gateway pod.
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: LLM_API_KEY
+          ports:
+            - containerPort: {{ .Values.llmGateway.service.port }}
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: {{ .Values.llmGateway.service.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/models
+              port: {{ .Values.llmGateway.service.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          volumeMounts:
+            - name: config
+              mountPath: /etc/llm_gateway
+              readOnly: true
+            - name: cache
+              mountPath: /var/lib/sdlcma
+          resources:
+            {{- toYaml .Values.llmGateway.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: llm-gateway-config
+        - name: cache
+          persistentVolumeClaim:
+            claimName: llm-gateway-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: llm-gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: llm-gateway
+  ports:
+    - port: {{ .Values.llmGateway.service.port }}
+      targetPort: {{ .Values.llmGateway.service.port }}
+      name: http
+{{- end }}

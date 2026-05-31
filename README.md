@@ -944,6 +944,8 @@ orchestrator's HealthMonitor owns retries; `ttlSecondsAfterFinished` self-GC;
 ```bash
 # 1. populate settings/worker_gitlab_saas.env with GITLAB_PRIVATE_TOKEN + LLM_API_KEY
 # 2. bring up the stack (kind + build + load + helm install + URL extract)
+VALUES_FILE=infra/helm/sdlcma/values-gitlab-saas.yaml \
+ENV_FILE=settings/worker_gitlab_saas.env \
 bash infra/k8s/setup.sh
 # 3. configure the gitlab.com project webhook to the printed URL + /webhook
 # 4. trigger a failing pipeline, or run the smoke
@@ -951,6 +953,39 @@ PROJECT_PATH=user/repo bash infra/k8s/gitlab-smoke.sh
 # 5. teardown
 bash infra/k8s/teardown.sh
 ```
+
+**Production-rehearsal overlay (default since 2026-05-30):
+`values-gitlab-minus.yaml`** retargets the same chart at a self-hosted
+GitLab on the operator's tailnet (`http://minus:8929`) and turns on the
+full observability stack: chart-integrated LLM gateway with persistent
+sqlite cache (worker auto-routes through it when `llmGateway.enabled=true`),
+`tools/runrecord_exporter.py` as a long-running `/metrics` HTTP server
+(K8s-shaped replacement for the bare-host cron+textfile pattern; reads
+the journal mounted via hostPath from every spawned `bf-worker` Job),
+and `kube-prometheus-stack` as a conditional Helm dependency (Prometheus
++ Grafana + node-exporter + KSM; Alertmanager off + retention=2d to fit
+single-node kind). The Grafana dashboard ships as a labeled ConfigMap
+that the kube-prometheus-stack sidecar auto-loads (`grafana_dashboard:
+"1"`). `setup.sh` defaults to this overlay; running it on a host that's
+a tailscale peer with `minus` is one command:
+
+```bash
+bash infra/k8s/setup.sh         # ← uses values-gitlab-minus.yaml by default
+```
+
+Tailnet routing for cross-intranet `minus:8929`: `setup.sh` resolves
+`tailscale ip -4 minus` at deploy time and injects it as
+`extraHostAliases` into every chart Pod (gateway / orchestrator /
+llm-gateway / runrecord-exporter) AND through `K8S_HOST_ALIASES` env into
+every per-bug `bf-worker` Job (`K8sJobSpawner._build_job`). `kindnet`
+SNATs the pod egress through the host's tailscale interface. **AWS ECS
+is intentionally kept minimal** (gateway + orchestrator + worker; no
+LLM gateway, no monitoring) to fit the t3.micro capacity envelope; it
+uses CloudFormation and does not consume this Helm chart, so none of
+the additions touch it. hostPath journal is **single-node kind**
+specific — multi-node clusters need a RWX StorageClass; flip
+`journal.persistence.enabled=false` and aggregate runrecord metrics
+externally there. Full contract: `docs/deployment.md`.
 
 For multi-repo concurrent stress (N independent fixtures rather than
 re-triggering one repo), use the bundled tools:

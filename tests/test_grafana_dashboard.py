@@ -171,3 +171,27 @@ def test_uid_and_title_for_provisioning():
     updates. Without it, re-import creates duplicates."""
     data = json.loads(DASHBOARD_PATH.read_text())
     assert data.get("uid") == "sdlcma-main"
+
+
+def test_chart_copy_matches_canonical():
+    """The chart ships a mirror of this file at infra/helm/sdlcma/dashboards/
+    so Helm's `Files.Get` can embed it into a ConfigMap (helm package can
+    only ship files inside the chart dir). The two copies MUST be
+    byte-identical — drift means K8s users get a stale dashboard while
+    bare-host users see the current one (or vice versa). This test makes
+    a forgotten copy fail at PR review, not at deploy."""
+    chart_copy = (
+        Path(__file__).resolve().parents[1]
+        / "infra" / "helm" / "sdlcma" / "dashboards" / "sdlcma_dashboard.json"
+    )
+    assert chart_copy.is_file(), (
+        f"chart copy missing at {chart_copy} — run "
+        f"`cp infra/grafana/sdlcma_dashboard.json {chart_copy}` after every "
+        f"dashboard edit"
+    )
+    assert chart_copy.read_bytes() == DASHBOARD_PATH.read_bytes(), (
+        f"chart copy {chart_copy} differs from canonical {DASHBOARD_PATH} "
+        f"— re-run `cp infra/grafana/sdlcma_dashboard.json {chart_copy}` "
+        f"to resync (the chart's grafana-dashboard-cm.yaml reads the chart "
+        f"copy via Files.Get)"
+    )

@@ -574,7 +574,9 @@ class K8sJobSpawner:
     def __init__(self, registry: WorkerRegistry, redis_url: str,
                  worker_image: str, namespace: str,
                  worker_config_map: str, secret_name: str,
-                 job_ttl_seconds: int):
+                 job_ttl_seconds: int,
+                 host_aliases: list | None = None,
+                 journal_host_path: str = ""):
         self._registry = registry
         self._redis_url = redis_url
         self._worker_image = worker_image
@@ -582,6 +584,12 @@ class K8sJobSpawner:
         self._worker_config_map = worker_config_map
         self._secret_name = secret_name
         self._job_ttl_seconds = job_ttl_seconds
+        # Optional pod-level hostAliases (list of {"ip":..., "hostnames":[...]})
+        # and hostPath journal mount. Both default-empty → produced Job is
+        # byte-identical to the pre-2026-05-30 spec (preserves the AWS ECS
+        # spawner contract + existing K8s deployments).
+        self._host_aliases = host_aliases or []
+        self._journal_host_path = journal_host_path
 
         from kubernetes import client, config
         from kubernetes.config.config_exception import ConfigException
@@ -644,6 +652,29 @@ class K8sJobSpawner:
         if os.getenv("BF_AGENT_CONFIG"):
             env.append(client.V1EnvVar(name="BF_AGENT_CONFIG",
                                        value=os.environ["BF_AGENT_CONFIG"]))
+        # Surface the journal mount to the worker code path. The worker reads
+        # BF_JOURNAL_DIR (see bf_worker/journal.py) and writes record.json
+        # under it. Empty journal_host_path → variable not set → journal lives
+        # in the ephemeral Pod fs (pre-existing behaviour, dies with the Pod).
+        volume_mounts = []
+        volumes = []
+        if self._journal_host_path:
+            env.append(client.V1EnvVar(name="BF_JOURNAL_DIR",
+                                       value=self._journal_host_path))
+            volume_mounts.append(client.V1VolumeMount(
+                name="journal",
+                mount_path=self._journal_host_path,
+            ))
+            volumes.append(client.V1Volume(
+                name="journal",
+                host_path=client.V1HostPathVolumeSource(
+                    path=self._journal_host_path,
+                    # DirectoryOrCreate auto-creates on the node — avoids a
+                    # bootstrap chicken-and-egg where setup.sh would have to
+                    # mkdir on the host before the first worker scheduled.
+                    type="DirectoryOrCreate",
+                ),
+            ))
 
         container = client.V1Container(
             name="bf-worker",
@@ -657,7 +688,16 @@ class K8sJobSpawner:
                 client.V1EnvFromSource(
                     secret_ref=client.V1SecretEnvSource(name=self._secret_name)),
             ],
+            # Empty list → kubernetes client serializes to None → byte-identical
+            # to the pre-2026-05-30 Job spec when no journal mount is set.
+            volume_mounts=volume_mounts or None,
         )
+        # Translate the operator-supplied dicts into V1HostAlias objects. Each
+        # item is {"ip": str, "hostnames": [str]}; same shape as the K8s API.
+        host_aliases = [
+            client.V1HostAlias(ip=a["ip"], hostnames=a["hostnames"])
+            for a in self._host_aliases
+        ] or None
         pod_spec = client.V1PodSpec(
             restart_policy="Never",
             # The worker talks only to Redis / GitLab / the LLM — never the
@@ -666,6 +706,8 @@ class K8sJobSpawner:
             # in depth alongside the patch/fetch/prompt guards.
             automount_service_account_token=False,
             containers=[container],
+            host_aliases=host_aliases,
+            volumes=volumes or None,
         )
         template = client.V1PodTemplateSpec(
             metadata=client.V1ObjectMeta(labels={"app": "bf-worker", "bug-id": job_name}),

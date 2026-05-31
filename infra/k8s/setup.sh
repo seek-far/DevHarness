@@ -46,15 +46,27 @@ CLUSTER_NAME="${CLUSTER_NAME:-sdlcma-dev}"
 NAMESPACE="${NAMESPACE:-sdlcma}"
 RELEASE="${RELEASE:-sdlcma}"
 CHART_DIR="${CHART_DIR:-infra/helm/sdlcma}"
-VALUES_FILE="${VALUES_FILE:-infra/helm/sdlcma/values-gitlab-saas.yaml}"
+# Default to the "ls4900 production-rehearsal" overlay: kind cluster on the
+# tailnet, against the operator's self-hosted GitLab at host `minus`. Full
+# observability stack on (kube-prometheus-stack + Grafana dashboard + LLM
+# gateway with persistent cache + runrecord exporter). Override to point
+# at gitlab.com or a different operator setup:
+#   VALUES_FILE=infra/helm/sdlcma/values-gitlab-saas.yaml \
+#   ENV_FILE=settings/worker_gitlab_saas.env \
+#   bash infra/k8s/setup.sh
+VALUES_FILE="${VALUES_FILE:-infra/helm/sdlcma/values-gitlab-minus.yaml}"
 # Per-host overlay layered ON TOP of $VALUES_FILE when it exists. Gitignored
 # (.gitignore: infra/helm/sdlcma/values.local*.yaml). Use it for host-
 # specific divergences — e.g. `cloudflared.enabled: false` when the host has
 # direct webhook reachability via the ingress-nginx path (tailnet/LAN/host).
 LOCAL_VALUES_FILE="${LOCAL_VALUES_FILE:-infra/helm/sdlcma/values.local.yaml}"
-ENV_FILE="${ENV_FILE:-settings/worker_gitlab_saas.env}"
+ENV_FILE="${ENV_FILE:-settings/worker_local_multi_process.env.gitlab@minus}"
 KIND_CONFIG="${KIND_CONFIG:-infra/kind/cluster.yaml}"
-IMAGES=(dh-gateway dh-orchestrator dh-bf-worker)
+# dh-llm-gateway built+loaded unconditionally — kind load is cheap, and the
+# chart only references the image when llmGateway.enabled=true (so disabled
+# overlays don't touch it at runtime). Keeps setup.sh oblivious to whether
+# the operator turned the gateway on or off.
+IMAGES=(dh-gateway dh-orchestrator dh-bf-worker dh-llm-gateway)
 
 START_TS=$(date +%s)
 say()   { printf '[t+%4ds] %s\n' $(($(date +%s) - START_TS)) "$*"; }
@@ -92,6 +104,7 @@ for img in "${IMAGES[@]}"; do
     dh-gateway)      DF=Dockerfile.gateway      ;;
     dh-orchestrator) DF=Dockerfile.orchestrator ;;
     dh-bf-worker)    DF=Dockerfile.bf-worker    ;;
+    dh-llm-gateway)  DF=Dockerfile.llm-gateway  ;;
   esac
   docker build -f "$DF" -t "$img:latest" . 2>&1 \
     | grep -E "^Step|writing image|naming" | tail -3 | sed 's/^/  /'
@@ -148,6 +161,21 @@ if [ "$INSTALL_INGRESS_NGINX" = "1" ]; then
   fi
   kubectl apply -f "$TMP_MF" 2>&1 | tail -5 | sed 's/^/  /'
   rm -f "$TMP_MF"
+  # Pin controller to the control-plane node. kind cluster.yaml maps host
+  # :18080 → control-plane :80 (extraPortMappings), and the controller uses
+  # hostPort 80 — so the pod MUST land on control-plane or the host port is a
+  # black hole (TCP accepts → immediate RST). The upstream provider/kind
+  # manifest historically pinned this via nodeSelector ingress-ready=true +
+  # control-plane toleration, but `main` has drifted (observed 2026-05-30:
+  # pod landed on sdlcma-dev-worker, curl http://localhost:18080/healthz
+  # got "Connection reset by peer"). Re-applying the constraint here is
+  # idempotent and robust to upstream drift — we own the invariant, not the
+  # manifest.
+  say "  pinning controller to control-plane (nodeSelector + toleration)"
+  kubectl -n ingress-nginx patch deploy ingress-nginx-controller \
+    --type=strategic \
+    -p '{"spec":{"template":{"spec":{"nodeSelector":{"ingress-ready":"true"},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Equal","effect":"NoSchedule"}]}}}}' \
+    2>&1 | sed 's/^/  /'
   # Admission Jobs run first (pull certgen via the proxy, create the
   # ingress-nginx-admission Secret), then the controller mounts that Secret
   # and starts. Wait on the controller's Ready condition.
@@ -173,18 +201,62 @@ kubectl -n "$NAMESPACE" create secret generic sdlcma-secrets \
   --from-literal="LLM_API_KEY=$KEY" >/dev/null
 say "  ✓ secret created (GITLAB_PRIVATE_TOKEN + LLM_API_KEY; no SSH key — gitlab.com is HTTPS+oauth2)"
 
-# ── 6: helm upgrade --install ──────────────────────────────────────────────
-say "6: helm upgrade --install $RELEASE"
+# ── 5a: tailscale IP lookup for `minus` (when targeting that overlay) ──────
+# The gitlab@minus overlay routes worker / orchestrator / gateway / llm-gw
+# pods to a self-hosted GitLab on the operator's tailnet (hostname `minus`).
+# Kind cluster pods don't see tailscale's MagicDNS, so we resolve the IP on
+# the HOST side (where tailscale runs) and inject it via Helm's
+# extraHostAliases — kindnet SNATs pod egress through the host's tailscale
+# interface, completing the cross-intranet path.
+#
+# Detection: only trigger when the values file basename contains "minus".
+# This keeps the gitlab_saas / other-overlay paths untouched.
+HELM_HOSTALIAS_ARGS=()
+case "$(basename "$VALUES_FILE")" in
+  *minus*)
+    say "5a: tailscale IP lookup for 'minus'"
+    command -v tailscale >/dev/null || \
+      abort "tailscale CLI missing — required for the gitlab@minus overlay"
+    MINUS_IP="$(tailscale ip -4 minus 2>/dev/null | head -1 | tr -d '[:space:]')"
+    [ -n "$MINUS_IP" ] || \
+      abort "tailscale doesn't know about 'minus' (try: tailscale status). \
+the gitlab@minus overlay requires minus to be a tailnet peer"
+    say "  ✓ minus → $MINUS_IP"
+    HELM_HOSTALIAS_ARGS=(
+      --set "extraHostAliases[0].ip=$MINUS_IP"
+      --set "extraHostAliases[0].hostnames[0]=minus"
+    )
+    ;;
+  *)
+    say "5a: tailscale lookup skipped (overlay isn't *minus*)"
+    ;;
+esac
+
+# ── 6: helm dep update + helm upgrade --install ─────────────────────────────
+# When monitoring.enabled=true (gitlab@minus default), the chart pulls in
+# kube-prometheus-stack as a Helm dependency. `helm dep update` fetches the
+# sub-chart tarball into charts/ before `helm install` reads it. Idempotent
+# when the dep is already there — but the FIRST run on a fresh checkout has
+# to do this, otherwise install fails with "found in Chart.yaml, but
+# missing in charts/ directory".
+say "6: helm dep update + helm upgrade --install $RELEASE"
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+helm repo update >/dev/null 2>&1 || true
+helm dep update "$CHART_DIR" 2>&1 | tail -3 | sed 's/^/  /'
 HELM_VALUES_ARGS=(-f "$VALUES_FILE")
 if [ -f "$LOCAL_VALUES_FILE" ]; then
   say "  layering $LOCAL_VALUES_FILE on top of $VALUES_FILE"
   HELM_VALUES_ARGS+=(-f "$LOCAL_VALUES_FILE")
 fi
+# Timeout bumped from 3m → 5m: kube-prometheus-stack ships an
+# Operator-managed Prometheus + Grafana sidecar that needs longer than
+# the lean stack to settle. Still bounded.
 helm upgrade --install "$RELEASE" "$CHART_DIR" \
   -n "$NAMESPACE" \
   "${HELM_VALUES_ARGS[@]}" \
+  "${HELM_HOSTALIAS_ARGS[@]}" \
   --set namespace.create=false \
-  --wait --timeout 3m 2>&1 | tail -5 | sed 's/^/  /'
+  --wait --timeout 5m 2>&1 | tail -5 | sed 's/^/  /'
 
 # Whether cloudflared is on after the merged values — drives step 7's
 # rollout list and step 8's URL extraction. Helm-rendering is the truth
@@ -206,8 +278,24 @@ fi
 say "7: wait rollouts"
 ROLLOUTS=(redis gateway orchestrator)
 [ "$CLOUDFLARED_ENABLED" = "1" ] && ROLLOUTS+=(cloudflared)
+# Conditional Deployments — detect by `kubectl get`. Cheaper + correct
+# than re-parsing $VALUES_FILE; the cluster state is the truth.
+for d in llm-gateway runrecord-exporter; do
+  kubectl -n "$NAMESPACE" get deploy "$d" >/dev/null 2>&1 && ROLLOUTS+=("$d")
+done
+# kube-prometheus-stack-released Deployments (when monitoring.enabled=true).
+# We wait on the Operator + Grafana + KSM — these exist immediately on
+# helm install. Prometheus/Alertmanager are CRDs; the Operator stands them
+# up after CRDs are applied, and they don't have a rollout status Helm
+# understands, so we skip them here. `helm --wait` above guards the
+# whole-stack invariant.
+for d in "${RELEASE}-kube-prometheus-stack-operator" \
+         "${RELEASE}-grafana" \
+         "${RELEASE}-kube-state-metrics"; do
+  kubectl -n "$NAMESPACE" get deploy "$d" >/dev/null 2>&1 && ROLLOUTS+=("$d")
+done
 for d in "${ROLLOUTS[@]}"; do
-  kubectl -n "$NAMESPACE" rollout status "deploy/$d" --timeout=90s 2>&1 \
+  kubectl -n "$NAMESPACE" rollout status "deploy/$d" --timeout=180s 2>&1 \
     | sed 's/^/  /'
 done
 
@@ -249,6 +337,25 @@ if [ "$INSTALL_INGRESS_NGINX" = "1" ]; then
   if [ -n "$TS_IP" ]; then
     echo "  webhook URL (ingress, tailnet):   http://${TS_IP}:18080/webhook"
   fi
+fi
+# Grafana / Prometheus URLs (only when monitoring.enabled rendered them).
+# Prefer the Ingress path when a grafana Ingress exists (the values.local.yaml
+# sub-path overlay shares ingress-nginx :18080 — e.g. /grafana); fall back to
+# port-forward for the tracked default, which ships NO grafana Ingress. Cluster
+# state is the truth — same detect-don't-assume pattern as cloudflared above.
+if kubectl -n "$NAMESPACE" get svc "${RELEASE}-grafana" >/dev/null 2>&1; then
+  G_PATH=$(kubectl -n "$NAMESPACE" get ingress "${RELEASE}-grafana" \
+             -o jsonpath='{.spec.rules[0].http.paths[0].path}' 2>/dev/null || true)
+  if [ -n "$G_PATH" ]; then
+    echo "  Grafana (ingress, host):          http://localhost:18080${G_PATH}  (admin / admin — change in values.local.yaml)"
+    [ -n "${TS_IP:-}" ] && echo "  Grafana (ingress, tailnet):       http://${TS_IP}:18080${G_PATH}"
+  else
+    echo "  Grafana (port-forward):           kubectl -n $NAMESPACE port-forward svc/${RELEASE}-grafana 3000:80"
+    echo "                                    → http://localhost:3000  (admin / admin — change in values.local.yaml)"
+  fi
+fi
+if kubectl -n "$NAMESPACE" get svc "${RELEASE}-kube-prometheus-stack-prometheus" >/dev/null 2>&1; then
+  echo "  Prometheus (port-forward):        kubectl -n $NAMESPACE port-forward svc/${RELEASE}-kube-prometheus-stack-prometheus 9090:9090"
 fi
 echo
 echo "Next:"

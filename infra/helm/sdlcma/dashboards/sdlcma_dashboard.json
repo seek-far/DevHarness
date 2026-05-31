@@ -1,0 +1,427 @@
+{
+  "title": "SDLCMA",
+  "uid": "sdlcma-main",
+  "tags": ["sdlcma", "bug-fix"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"text": "Prometheus", "value": "Prometheus"},
+        "hide": 0,
+        "label": "Data source"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Health — these should stay near zero",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "bug_id collisions",
+      "description": "Should be 0 forever post-Item-1 (urandom tail). Non-zero = regression.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 1, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(sdlcma_bug_id_collisions_total)",
+          "refId": "A",
+          "legendFormat": "collisions"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Dead-letter rate (5m)",
+      "description": "Should stay 0. Non-zero = orchestrator received malformed payload or parser bug.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 6, "y": 1, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(sdlcma_dead_letter_total[5m]))",
+          "refId": "A",
+          "legendFormat": "rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0.0001}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Worker restarts (5m)",
+      "description": "HealthMonitor restart rate. Non-zero in steady state = worker instability.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 1, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(sdlcma_worker_restarts_total[5m]))",
+          "refId": "A",
+          "legendFormat": "restart rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0.0001}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "RunRecord scrape age",
+      "description": "Time since runrecord_to_metrics last completed. Stale = cron broken.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 18, "y": 1, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "time() - sdlcma_runrecord_last_scan_timestamp",
+          "refId": "A",
+          "legendFormat": "age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 120},
+              {"color": "red", "value": 300}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Capacity & backlog",
+      "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Active workers by status",
+      "description": "warmup + running only. done/failed are filtered by registry.all_active() and not exposed.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sdlcma_active_workers",
+          "refId": "A",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Stream pending (real backlog)",
+      "description": "XPENDING — orchestrator's consumer-group backlog. Distinct from XLEN (cumulative).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sdlcma_stream_pending",
+          "refId": "A",
+          "legendFormat": "{{stream}} / {{group}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Throughput",
+      "gridPos": {"x": 0, "y": 14, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Webhooks received by classification (1m rate)",
+      "description": "bug_reported = real workload; validation = our own auto-fix CI; other/invalid = noise.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 15, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (classification) (rate(sdlcma_webhooks_received_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{classification}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Fixes completed by outcome (5m rate)",
+      "description": "From RunRecord journal scan. fixed = success; error/no_fix = failure modes; already_fixed = R10 short-circuit.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 15, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(sdlcma_fixes_completed_total[5m]))",
+          "refId": "A",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Latency",
+      "gridPos": {"x": 0, "y": 23, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Gateway handle latency p50/p95 (ms)",
+      "description": "Receive to XADD. Should stay sub-10ms even under burst.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(sdlcma_gateway_handle_ms_bucket[5m])))",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(sdlcma_gateway_handle_ms_bucket[5m])))",
+          "refId": "B",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "LLM upstream wallclock p50/p95 by backend (ms)",
+      "description": "Cache hits NOT included. Spike = backend slowdown.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, backend) (rate(sdlcma_llm_upstream_wallclock_ms_bucket[5m])))",
+          "refId": "A",
+          "legendFormat": "p50 {{backend}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, backend) (rate(sdlcma_llm_upstream_wallclock_ms_bucket[5m])))",
+          "refId": "B",
+          "legendFormat": "p95 {{backend}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "LLM cost & cache",
+      "gridPos": {"x": 0, "y": 32, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Tokens rate by type (1m)",
+      "description": "From RunRecord. prompt = input, completion = output, cached = backend prompt-cache hits. Cost driver.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 33, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (type) (rate(sdlcma_llm_tokens_total[1m]))",
+          "refId": "A",
+          "legendFormat": "{{type}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "Cache hit rate (5m)",
+      "description": "rate(hit) / rate(total). Higher = more tokens saved by cache.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 33, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(sdlcma_llm_cache_lookups_total{result=\"hit\"}[5m])) / clamp_min(sum(rate(sdlcma_llm_cache_lookups_total[5m])), 1e-12)",
+          "refId": "A",
+          "legendFormat": "hit_rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.3},
+              {"color": "green", "value": 0.7}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Cache lookups by result (5m rate)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 18, "y": 33, "w": 6, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(sdlcma_llm_cache_lookups_total[5m]))",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 44,
+      "type": "stat",
+      "title": "Tokens per fix (avg, 1h)",
+      "description": "Total tokens divided by completed fixes. Useful for cost-per-fix tracking. Stress_test_1 showed 2K-5K as the typical range for the bundled fixtures on Qwen3-Coder — tune the thresholds to your model + fixture mix.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 37, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(increase(sdlcma_llm_tokens_total[1h])) / clamp_min(sum(increase(sdlcma_fixes_completed_total[1h])), 1)",
+          "refId": "A",
+          "legendFormat": "tokens/fix"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 10000},
+              {"color": "red", "value": 20000}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Quality",
+      "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1},
+      "collapsed": false
+    },
+    {
+      "id": 51,
+      "type": "stat",
+      "title": "Fix rate (1h)",
+      "description": "Fraction of completed RunRecords whose outcome was `fixed`. Drops on system issues or LLM-side regression.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 42, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(increase(sdlcma_fixes_completed_total{outcome=\"fixed\"}[1h])) / clamp_min(sum(increase(sdlcma_fixes_completed_total[1h])), 1)",
+          "refId": "A",
+          "legendFormat": "fix_rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.6},
+              {"color": "green", "value": 0.85}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "parse_trace_fallback rate (5m)",
+      "description": "Was ~100% live before the 2026-05-29 parser fix. Spike = parser regression (wrong cost: every fix burns 1-2 extra LLM calls fetching files the parser should have surfaced).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 8, "y": 42, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(sdlcma_parse_trace_fallback_total[5m]))",
+          "refId": "A",
+          "legendFormat": "fallback rate"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Reflection fires (5m rate)",
+      "description": "Fraction of fixes where the reflection enhancement fired ≥1 time. A/B telemetry for reflection vs baseline configs.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 16, "y": 42, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (agent) (rate(sdlcma_reflection_fires_total[5m]))",
+          "refId": "A",
+          "legendFormat": "{{agent}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    }
+  ]
+}

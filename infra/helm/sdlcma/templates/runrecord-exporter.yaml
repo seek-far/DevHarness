@@ -1,0 +1,100 @@
+{{- if .Values.runrecordExporter.enabled }}
+{{- /*
+RunRecord exporter: long-running HTTP server (tools/runrecord_exporter.py)
+that scans the journal directory on every Prometheus scrape and renders
+the same metric families that tools/runrecord_to_metrics.py emits via the
+textfile collector on bare hosts. K8s-shaped sibling — no CronJob, no
+shared-volume + sidecar dance.
+
+Mounts journal.persistence.hostPath read-only (RO). The path also has to
+be writable by worker Jobs (K8sJobSpawner mounts the same path RW per
+bug), which is why the chart enforces journal.persistence.enabled when
+this exporter is on (see required-check below).
+*/}}
+{{- if not .Values.journal.persistence.enabled }}
+{{-   fail "runrecordExporter.enabled=true requires journal.persistence.enabled=true (the exporter reads what worker Jobs write to the shared journal hostPath)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runrecord-exporter
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: runrecord-exporter
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.runrecordExporter.replicas }}
+  selector:
+    matchLabels:
+      app: runrecord-exporter
+  template:
+    metadata:
+      labels:
+        app: runrecord-exporter
+    spec:
+      {{- with .Values.extraHostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: runrecord-exporter
+          image: "{{ .Values.runrecordExporter.image.repository }}:{{ .Values.runrecordExporter.image.tag }}"
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          # The bf-worker image's default ENTRYPOINT runs the worker. Override
+          # for this Deployment to run the exporter module instead. stdlib
+          # only — no requirements.txt change.
+          command: ["python", "-m", "tools.runrecord_exporter"]
+          env:
+            - name: BF_JOURNAL_DIR
+              value: {{ .Values.journal.persistence.hostPath | quote }}
+            - name: EXPORTER_PORT
+              value: {{ .Values.runrecordExporter.service.port | quote }}
+          ports:
+            - containerPort: {{ .Values.runrecordExporter.service.port }}
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: {{ .Values.runrecordExporter.service.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: {{ .Values.runrecordExporter.service.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - name: journal
+              mountPath: {{ .Values.journal.persistence.hostPath }}
+              # RO: exporter only reads. Worker Jobs hold the write side
+              # (mounted RW via K8sJobSpawner — see orchestrator/spawner.py).
+              readOnly: true
+          resources:
+            {{- toYaml .Values.runrecordExporter.resources | nindent 12 }}
+      volumes:
+        - name: journal
+          hostPath:
+            path: {{ .Values.journal.persistence.hostPath }}
+            # Same DirectoryOrCreate type the spawner uses — keeps the
+            # bootstrap symmetric, no race between which side creates the
+            # dir first.
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: runrecord-exporter
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: runrecord-exporter
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: runrecord-exporter
+  ports:
+    - port: {{ .Values.runrecordExporter.service.port }}
+      targetPort: {{ .Values.runrecordExporter.service.port }}
+      name: http
+{{- end }}

@@ -48,6 +48,10 @@ spec:
       # Identity for K8sJobSpawner to create/delete the per-bug worker Jobs;
       # bound to orchestrator-job-manager Role (rbac.yaml).
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.extraHostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: orchestrator
           image: "{{ .Values.orchestrator.image.repository }}:{{ .Values.orchestrator.image.tag }}"

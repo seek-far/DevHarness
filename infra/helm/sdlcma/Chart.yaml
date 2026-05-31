@@ -12,6 +12,24 @@ type: application
 # 0.2.0: 1a.6 added NetworkPolicy, Ingress, Prometheus scrape annotations,
 # and an opt-in eval Indexed Job. The version bump is also what makes the
 # Terraform helm_release (1a.5) detect the change and upgrade in place.
-version: 0.2.0
+# 0.3.0: 2026-05-30 — LLM gateway + runrecord exporter + kube-prometheus-stack
+# dependency for the "production rehearsal on ls4900" stance. All toggles
+# default OFF; AWS ECS is unaffected (different deployment surface).
+version: 0.3.0
 # Tracks the app/stage this chart targets.
-appVersion: "1a.6"
+appVersion: "1a.7"
+
+# ── dependencies ────────────────────────────────────────────────────────────
+# kube-prometheus-stack is the de facto standard K8s observability stack
+# (Operator + Prometheus + Grafana + Alertmanager + node-exporter + KSM).
+# Conditional on monitoring.enabled — when false (default) the dependency
+# is skipped entirely, so an `helm install` against a chart that hasn't
+# run `helm dep update` still works for the lean case.
+#
+# Pinned to ~58.x (currently the latest LTS-shaped release line). Set the
+# upper bound to the next major to surface breaking changes via dep-update.
+dependencies:
+  - name: kube-prometheus-stack
+    version: "~58.0.0"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: monitoring.enabled

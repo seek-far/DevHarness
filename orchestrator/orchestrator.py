@@ -60,6 +60,19 @@ class Orchestrator:
                 env=self._cfg.env,
             )
         elif spawner_kind == "k8s":
+            # k8s_host_aliases is a JSON string in the orchestrator ConfigMap
+            # (env-friendly: a single line scalar Pydantic can carry). Empty
+            # string → no aliases. getattr fallbacks keep SimpleNamespace
+            # test fixtures working without forcing every fake config to
+            # declare these new fields.
+            import json
+            ha_raw = getattr(self._cfg, "k8s_host_aliases", "") or ""
+            try:
+                host_aliases = json.loads(ha_raw) if ha_raw.strip() else []
+            except json.JSONDecodeError as e:
+                logger.error("[Orchestrator] k8s_host_aliases is not valid JSON "
+                             "(%s); proceeding with empty hostAliases", e)
+                host_aliases = []
             self._spawner = K8sJobSpawner(
                 registry=self._registry,
                 redis_url=self._cfg.redis_url,
@@ -68,6 +81,8 @@ class Orchestrator:
                 worker_config_map=self._cfg.k8s_worker_config_map,
                 secret_name=self._cfg.k8s_secret_name,
                 job_ttl_seconds=self._cfg.k8s_job_ttl_seconds,
+                host_aliases=host_aliases,
+                journal_host_path=getattr(self._cfg, "k8s_journal_host_path", "") or "",
             )
         elif spawner_kind == "ecs":
             self._spawner = EcsWorkerSpawner(

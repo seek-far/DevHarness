@@ -1,0 +1,118 @@
+{{- if .Values.monitoring.enabled }}
+{{- /*
+ServiceMonitors for the four /metrics surfaces SDLCMA exports.
+Discovery contract with kube-prometheus-stack: the stack's Prometheus
+CRD is configured (values-...yaml below, kube-prometheus-stack.prometheus.
+prometheusSpec.serviceMonitorNamespaceSelector: {}) to watch ServiceMonitors
+in ALL namespaces — so these can live in the sdlcma namespace alongside
+the Services they target.
+
+Cardinality reminder (project rule): NEVER tag by bug_id or project_id.
+The four /metrics endpoints already obey that; this file just wires
+Prometheus to scrape them.
+
+Each ServiceMonitor is rendered only when the underlying Service exists:
+  * gateway / orchestrator — always present
+  * llm-gateway — gated on llmGateway.enabled
+  * runrecord-exporter — gated on runrecordExporter.enabled
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sdlcma-gateway
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.scrapeInterval | default "15s" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Dedicated headless Service so ServiceMonitor's selector matches a
+  # stable target list — the orchestrator Deployment has no Service
+  # otherwise (it doesn't take external traffic), so we create one
+  # here just for metrics scraping.
+  name: orchestrator-metrics
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    sdlcma-metrics: "true"
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: orchestrator
+  ports:
+    - name: metrics
+      port: {{ .Values.monitoring.orchestratorMetricsPort | default 9102 }}
+      targetPort: {{ .Values.monitoring.orchestratorMetricsPort | default 9102 }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sdlcma-orchestrator
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: orchestrator
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      sdlcma-metrics: "true"
+      app: orchestrator
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.scrapeInterval | default "15s" }}
+{{- if .Values.llmGateway.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sdlcma-llm-gateway
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: llm-gateway
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: llm-gateway
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.scrapeInterval | default "15s" }}
+{{- end }}
+{{- if .Values.runrecordExporter.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sdlcma-runrecord-exporter
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    app: runrecord-exporter
+    {{- include "sdlcma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: runrecord-exporter
+  endpoints:
+    - port: http
+      path: /metrics
+      # Journal aggregation is slightly more expensive than the gateway's
+      # in-process counters; relax the cadence to keep CPU-on-empty low
+      # on a single-node kind. Still way faster than the cron+textfile
+      # path's 60s floor.
+      interval: {{ .Values.monitoring.runrecordScrapeInterval | default "30s" }}
+{{- end }}
+{{- end }}

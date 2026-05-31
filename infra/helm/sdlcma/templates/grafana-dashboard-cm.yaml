@@ -1,0 +1,34 @@
+{{- if .Values.monitoring.enabled }}
+{{- /*
+Grafana dashboard ConfigMap, auto-discovered by kube-prometheus-stack's
+Grafana sidecar (it watches ConfigMaps with label `grafana_dashboard: "1"`
+across all namespaces and mounts them into Grafana's dashboard provisioning
+path on the fly — no manual import, no reload needed).
+
+The dashboard JSON is committed under infra/helm/sdlcma/dashboards/, a
+mirror of the canonical infra/grafana/sdlcma_dashboard.json. A drift test
+(tests/test_grafana_dashboard.py:test_chart_copy_matches_canonical) asserts
+the two are byte-identical, so editing one without the other trips at PR
+review, not at deploy time.
+
+Mirror reason: Helm packaging tars only the chart directory; the canonical
+infra/grafana/ path is OUTSIDE the chart, so `Files.Get` cannot reach it
+in a packaged install. The two-copy + drift-test pattern keeps both the
+bare-host import workflow and the chart-driven workflow working.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sdlcma-grafana-dashboard
+  namespace: {{ include "sdlcma.namespace" . }}
+  labels:
+    # THIS label is the discovery contract — Grafana's sidecar only
+    # picks up ConfigMaps that carry it (set by default in
+    # kube-prometheus-stack's Grafana values).
+    grafana_dashboard: "1"
+    app: grafana
+    {{- include "sdlcma.labels" . | nindent 4 }}
+data:
+  sdlcma_dashboard.json: |
+    {{- .Files.Get "dashboards/sdlcma_dashboard.json" | nindent 4 }}
+{{- end }}

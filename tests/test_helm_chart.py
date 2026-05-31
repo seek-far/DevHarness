@@ -39,6 +39,20 @@ def _helm(*args: str) -> str:
     ).stdout
 
 
+def _template_or_skip(*extra: str) -> str:
+    """`helm template` the chart, skipping if the kube-prometheus-stack
+    dependency tarball isn't built (charts/ is gitignored — needs
+    `helm dep update`). Lets monitoring-on render tests run where the dep
+    exists and skip cleanly where it doesn't."""
+    try:
+        return _helm("template", "sdlcma", str(CHART), *extra)
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr or ""
+        if "missing in charts" in err or "found in Chart.yaml" in err:
+            pytest.skip("kube-prometheus-stack dependency not built (helm dep update)")
+        raise
+
+
 @pytest.fixture(scope="module")
 def docs():
     out = _helm("template", "sdlcma", str(CHART))
@@ -96,10 +110,17 @@ def test_all_objects_in_target_namespace(docs):
         "GATEWAY_CONSUMER_NAME", "WORKER_HEARTBEAT_INTERVAL",
         "WORKER_HEARTBEAT_TTL", "HEALTH_CHECK_INTERVAL", "STREAM_BLOCK_MS",
         "STREAM_COUNT", "WORKER_IMAGE"}),
+    # LLM_API_BASE_URL / LLM_MODEL intentionally NOT in this set as of
+    # 2026-05-30. Both are image-baked in settings/worker_local_k8s.env
+    # (and per-env siblings: worker_gitlab_saas.env, etc.) — keeping
+    # them out of the ConfigMap default lets the llmGateway.enabled=true
+    # path (configmap.yaml seeds LLM_API_BASE_URL=http://llm-gateway:9000/v1)
+    # actually take effect, since ConfigMap → process env wins over the
+    # baked .env. See infra/helm/sdlcma/values.yaml configMaps.worker
+    # for the comment thread that explains this trade.
     ("worker-config", {
         "ENV", "REDIS_URL", "WORKER_HEARTBEAT_INTERVAL", "WORKER_HEARTBEAT_TTL",
-        "STREAM_BLOCK_MS", "GITLAB_API", "GITLAB_USERNAME", "GITLAB_SSH_PORT",
-        "LLM_API_BASE_URL", "LLM_MODEL"}),
+        "STREAM_BLOCK_MS", "GITLAB_API", "GITLAB_USERNAME", "GITLAB_SSH_PORT"}),
 ])
 def test_configmap_keys_match_raw_manifests(docs, name, keys):
     cm = _named(docs, "ConfigMap", name)
@@ -159,10 +180,19 @@ def test_image_tag_override():
 # ── 1a.6: NetworkPolicy / Ingress / observability / eval ──────────
 
 def test_networkpolicy_deny_default_and_targeted_allows(docs):
-    deny = _named(docs, "NetworkPolicy", "default-deny-ingress")
-    assert deny["spec"]["podSelector"] == {}
+    # The deny policy must be SCOPED to the first-party core app pods, NOT a
+    # namespace-wide `podSelector: {}`. An empty selector blackholes the
+    # observability stack + worker→llm-gateway (incident 2026-05-31).
+    deny = _named(docs, "NetworkPolicy", "deny-core-app-ingress")
+    assert deny["spec"]["podSelector"] != {}, (
+        "deny policy must not be namespace-wide — that blackholes grafana / "
+        "Prometheus scrape / worker→llm-gateway"
+    )
+    expr = deny["spec"]["podSelector"]["matchExpressions"][0]
+    assert expr["key"] == "app" and expr["operator"] == "In"
+    assert set(expr["values"]) == {"gateway", "orchestrator", "redis", "bf-worker"}
     assert deny["spec"]["policyTypes"] == ["Ingress"]
-    assert "ingress" not in deny["spec"]  # no rules → deny all inbound
+    assert "ingress" not in deny["spec"]  # no rules → deny all inbound to those
 
     gw = _named(docs, "NetworkPolicy", "allow-gateway-ingress")
     assert gw["spec"]["podSelector"]["matchLabels"] == {"app": "gateway"}
@@ -174,6 +204,53 @@ def test_networkpolicy_deny_default_and_targeted_allows(docs):
     assert expr["key"] == "app" and expr["operator"] == "In"
     assert set(expr["values"]) == {"gateway", "orchestrator", "bf-worker"}
     assert rd["spec"]["ingress"][0]["ports"][0]["port"] == 6379
+
+
+def test_networkpolicy_does_not_blackhole_observability():
+    """With monitoring on, the deny policy must leave grafana / llm-gateway /
+    runrecord-exporter unselected (→ default-allow) and add the orchestrator
+    metrics-scrape allow. Regression guard for the 2026-05-31 504 incident."""
+    out = _template_or_skip(
+        "--set", "monitoring.enabled=true",
+        "--set", "llmGateway.enabled=true",
+        "--set", "runrecordExporter.enabled=true",
+        "--set", "journal.persistence.enabled=true",  # exporter precondition
+    )
+    docs = [d for d in yaml.safe_load_all(out) if d]
+    nps = _by_kind(docs, "NetworkPolicy")
+
+    # The deny policy selects ONLY the four core app labels — nothing in its
+    # selector reaches grafana / llm-gateway / runrecord-exporter / prometheus.
+    deny = _named(docs, "NetworkPolicy", "deny-core-app-ingress")
+    locked = set(deny["spec"]["podSelector"]["matchExpressions"][0]["values"])
+    for must_stay_open in ("grafana", "llm-gateway", "runrecord-exporter", "prometheus"):
+        assert must_stay_open not in locked
+
+    # Orchestrator metrics scrape is explicitly allowed (orchestrator IS in the
+    # deny set, so it needs its own allow or Prometheus can't reach :9102).
+    om = _named(docs, "NetworkPolicy", "allow-orchestrator-metrics")
+    assert om["spec"]["podSelector"]["matchLabels"] == {"app": "orchestrator"}
+    assert om["spec"]["ingress"][0]["ports"][0]["port"] == 9102
+
+
+def test_prometheus_selectors_match_all_monitors():
+    """kube-prometheus-stack must be told to scrape our ServiceMonitors.
+
+    Empty `serviceMonitorSelector: {}` is necessary but NOT sufficient — the
+    subchart treats it as falsy and, with serviceMonitorSelectorNilUsesHelmValues
+    at its `true` default, falls back to `matchLabels: {release: <name>}`. Our
+    ServiceMonitors carry no `release` label, so they'd be silently skipped
+    (incident 2026-05-31: empty Grafana panels). The NilUsesHelmValues=false
+    flags are the load-bearing half. Static values check (no subchart render
+    needed). """
+    values = yaml.safe_load((CHART / "values.yaml").read_text())
+    spec = values["kube-prometheus-stack"]["prometheus"]["prometheusSpec"]
+    assert spec["serviceMonitorSelector"] == {}
+    assert spec["serviceMonitorSelectorNilUsesHelmValues"] is False, (
+        "without NilUsesHelmValues=false the empty serviceMonitorSelector "
+        "falls back to a release-label filter that excludes SDLCMA's "
+        "ServiceMonitors — Prometheus scrapes nothing"
+    )
 
 
 def test_networkpolicy_toggle_off():

@@ -74,6 +74,21 @@ class OrchestratorSettings(BaseAppSettings):
     # Finished Jobs are GC'd by the k8s TTL controller this many seconds after
     # completion — keeps `kubectl get jobs` readable without an explicit reaper.
     k8s_job_ttl_seconds: int = 600
+    # Optional pod-level hostAliases injected into every spawned bf-worker
+    # Job. JSON string (env-friendly) of the standard K8s hostAlias shape:
+    # `[{"ip":"100.x.x.x","hostnames":["minus"]}]`. Empty = no aliases (the
+    # historical default). Use case: cluster pods need to resolve a hostname
+    # that's only reachable on the operator's tailnet (e.g. self-hosted
+    # GitLab "minus" behind tailscale). setup.sh detects the tailscale IP at
+    # deploy time and injects it via the orchestrator ConfigMap.
+    k8s_host_aliases: str = ""
+    # Optional node-level path mounted RW into every spawned bf-worker Job at
+    # the same path, and exported as BF_JOURNAL_DIR. Empty = no mount (the
+    # historical default — journal stays inside the ephemeral Pod and dies
+    # with it). Single-node-kind convenience: pods schedule on the same node,
+    # hostPath is shared. Multi-node clusters need RWX (NFS / CSI) — flip
+    # this off and use a real PVC there.
+    k8s_journal_host_path: str = ""
 
     # ── ECS mode ─────────────────────────────────────────────────
     # Read only by orchestrator.spawner.EcsWorkerSpawner when

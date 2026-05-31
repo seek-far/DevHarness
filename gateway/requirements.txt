@@ -3,3 +3,4 @@ uvicorn
 pydantic
 pydantic-settings
 redis[hiredis]>=5.0
+prometheus-client>=0.20  # /metrics endpoint (gateway/metrics.py)

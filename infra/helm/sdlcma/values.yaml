@@ -15,6 +15,24 @@ namespace:
 # not pulled from a registry (same trap documented since 1a.1).
 imagePullPolicy: IfNotPresent
 
+# Pod-level hostAliases injected into every SDLCMA pod (gateway, orchestrator,
+# llm-gateway, runrecord-exporter) and into per-bug worker Jobs (via the
+# K8sJobSpawner — see orchestrator/spawner.py). Standard K8s hostAliases
+# shape: [{ip, hostnames: [...]}]. Default empty list = zero rendered output
+# (byte-identical to no-hostAliases-at-all).
+#
+# Use case: self-hosted GitLab reachable on the operator's tailnet (e.g.
+# "minus" at a tailscale IP that isn't in cluster DNS). setup.sh detects the
+# tailscale IP at deploy time via `tailscale ip -4 <host>` and injects it via
+# --set; in-chart authors should leave this empty.
+#
+# Outside K8s (AWS ECS / docker / standalone) this field is irrelevant —
+# different deployment surfaces, different network shapes.
+extraHostAliases: []
+#   - ip: 100.x.x.x
+#     hostnames:
+#       - minus
+
 # The out-of-band Secret. The chart only references it by name in envFrom;
 # it is NEVER templated (no real credentials in the repo / in Helm values).
 #   kubectl create secret generic sdlcma-secrets -n sdlcma \
@@ -55,8 +73,12 @@ configMaps:
     GITLAB_API: http://gitlab:80/api/v4
     GITLAB_USERNAME: lishu2016
     GITLAB_SSH_PORT: "22"
-    LLM_API_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
-    LLM_MODEL: qwen3-coder-480b-a35b-instruct
+    # LLM_API_BASE_URL / LLM_MODEL intentionally NOT set here — both are
+    # image-baked in settings/worker_local_k8s.env (and the per-env
+    # siblings worker_gitlab_saas.env / worker_local_multi_process.env).
+    # Keeping them out of this ConfigMap lets the llmGateway.enabled=true
+    # path (configmap.yaml seeds LLM_API_BASE_URL=http://llm-gateway:9000/v1)
+    # actually take effect — ConfigMap → process env wins over .env file.
 
 # ── RBAC (1a.3) ───────────────────────────────────────────────────
 rbac:
@@ -99,9 +121,13 @@ gateway:
       memory: 256Mi
 
 # ── NetworkPolicy (1a.6) ──────────────────────────────────────────
-# Ingress-only lockdown: default-deny inbound + explicit allows for the
-# gateway port and redis-from-app. Egress is left open on purpose (see
-# templates/networkpolicy.yaml header / NOTES §6e).
+# Ingress-only lockdown SCOPED to the first-party core app pods
+# (gateway/orchestrator/redis/bf-worker) + explicit allows for the gateway
+# port, redis-from-app, and (when monitoring on) the orchestrator metrics
+# scrape. The deny policy is deliberately NOT namespace-wide — that
+# blackholed the observability stack + worker→llm-gateway (see
+# templates/networkpolicy.yaml header, incident 2026-05-31). Egress is left
+# open on purpose (NOTES §6e).
 networkPolicy:
   enabled: true
 
@@ -172,3 +198,190 @@ orchestrator:
     limits:
       cpu: 1000m
       memory: 1Gi
+
+# ── LLM gateway (optional, opt-in) ───────────────────────────────────────────
+# Per-cluster persistent response cache + multi-backend inference policy.
+# OFF by default — the worker talks directly to the LLM API. When ON, the
+# worker is auto-routed through this gateway (configmap.yaml seeds the
+# worker-config ConfigMap with LLM_VIA_GATEWAY=true + LLM_API_BASE_URL
+# pointing at this service; explicit values under configMaps.worker still
+# win). Single replica because the cache is a sqlite file; do not scale
+# horizontally without rethinking cache coherency.
+#
+# AWS ECS deployment is unaffected — ECS uses its own CloudFormation stack
+# (stack-llm-gateway.yml as an overlay there) and does not consume this
+# Helm chart.
+llmGateway:
+  enabled: false
+  image:
+    repository: dh-llm-gateway
+    tag: latest
+  replicas: 1
+  service:
+    port: 9000
+  # Cache db lives on this PVC; gateway is single-replica so RWO is fine.
+  pvcSize: 2Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Verbatim YAML config the gateway loads at startup. Rendered into the
+  # llm-gateway-config ConfigMap. Default mirrors
+  # configs/llm_gateway/qwen3_api_cached.yaml (Qwen3 Dashscope + persistent
+  # configs/llm_gateway/qwen3_api_cached.yaml (Qwen3 Dashscope + persistent
+  # cache, normalize_content on so per-run timestamps in CI traces don't
+  # drift the key). Override per-deployment via values overlay.
+  config:
+    backends:
+      - name: qwen3_dashscope
+        base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        model: qwen3-coder-480b-a35b-instruct
+        # The chart wires LLM_API_KEY from the sdlcma-secrets Secret into the
+        # gateway pod's env; this field tells the gateway which env name to
+        # read for the backend. Match what's in the Secret.
+        api_key_env: LLM_API_KEY
+        request_timeout: 60
+    inference_policy:
+      type: ordered
+      order: [qwen3_dashscope]
+    cache:
+      mode: cache                      # disabled | record | replay | cache
+      db_path: /var/lib/sdlcma/llm_cache.db
+      replay_with_latency: true
+      log_every_n: 100
+      normalize_content: true
+
+# ── Journal volume (optional) ────────────────────────────────────────────────
+# When enabled, every spawned bf-worker Job gets a hostPath Volume mounted at
+# `path` (RW) and BF_JOURNAL_DIR set to the same path, so the run journal
+# (one record.json per bug) survives Pod termination. The runrecord exporter
+# (below) reads the same path RO to render Prometheus metrics.
+#
+# CAVEAT: hostPath works because a single-node kind cluster co-schedules
+# workers + exporter on the same node. Multi-node clusters need RWX (NFS /
+# CSI) instead — the chart doesn't support that yet; flip this off and
+# carry runrecord metrics via a different aggregator there.
+#
+# AWS ECS is unaffected — ECS workers don't use this chart; their journal
+# is per-task ephemeral (we don't run runrecord-exporter on ECS by design,
+# since ECS keeps to the minimal capacity envelope).
+journal:
+  persistence:
+    enabled: false
+    # Node-local path. DirectoryOrCreate auto-makes it; setup.sh doesn't
+    # need to pre-mkdir on the host.
+    hostPath: /var/sdlcma/journal
+
+# ── RunRecord exporter (optional, opt-in) ────────────────────────────────────
+# Long-running HTTP server (tools/runrecord_exporter.py) that scans the
+# journal directory on every Prometheus scrape and renders the same metric
+# families that tools/runrecord_to_metrics.py would have written via the
+# textfile collector on bare hosts. K8s-shaped: Deployment + Service +
+# ServiceMonitor (when monitoring.enabled), no CronJob, no sidecar.
+#
+# Requires journal.persistence.enabled so the exporter pod can read what
+# worker pods wrote.
+runrecordExporter:
+  enabled: false
+  # Reuses the bf-worker image — tools/ is shipped with it and stdlib only
+  # is needed, so no separate Dockerfile. Override if you ship a slimmer
+  # exporter image.
+  image:
+    repository: dh-bf-worker
+    tag: latest
+  replicas: 1
+  service:
+    port: 9103
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ── Monitoring (kube-prometheus-stack dependency, opt-in) ────────────────────
+# When enabled, this chart pulls in kube-prometheus-stack as a Helm
+# dependency: Prometheus Operator + Prometheus + Grafana + Alertmanager +
+# node-exporter + kube-state-metrics. The chart's own templates render
+# ServiceMonitors targeting gateway / orchestrator / llm-gateway /
+# runrecord-exporter and ship the SDLCMA dashboard as a labeled ConfigMap
+# (Grafana sidecar auto-discovers it).
+#
+# IMPORTANT: Run `helm dep update infra/helm/sdlcma` BEFORE the first
+# `helm install` to pull the dependency into charts/. setup.sh does this
+# automatically.
+#
+# Values for the kube-prometheus-stack sub-chart MUST live at the top
+# level of this file (under the key matching the dependency name) — Helm
+# does NOT pass nested values through to sub-charts. See the
+# `kube-prometheus-stack:` block at the bottom of this file.
+monitoring:
+  enabled: false
+  scrapeInterval: 15s
+  runrecordScrapeInterval: 30s
+  # The orchestrator's prometheus_client server port. Must match
+  # METRICS_PORT in the orchestrator pod (default 9102 — see
+  # orchestrator/orchestrator.py).
+  orchestratorMetricsPort: 9102
+
+# ── kube-prometheus-stack passthrough values ─────────────────────────────────
+# Top-level key matches the dependency name in Chart.yaml. Sized for
+# ls4900 (single-node kind, "production rehearsal"): Alertmanager off,
+# retention=2d, modest CPU/memory. Override for real-prod clusters.
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      # Watch ServiceMonitors in EVERY namespace and ignore the default
+      # "release: <name>" label filter — without these, the Operator's
+      # Prometheus would skip our SDLCMA ServiceMonitors (which don't
+      # carry the release label).
+      #
+      # GOTCHA (incident 2026-05-31, all Grafana panels empty): the empty
+      # `{}` selectors below are necessary but NOT sufficient. kube-
+      # prometheus-stack treats an empty serviceMonitorSelector as "unset"
+      # (Go-template falsy) and, while *SelectorNilUsesHelmValues is true
+      # (its DEFAULT), injects `matchLabels: {release: <name>}` ANYWAY — so
+      # our ServiceMonitors were silently never scraped (TSDB had zero
+      # sdlcma_* series). The NilUsesHelmValues=false flags are what actually
+      # make `{}` mean "match every Monitor". Keep both halves.
+      serviceMonitorNamespaceSelector: {}
+      serviceMonitorSelector: {}
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorNamespaceSelector: {}
+      podMonitorSelector: {}
+      podMonitorSelectorNilUsesHelmValues: false
+      # 2-day retention — bounded by the kind cluster's local-path
+      # volume (couple GB available, not enough for default 10d).
+      retention: 2d
+      resources:
+        requests:
+          cpu: 100m
+          memory: 400Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+  # Alertmanager off — ls4900 is a rehearsal, not on-call. Re-enable
+  # alongside PrometheusRule CRDs when you actually want pages.
+  alertmanager:
+    enabled: false
+  grafana:
+    adminPassword: admin   # CHANGE in production — values.local.yaml
+    # Sidecar auto-loads ConfigMaps labelled `grafana_dashboard: "1"`
+    # — the SDLCMA dashboard CM in this chart carries that label.
+    sidecar:
+      dashboards:
+        enabled: true
+        searchNamespace: ALL
+    resources:
+      requests:
+        cpu: 50m
+        memory: 100Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  # node-exporter / kube-state-metrics: fine on (small footprint, free
+  # cluster-level CPU/mem/pod-state panels).
