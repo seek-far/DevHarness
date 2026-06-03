@@ -49,8 +49,8 @@ KNOWN_METRICS = {
     "sdlcma_llm_upstream_wallclock_ms",
     "sdlcma_llm_upstream_wallclock_ms_bucket",
     # runrecord_to_metrics.py
-    "sdlcma_fixes_completed_total",
-    "sdlcma_fix_elapsed_seconds_total",
+    "sdlcma_runs_total",
+    "sdlcma_run_elapsed_seconds_total",
     "sdlcma_llm_tokens_total",
     "sdlcma_llm_calls_total",
     "sdlcma_parse_trace_fallback_total",
@@ -143,7 +143,7 @@ def test_every_target_references_a_known_metric(dashboard):
 
 def test_health_panels_have_thresholds(dashboard):
     """Health-row panels (collisions / dead-letter / restarts /
-    scrape age) only convey their alert intent via threshold colours.
+    scan age) only convey their alert intent via threshold colours.
     Without a threshold config they render uniform green — the operator
     can't visually tell "should be 0" from "any value is fine"."""
     health_panel_ids = {2, 3, 4, 5}   # see dashboard JSON
@@ -182,8 +182,8 @@ def test_uid_and_title_for_provisioning():
 # only meaningful for the in-process event-stream counters (webhooks, dead
 # letter, cache lookups, …) which have a real 0 baseline and change over time.
 _JOURNAL_DERIVED_METRICS = {
-    "sdlcma_fixes_completed_total",
-    "sdlcma_fix_elapsed_seconds_total",
+    "sdlcma_runs_total",
+    "sdlcma_run_elapsed_seconds_total",
     "sdlcma_llm_tokens_total",
     "sdlcma_llm_calls_total",
     "sdlcma_parse_trace_fallback_total",

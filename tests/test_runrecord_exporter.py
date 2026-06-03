@@ -83,7 +83,7 @@ def _get(port: int, path: str = "/metrics"):
 
 
 def test_metrics_endpoint_returns_prometheus_text(server_at, tmp_path):
-    """Smoke: one record in, one fixes_completed sample out, valid
+    """Smoke: one record in, one runs_total sample out, valid
     Prometheus exposition format. Pins the wire contract Prometheus
     scrapes from."""
     journal = tmp_path / "journal"
@@ -99,10 +99,10 @@ def test_metrics_endpoint_returns_prometheus_text(server_at, tmp_path):
     # Same shape runrecord_to_metrics.render produces — sanity-check a
     # couple of representative lines without re-asserting the whole
     # contract (test_runrecord_to_metrics covers that exhaustively).
-    assert "# HELP sdlcma_fixes_completed_total " in body
-    assert "# TYPE sdlcma_fixes_completed_total counter" in body
+    assert "# HELP sdlcma_runs_total " in body
+    assert "# TYPE sdlcma_runs_total counter" in body
     assert (
-        'sdlcma_fixes_completed_total{agent="langgraph",'
+        'sdlcma_runs_total{agent="langgraph",'
         'model_slug="qwen3-coder-480b-a35b-instruct",outcome="fixed"} 1'
     ) in body
     assert "sdlcma_runrecord_last_scan_timestamp " in body
@@ -119,8 +119,8 @@ def test_metrics_endpoint_with_empty_journal_still_200(server_at, tmp_path):
     status, body = _get(port)
     assert status == 200
     # Families still rendered (HELP + TYPE lines present), counters at 0.
-    assert "# HELP sdlcma_fixes_completed_total " in body
-    assert "# TYPE sdlcma_fixes_completed_total counter" in body
+    assert "# HELP sdlcma_runs_total " in body
+    assert "# TYPE sdlcma_runs_total counter" in body
 
 
 def test_non_metrics_path_returns_404(server_at, tmp_path):
@@ -176,13 +176,13 @@ def test_each_scrape_is_a_fresh_aggregation(server_at, tmp_path):
     time.sleep(0.05)
     _, body1 = _get(port)
     assert (
-        'sdlcma_fixes_completed_total{agent="langgraph",'
+        'sdlcma_runs_total{agent="langgraph",'
         'model_slug="qwen3-coder-480b-a35b-instruct",outcome="fixed"} 1'
     ) in body1
 
     _write_record(journal, "20260530T120100_BUG-2_langgraph", _make_record())
     _, body2 = _get(port)
     assert (
-        'sdlcma_fixes_completed_total{agent="langgraph",'
+        'sdlcma_runs_total{agent="langgraph",'
         'model_slug="qwen3-coder-480b-a35b-instruct",outcome="fixed"} 2'
     ) in body2

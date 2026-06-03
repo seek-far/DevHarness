@@ -11,14 +11,15 @@ file that node_exporter's textfile collector scrapes.
 Counters emitted (cumulative across the entire journal — Prometheus
 computes rates from the time-series):
 
-  sdlcma_fixes_completed_total{agent, model_slug, outcome}
-      Number of RunRecords by agent_name, slugified llm_model
-      (slashes → dashes, cap 60 chars to bound cardinality), and
-      outcome ∈ {fixed, error, no_fix, already_fixed}.
+  sdlcma_runs_total{agent, model_slug, outcome}
+      Number of RunRecords (i.e. completed runs, success or not) by
+      agent_name, slugified llm_model (slashes → dashes, cap 60 chars
+      to bound cardinality), and outcome ∈ {fixed, error, no_fix,
+      already_fixed}.
 
-  sdlcma_fix_elapsed_seconds_total{agent, model_slug, outcome}
+  sdlcma_run_elapsed_seconds_total{agent, model_slug, outcome}
       Sum of elapsed_s across the same buckets — divide by
-      fixes_completed for mean wallclock.
+      runs_total for mean wallclock.
 
   sdlcma_llm_tokens_total{type, model_slug}
       Sum of prompt / completion / cached input tokens, by token kind.
@@ -192,14 +193,14 @@ def render(agg: dict, scan_ts: float) -> str:
     """Compose the full exposition-format payload."""
     lines: list[str] = []
     lines += _render_counter(
-        "sdlcma_fixes_completed_total",
-        "Total RunRecords by agent, llm_model, and outcome",
+        "sdlcma_runs_total",
+        "Total RunRecords (completed runs, success or not) by agent, llm_model, and outcome",
         dict(agg["fixes"]),
         ("agent", "model_slug", "outcome"),
     )
     lines += _render_counter(
-        "sdlcma_fix_elapsed_seconds_total",
-        "Sum of elapsed_s per RunRecord bucket (divide by fixes_completed for mean)",
+        "sdlcma_run_elapsed_seconds_total",
+        "Sum of elapsed_s per RunRecord bucket (divide by runs_total for mean)",
         dict(agg["elapsed"]),
         ("agent", "model_slug", "outcome"),
     )

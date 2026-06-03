@@ -55,7 +55,7 @@ The dashboard is grouped into six rows by purpose. Read top-down:
 
 | Row | What it shows | Alert when |
 |---|---|---|
-| Health | bug_id collisions, dead-letter rate, worker restart rate, RunRecord scrape age | any non-zero or scrape > 5 min stale |
+| Health | bug_id collisions, dead-letter rate, worker restart rate, RunRecord scan age | any non-zero or scan > 5 min stale |
 | Capacity & backlog | active workers by status, stream pending | backlog growing |
 | Throughput | webhook rate by classification, fix rate by outcome | drop in `bug_reported` rate, spike in `error` outcome |
 | Latency | gateway handle p50/p95, LLM upstream p50/p95 by backend | p95 climbs |

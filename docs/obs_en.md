@@ -239,8 +239,8 @@ Derived metric families:
 
 | Metric | Labels | Notes |
 |---|---|---|
-| `sdlcma_fixes_completed_total` | `agent`, `model_slug`, `outcome` | RunRecord count |
-| `sdlcma_fix_elapsed_seconds_total` | same | sum of `elapsed_s`; ÷ fixes_completed = mean wallclock |
+| `sdlcma_runs_total` | `agent`, `model_slug`, `outcome` | RunRecord count (completed runs, success or not) |
+| `sdlcma_run_elapsed_seconds_total` | same | sum of `elapsed_s`; ÷ runs_total = mean wallclock |
 | `sdlcma_llm_tokens_total` | `type` (prompt/completion/cached), `model_slug` | sum of tokens (cost driver) |
 | `sdlcma_llm_calls_total` | `agent`, `model_slug` | sum of `llm_call_count` |
 | `sdlcma_parse_trace_fallback_total` | `agent` | count of `parse_trace_fallback=True` (parser-regression signal; was 100% on GitLab-wrapped traces before the 2026-05-29 parser fix) |
@@ -255,7 +255,7 @@ misconfigured URL/path model name can't blow up cardinality.
 Chart-mirrored at `infra/helm/sdlcma/dashboards/`; drift guarded by
 `tests/test_grafana_dashboard.py`.
 
-1. **Health (should stay near zero)**: bug_id collisions / dead-letter rate (5m) / worker restarts (5m) / RunRecord scrape age
+1. **Health (should stay near zero)**: bug_id collisions / dead-letter rate (5m) / worker restarts (5m) / RunRecord scan age
 2. **Capacity & backlog**: active workers by status / stream pending (real backlog)
 3. **Throughput**: webhooks received by classification (1m rate) / fixes completed by outcome (cumulative)
 4. **Latency**: gateway handle p50/p95 / LLM upstream wallclock p50/p95 by backend

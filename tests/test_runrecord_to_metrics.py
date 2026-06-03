@@ -163,7 +163,7 @@ def test_aggregate_handles_none_fields_gracefully():
         _make_record(),  # fully populated
     ]
     agg = _aggregate(records)
-    # Both records counted in fixes (fixes_completed always increments).
+    # Both records counted (runs_total always increments, success or not).
     fixes = dict(agg["fixes"])
     key = ("langgraph", "qwen3-coder-480b-a35b-instruct", "fixed")
     assert fixes[key] == 2
@@ -224,13 +224,13 @@ def test_render_produces_valid_prometheus_format():
     agg = _aggregate(records)
     body = render(agg, scan_ts=1234567890.0)
     # Every metric family has HELP + TYPE.
-    assert "# HELP sdlcma_fixes_completed_total " in body
-    assert "# TYPE sdlcma_fixes_completed_total counter" in body
+    assert "# HELP sdlcma_runs_total " in body
+    assert "# TYPE sdlcma_runs_total counter" in body
     assert "# HELP sdlcma_runrecord_last_scan_timestamp " in body
     assert "# TYPE sdlcma_runrecord_last_scan_timestamp gauge" in body
     # The actual sample line carries the label set in the right shape.
     assert (
-        'sdlcma_fixes_completed_total{agent="langgraph",'
+        'sdlcma_runs_total{agent="langgraph",'
         'model_slug="qwen3-coder-480b-a35b-instruct",outcome="fixed"} 1'
     ) in body
     # Gauge has no labels.
@@ -262,7 +262,7 @@ def test_main_writes_output_file_atomically(tmp_path):
     assert rc == 0
     assert out_path.is_file()
     body = out_path.read_text(encoding="utf-8")
-    assert "sdlcma_fixes_completed_total" in body
+    assert "sdlcma_runs_total" in body
     # No leftover .tmp file (atomic rename succeeded).
     assert not out_path.with_suffix(out_path.suffix + ".tmp").exists()
 
@@ -277,5 +277,5 @@ def test_main_empty_journal_still_writes_a_file(tmp_path):
     ])
     assert rc == 0
     body = (tmp_path / "sdlcma_runrecord.prom").read_text()
-    assert "sdlcma_fixes_completed_total" in body
+    assert "sdlcma_runs_total" in body
     assert "sdlcma_runrecord_last_scan_timestamp" in body

@@ -112,7 +112,7 @@
     {
       "id": 5,
       "type": "stat",
-      "title": "RunRecord scrape age",
+      "title": "RunRecord scan age",
       "description": "Time since runrecord_to_metrics last completed. Stale = cron broken.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"x": 18, "y": 1, "w": 6, "h": 4},
@@ -202,13 +202,13 @@
     {
       "id": 22,
       "type": "timeseries",
-      "title": "Fixes completed by outcome (cumulative)",
+      "title": "Runs completed by outcome (cumulative)",
       "description": "From RunRecord journal scan. fixed = success; error/no_fix = failure modes; already_fixed = R10 short-circuit.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"x": 12, "y": 15, "w": 12, "h": 8},
       "targets": [
         {
-          "expr": "sum by (outcome) (sdlcma_fixes_completed_total)",
+          "expr": "sum by (outcome) (sdlcma_runs_total)",
           "refId": "A",
           "legendFormat": "{{outcome}}"
         }
@@ -339,7 +339,7 @@
       "gridPos": {"x": 12, "y": 37, "w": 6, "h": 4},
       "targets": [
         {
-          "expr": "sum(sdlcma_llm_tokens_total) / clamp_min(sum(sdlcma_fixes_completed_total), 1)",
+          "expr": "sum(sdlcma_llm_tokens_total) / clamp_min(sum(sdlcma_runs_total), 1)",
           "refId": "A",
           "legendFormat": "tokens/fix"
         }
@@ -374,7 +374,7 @@
       "gridPos": {"x": 0, "y": 42, "w": 8, "h": 8},
       "targets": [
         {
-          "expr": "sum(sdlcma_fixes_completed_total{outcome=\"fixed\"}) / clamp_min(sum(sdlcma_fixes_completed_total), 1)",
+          "expr": "sum(sdlcma_runs_total{outcome=\"fixed\"}) / clamp_min(sum(sdlcma_runs_total), 1)",
           "refId": "A",
           "legendFormat": "fix_rate"
         }
