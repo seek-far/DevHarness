@@ -1,0 +1,59 @@
+# Cross-provider fallback ladder: Azure (keyless, reasoning) → Dashscope Qwen3
+# (static key, chat).
+#
+# The ordered policy is backend-AGNOSTIC. `auth`, `param_profile` and `pricing`
+# are per-backend, so the two rungs can differ in every dimension that matters:
+#
+#   rung 0  azure-gpt-5-mini   auth=entra     param_profile=reasoning  (no temperature)
+#   rung 1  qwen3-dashscope    auth=api_key   param_profile=chat       (temperature=0)
+#
+# The worker emits ONE canonical request shape (it sends temperature=0, because
+# it cannot know which backend the policy will pick) and the gateway absorbs the
+# divergence. That is the whole argument for having a gateway.
+#
+# The ladder advances on X-Sdlcma-Attempt, whose reason tag in policy.py is
+# `fix_failure_advance` — so this is a CAPABILITY ESCALATION ladder, not just
+# high availability. Rung 1 is only reached when rung 0 failed to produce a fix,
+# which in practice means it costs approximately nothing.
+#
+# Run:
+#   az login                       # rung 0
+#   export DASHSCOPE_API_KEY=...   # rung 1
+#   LLM_GATEWAY_CONFIG=configs/llm_gateway/azure_plus_qwen3.yaml \
+#     uvicorn llm_gateway.app:app --port 9000
+
+backends:
+  - name: azure-gpt-5-mini
+    base_url: https://lishuqiusuo-us-east-resource.openai.azure.com/openai/v1
+    model: gpt-5-mini            # the DEPLOYMENT name
+    auth: entra                  # keyless — Managed Identity on Azure, `az login` locally
+    param_profile: reasoning     # gpt-5 family REJECTS `temperature` (HTTP 400)
+    reasoning_effort: low
+    request_timeout: 120
+    pricing:
+      input_per_1m: 0.25
+      output_per_1m: 2.00
+      cached_input_per_1m: 0.025
+      currency: USD
+
+  - name: qwen3-dashscope
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen3-coder-480b-a35b-instruct
+    api_key_env: DASHSCOPE_API_KEY
+    # auth: api_key         (default)
+    # param_profile: chat   (default) → temperature=0 passes through untouched
+    request_timeout: 600
+    # No `pricing:` block → this backend reports cost=None, NOT $0.00.
+    # An unknown price must never render as "this was free".
+
+inference_policy:
+  type: ordered
+  order: [azure-gpt-5-mini, qwen3-dashscope]
+  advance_on:
+    fix_failure: true
+
+cache:
+  mode: cache
+  db_path: /tmp/sdlcma_llm_cache_ladder.sqlite
+  normalize_content: true
+  log_every_n: 20

@@ -97,6 +97,7 @@ def _aggregate(records: list[dict]) -> dict:
     fixes = defaultdict(int)         # (agent, model, outcome) -> count
     elapsed = defaultdict(float)     # (agent, model, outcome) -> sum
     tokens = defaultdict(int)        # (type, model) -> sum
+    cost = defaultdict(float)        # (model,) -> sum of total_cost_usd (USD)
     llm_calls = defaultdict(int)     # (agent, model) -> sum
     parse_fb = defaultdict(int)      # agent -> count
     reflection = defaultdict(int)    # agent -> count
@@ -117,6 +118,13 @@ def _aggregate(records: list[dict]) -> dict:
             v = r.get(token_field)
             if isinstance(v, int) and v > 0:
                 tokens[(type_name, model_slug)] += v
+        # Cost is None on unpriced backends (self-hosted, or a gateway backend
+        # with no `pricing:` block). None must NOT become 0.0 here: a run whose
+        # price we don't know is not a free run, and a zeroed series in a cost
+        # dashboard reads as "this was free".
+        v = r.get("total_cost_usd")
+        if isinstance(v, (int, float)) and v > 0:
+            cost[(model_slug,)] += float(v)
         v = r.get("llm_call_count")
         if isinstance(v, int) and v > 0:
             llm_calls[(agent, model_slug)] += v
@@ -130,6 +138,7 @@ def _aggregate(records: list[dict]) -> dict:
         "fixes": fixes,
         "elapsed": elapsed,
         "tokens": tokens,
+        "cost": cost,
         "llm_calls": llm_calls,
         "parse_fb": parse_fb,
         "reflection": reflection,
@@ -209,6 +218,14 @@ def render(agg: dict, scan_ts: float) -> str:
         "Sum of token counts across RunRecords by token type and model",
         dict(agg["tokens"]),
         ("type", "model_slug"),
+    )
+    lines += _render_counter(
+        "sdlcma_llm_cost_usd_total",
+        "Sum of total_cost_usd across RunRecords, by model. Journal-derived: "
+        "recomputed from scratch on every scrape, so it is born-at-value — "
+        "chart it with sum(), NEVER rate()/increase() (see the dashboard rule).",
+        dict(agg["cost"]),
+        ("model_slug",),
     )
     lines += _render_counter(
         "sdlcma_llm_calls_total",

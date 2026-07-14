@@ -12,6 +12,7 @@ graph nodes can invoke them at extension points.
 
 from __future__ import annotations
 import logging
+import os
 import time
 from typing import Any, Iterable
 
@@ -46,6 +47,31 @@ def _build_code_review_config(spec: Any) -> CodeReviewConfig:
             inspector=spec.get("inspector"),
         )
     return CodeReviewConfig(enabled=False)
+
+
+def _max_cost_usd_from_env() -> float | None:
+    """Read BF_MAX_COST_USD. Unset / blank / unparseable / <= 0 → no cap.
+
+    A malformed value must NOT silently become a cap of 0.0 — that would abort
+    every run before its first LLM call, which looks like a total outage.
+    """
+    raw = os.environ.get("BF_MAX_COST_USD", "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning(
+            "BF_MAX_COST_USD=%r is not a number; running with no cost cap", raw
+        )
+        return None
+    if val <= 0:
+        logger.warning(
+            "BF_MAX_COST_USD=%s is not positive; running with no cost cap", raw
+        )
+        return None
+    logger.info("run budget: cost cap $%.4f", val)
+    return val
 
 
 class LangGraphAgent(Agent):
@@ -92,7 +118,12 @@ class LangGraphAgent(Agent):
 
     def fix(self, bug_input: BugInput) -> FixOutput:
         hooks = self._build_hooks()
-        budget = RunBudget()
+        # BF_MAX_COST_USD is the only cap that bounds *spend* rather than *work*.
+        # The token cap can't substitute for it: price per token varies by two
+        # orders of magnitude across backends (self-hosted is free; a reasoning
+        # model bills its hidden reasoning tokens as output). Off by default —
+        # a dollar figure is not a sane default, it's an operator decision.
+        budget = RunBudget(max_cost_usd=_max_cost_usd_from_env())
 
         # State carries only serializable, flow-between-nodes data. Provider,
         # hooks, and budget are run-scoped runtime context — they go into

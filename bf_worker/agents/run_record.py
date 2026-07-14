@@ -40,6 +40,17 @@ def _git_output(*args: str) -> str | None:
     return proc.stdout.strip()
 
 
+def _worker_cfg():
+    """Lazily fetch worker settings. Lazy because run_record is imported by the
+    evaluation tooling, which must not require a fully-built settings tree."""
+    try:
+        from settings import worker_cfg
+
+        return worker_cfg
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
 def _agent_code_git_info() -> dict[str, Any]:
     """Best-effort git version snapshot for this SDLCMA checkout."""
     status = _git_output("status", "--short")
@@ -128,6 +139,16 @@ class RunRecord:
     total_prompt_tokens:        int   | None = None
     total_completion_tokens:    int   | None = None
     total_cached_input_tokens:  int   | None = None
+    # ── cost (additive 2026-07-14; SCHEMA_VERSION unchanged at "1") ─────
+    # USD for this run's LLM calls. In gateway mode the gateway is
+    # authoritative (it alone knows which backend the policy picked and what
+    # that backend charges, and a fallback ladder can touch two prices in one
+    # run); in direct mode the worker prices it from configs/pricing.yaml by
+    # LLM_MODEL. None = unpriced backend or unknown model — deliberately NOT
+    # 0.0, which would claim the run was free.
+    total_cost_usd:             float | None = None
+    cost_currency:              str   | None = None
+    cost_source:                str   | None = None  # "gateway" | "local_pricing" | None
     total_llm_wallclock_s:      float | None = None
     # Per-call wallclock breakdown (ms, ordered). Surface for p50/p95/p99
     # per-call latency and for spotting which calls dominated the run
@@ -243,6 +264,12 @@ class RunRecord:
             total_prompt_tokens        = s.get("total_prompt_tokens"),
             total_completion_tokens    = s.get("total_completion_tokens"),
             total_cached_input_tokens  = s.get("total_cached_input_tokens"),
+            total_cost_usd             = s.get("total_cost_usd"),
+            cost_currency              = ("USD" if s.get("total_cost_usd") is not None else None),
+            cost_source                = (
+                ("gateway" if getattr(_worker_cfg(), "llm_via_gateway", False) else "local_pricing")
+                if s.get("total_cost_usd") is not None else None
+            ),
             total_llm_wallclock_s      = s.get("total_llm_wallclock_s"),
             llm_call_wallclock_ms      = s.get("llm_call_wallclock_ms"),
             llm_model_served           = llm_model_served,

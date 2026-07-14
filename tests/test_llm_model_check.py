@@ -66,17 +66,17 @@ def _stub_query(monkeypatch, served: str | None = None, exc: Exception | None = 
 
 
 def test_is_self_hosted_when_key_is_empty():
-    assert is_self_hosted(_cfg(api_key="EMPTY")) is True
+    assert llm_model_check.is_self_hosted(_cfg(api_key="EMPTY")) is True
 
 
 def test_is_self_hosted_false_for_cloud_key():
-    assert is_self_hosted(_cfg(api_key="sk-xxxxx")) is False
+    assert llm_model_check.is_self_hosted(_cfg(api_key="sk-xxxxx")) is False
 
 
 def test_is_self_hosted_false_when_attr_missing():
     """A cfg-like object without llm_api_key should not blow up — treat as
     cloud (the safer default; cloud backends will fail loud on bad keys)."""
-    assert is_self_hosted(SimpleNamespace()) is False
+    assert llm_model_check.is_self_hosted(SimpleNamespace()) is False
 
 
 # ── cloud backend: never probes, returns None ────────────────────────────────
@@ -225,3 +225,55 @@ def test_query_served_model_raises_on_empty_data(monkeypatch):
     monkeypatch.setattr(llm_model_check.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(ValueError, match="no models"):
         query_served_model("http://127.0.0.1:8000/v1")
+
+
+# ── keyless (Entra ID / Managed Identity) is a CLOUD backend, not self-hosted ──
+
+
+class _EntraCfg:
+    """A worker configured for Azure keyless auth. It never sets LLM_API_KEY —
+    there IS no key — so llm_api_key keeps its "EMPTY" default, which is exactly
+    the string the self-hosted discriminator looks for."""
+
+    llm_api_key = "EMPTY"          # the default; nobody set it
+    llm_auth_mode = "entra"
+    llm_api_base_url = "https://res.openai.azure.com/openai/v1"
+    llm_model = "gpt-5-mini"
+    llm_via_gateway = False
+
+
+def test_entra_auth_is_not_self_hosted():
+    """Without this, an Azure keyless worker is misread as self-hosted and probes
+    {base_url}/models unauthenticated. It only survives today because the 401 is
+    swallowed as a network blip — a silent misclassification resting on a silent
+    failure. Make the probe strict and every Azure keyless run aborts at startup."""
+    assert llm_model_check.is_self_hosted(_EntraCfg()) is False
+
+
+def test_entra_auth_skips_the_model_probe(monkeypatch):
+    probed = []
+    monkeypatch.setattr(
+        llm_model_check, "query_served_model",
+        lambda *a, **k: probed.append(a) or "whatever",
+    )
+    assert llm_model_check.check_or_abort(_EntraCfg()) is None
+    assert probed == [], "keyless Azure must not be probed as a self-hosted backend"
+
+
+def test_api_key_mode_still_uses_the_empty_sentinel():
+    """The existing convention must keep working for real self-hosted backends."""
+
+    class _SelfHosted:
+        llm_api_key = "EMPTY"
+        llm_auth_mode = "api_key"
+
+    assert llm_model_check.is_self_hosted(_SelfHosted()) is True
+
+
+def test_cfg_without_auth_mode_field_defaults_to_api_key():
+    """Settings objects predating llm_auth_mode (and test doubles) must not break."""
+
+    class _Old:
+        llm_api_key = "EMPTY"
+
+    assert llm_model_check.is_self_hosted(_Old()) is True

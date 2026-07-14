@@ -34,19 +34,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_CALLS = 30
 DEFAULT_MAX_TOKENS = 200_000
 DEFAULT_MAX_WALLCLOCK_S = 300
+# Money is the one dimension where the honest default is "no opinion". Tokens
+# and wallclock are comparable across backends; a dollar is not — the same run
+# costs $0 self-hosted and real money on a cloud model. So the cap is OFF unless
+# the operator names a number (BF_MAX_COST_USD). When it IS set, it is the only
+# cap that bounds *spend* rather than *work*: the token cap can't, because the
+# price per token varies by two orders of magnitude across backends.
+DEFAULT_MAX_COST_USD: float | None = None
 
 
 @dataclass
 class RunBudget:
-    """Tracks consumption against three caps. Mutable; one per fix() call."""
+    """Tracks consumption against four caps. Mutable; one per fix() call."""
 
     max_calls: int = DEFAULT_MAX_CALLS
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_wallclock_s: int = DEFAULT_MAX_WALLCLOCK_S
+    max_cost_usd: float | None = DEFAULT_MAX_COST_USD
 
     calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # None until a priced call lands. Distinct from 0.0, which would claim the
+    # run was free — see cost_usd's docstring.
+    cost_usd: float | None = None
     started_at: float = field(default_factory=time.monotonic)
     exhausted_reason: str | None = None
 
@@ -80,6 +91,14 @@ class RunBudget:
             self.exhausted_reason = (
                 f"token limit reached ({self.total_tokens}/{self.max_tokens})"
             )
+        elif (
+            self.max_cost_usd is not None
+            and self.cost_usd is not None
+            and self.cost_usd >= self.max_cost_usd
+        ):
+            self.exhausted_reason = (
+                f"cost limit reached (${self.cost_usd:.4f}/${self.max_cost_usd:.4f})"
+            )
         elif self.elapsed_s >= self.max_wallclock_s:
             self.exhausted_reason = (
                 f"wallclock limit reached ({int(self.elapsed_s)}/{self.max_wallclock_s}s)"
@@ -88,11 +107,24 @@ class RunBudget:
 
     # ── writers ───────────────────────────────────────────────────────────────
 
-    def record_call(self, input_tokens: int = 0, output_tokens: int = 0) -> None:
-        """Debit the budget for one LLM call."""
+    def record_call(
+        self,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float | None = None,
+    ) -> None:
+        """Debit the budget for one LLM call.
+
+        `cost_usd` is None on unpriced backends (self-hosted, or a gateway
+        backend with no `pricing:` block). The cost accumulator then stays None
+        and the cost cap simply never trips — an unknown price must not be
+        treated as free, nor as infinite.
+        """
         self.calls += 1
         self.input_tokens += max(0, int(input_tokens or 0))
         self.output_tokens += max(0, int(output_tokens or 0))
+        if cost_usd is not None:
+            self.cost_usd = (self.cost_usd or 0.0) + max(0.0, float(cost_usd))
 
     # ── serialisation (for journal / RunRecord) ───────────────────────────────
 
@@ -101,10 +133,14 @@ class RunBudget:
             "max_calls": self.max_calls,
             "max_tokens": self.max_tokens,
             "max_wallclock_s": self.max_wallclock_s,
+            "max_cost_usd": self.max_cost_usd,
             "calls": self.calls,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
+            "cost_usd": (
+                round(self.cost_usd, 6) if self.cost_usd is not None else None
+            ),
             "elapsed_s": round(self.elapsed_s, 3),
             "exhausted_reason": self.exhausted_reason,
         }
@@ -117,6 +153,7 @@ class BudgetConfig:
     max_calls: int = DEFAULT_MAX_CALLS
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_wallclock_s: int = DEFAULT_MAX_WALLCLOCK_S
+    max_cost_usd: float | None = DEFAULT_MAX_COST_USD
 
 
 def extract_token_usage(assistant_msg) -> tuple[int, int]:

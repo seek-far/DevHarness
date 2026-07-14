@@ -35,12 +35,63 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PricingConfig:
+    """Per-1M-token prices for one backend.
+
+    Prices hang off the BACKEND, not a global model→price table, because the
+    same model costs different amounts depending on where it is served (Azure
+    region + deployment type, self-hosted = free, Dashscope ≠ OpenAI list).
+    Absent → the backend simply reports no cost, and RunRecord.total_cost_usd
+    stays None. Never guess a price.
+    """
+    input_per_1m: float = 0.0
+    output_per_1m: float = 0.0
+    # Cached input is typically ~10% of list on Azure. Defaults to the full
+    # input price so a backend that reports cached tokens without declaring a
+    # cached price is over-, never under-, charged.
+    cached_input_per_1m: float | None = None
+    currency: str = "USD"
+
+    def cost_usd(self, prompt: int, completion: int, cached: int = 0) -> float:
+        """Cost of one call. `cached` is the subset of `prompt` served from the
+        provider's prompt cache — billed at the cheaper rate, so it must be
+        subtracted from the full-price portion rather than added on top."""
+        cached = max(0, min(int(cached or 0), int(prompt or 0)))
+        full = max(0, int(prompt or 0) - cached)
+        cached_rate = (
+            self.cached_input_per_1m
+            if self.cached_input_per_1m is not None
+            else self.input_per_1m
+        )
+        return (
+            full * self.input_per_1m / 1_000_000
+            + cached * cached_rate / 1_000_000
+            + max(0, int(completion or 0)) * self.output_per_1m / 1_000_000
+        )
+
+
+@dataclass(frozen=True)
 class BackendConfig:
     name: str
     base_url: str
     model: str
     api_key: str
     request_timeout: float = 600.0
+    # How to authenticate. `api_key` (default) sends the static key as a bearer
+    # token — today's behaviour for every existing config. `entra` mints a
+    # Microsoft Entra ID token instead and sends THAT as the bearer token, which
+    # is all Azure's /openai/v1 route needs: same header, different source. On
+    # Azure compute DefaultAzureCredential resolves to the Managed Identity.
+    auth: str = "api_key"
+    entra_scope: str = "https://cognitiveservices.azure.com/.default"
+    entra_client_id: str = ""   # user-assigned MI; empty → system-assigned
+    # Which request params the backend tolerates. `reasoning` strips the ones
+    # o-series / gpt-5-family models reject (see params.py). The whole point of
+    # doing this HERE is that the worker then only ever emits one canonical
+    # request shape and the gateway absorbs per-backend divergence.
+    param_profile: str = "chat"
+    reasoning_effort: str = ""  # optional, reasoning profile only
+    pricing: PricingConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +205,41 @@ def _resolve_api_key(raw: dict[str, Any], backend_name: str) -> str:
     return "EMPTY"
 
 
+_AUTH_MODES = ("api_key", "entra")
+_PARAM_PROFILES = ("chat", "reasoning")
+_REASONING_EFFORTS = ("", "minimal", "low", "medium", "high")
+
+
+def _parse_pricing(raw: Any, backend_name: str) -> PricingConfig | None:
+    """Absent → None → the backend reports no cost. Never guess a price: a
+    wrong number in a cost dashboard is worse than a blank one."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise GatewayConfigError(
+            f"backend {backend_name!r}: pricing must be a mapping, got {type(raw).__name__}"
+        )
+    def _num(key: str, default: float | None) -> float | None:
+        if key not in raw:
+            return default
+        try:
+            v = float(raw[key])
+        except (TypeError, ValueError) as exc:
+            raise GatewayConfigError(
+                f"backend {backend_name!r}: pricing.{key} must be numeric, got {raw[key]!r}"
+            ) from exc
+        if v < 0:
+            raise GatewayConfigError(f"backend {backend_name!r}: pricing.{key} must be >= 0")
+        return v
+
+    return PricingConfig(
+        input_per_1m=_num("input_per_1m", 0.0) or 0.0,
+        output_per_1m=_num("output_per_1m", 0.0) or 0.0,
+        cached_input_per_1m=_num("cached_input_per_1m", None),
+        currency=str(raw.get("currency", "USD")),
+    )
+
+
 def _parse_backend(raw: Any) -> BackendConfig:
     if not isinstance(raw, dict):
         raise GatewayConfigError(f"backend entries must be mappings, got {type(raw).__name__}")
@@ -173,12 +259,54 @@ def _parse_backend(raw: Any) -> BackendConfig:
         raise GatewayConfigError(
             f"backend {name!r}: request_timeout must be numeric, got {timeout!r}"
         ) from exc
+
+    auth = str(raw.get("auth", "api_key")).lower()
+    if auth not in _AUTH_MODES:
+        raise GatewayConfigError(
+            f"backend {name!r}: auth={auth!r} unsupported; pick one of {list(_AUTH_MODES)}"
+        )
+    # A key alongside keyless auth is a contradiction — one of them is a leftover,
+    # and silently preferring either is how a run ends up on the wrong credential.
+    if auth == "entra" and ("api_key" in raw or "api_key_env" in raw):
+        raise GatewayConfigError(
+            f"backend {name!r}: auth=entra is keyless — remove api_key / api_key_env"
+        )
+
+    profile = str(raw.get("param_profile", "chat")).lower()
+    if profile not in _PARAM_PROFILES:
+        raise GatewayConfigError(
+            f"backend {name!r}: param_profile={profile!r} unsupported; "
+            f"pick one of {list(_PARAM_PROFILES)}"
+        )
+    effort = str(raw.get("reasoning_effort", "")).lower()
+    if effort not in _REASONING_EFFORTS:
+        raise GatewayConfigError(
+            f"backend {name!r}: reasoning_effort={effort!r} unsupported; "
+            f"pick one of {[e for e in _REASONING_EFFORTS if e]}"
+        )
+    if effort and profile != "reasoning":
+        raise GatewayConfigError(
+            f"backend {name!r}: reasoning_effort is only meaningful with "
+            f"param_profile=reasoning"
+        )
+
     return BackendConfig(
         name=name,
         base_url=base_url.rstrip("/"),
         model=model,
-        api_key=_resolve_api_key(raw, name),
+        # Keyless backends have no static key; the bearer token is minted per
+        # request in azure_auth. Empty string here, never the "EMPTY" sentinel —
+        # that sentinel means "self-hosted, no auth", a different thing.
+        api_key="" if auth == "entra" else _resolve_api_key(raw, name),
         request_timeout=timeout_f,
+        auth=auth,
+        entra_scope=str(
+            raw.get("entra_scope", "https://cognitiveservices.azure.com/.default")
+        ),
+        entra_client_id=str(raw.get("entra_client_id", "") or ""),
+        param_profile=profile,
+        reasoning_effort=effort,
+        pricing=_parse_pricing(raw.get("pricing"), name),
     )
 
 

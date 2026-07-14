@@ -44,10 +44,16 @@ _BACKEND_TLS = threading.local()
 HEADER_BUG_ID = "X-Sdlcma-Bug-Id"
 HEADER_ATTEMPT = "X-Sdlcma-Attempt"
 HEADER_BACKEND = "x-sdlcma-backend-name"  # response header (case-insensitive on read)
+# Per-call cost, as computed by the gateway. The gateway is authoritative: it is
+# the only party that knows which backend the policy selected and what that
+# backend charges — and in a fallback ladder one run can touch two backends at
+# two prices. Absent when the backend declares no pricing, in which case the
+# cost stays UNKNOWN (None), which is not the same as free.
+HEADER_COST = "x-sdlcma-cost-usd"
 
 
 def _make_event_hook_client(timeout: float):
-    """Build an httpx.Client that captures the gateway's backend-name header.
+    """Build an httpx.Client that captures the gateway's telemetry headers.
 
     Only used when the worker is talking to an llm_gateway. For a direct
     cloud / self-hosted backend we want zero httpx-level interference (the
@@ -61,11 +67,24 @@ def _make_event_hook_client(timeout: float):
         name = resp.headers.get(HEADER_BACKEND)
         if name:
             _BACKEND_TLS.value = name
+        raw_cost = resp.headers.get(HEADER_COST)
+        # Reset to None (not 0.0) when the header is absent: "the gateway didn't
+        # tell us" must stay distinguishable from "this call was free".
+        _BACKEND_TLS.cost = _parse_cost(raw_cost)
 
     return httpx.Client(
         timeout=timeout,
         event_hooks={"response": [_on_response]},
     )
+
+
+def _parse_cost(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def resolve_api_key(cfg) -> str:
@@ -157,3 +176,31 @@ def read_last_seen_backend() -> str | None:
     or (c) no LLM call has happened yet in this thread.
     """
     return getattr(_BACKEND_TLS, "value", None)
+
+
+def read_last_seen_cost() -> float | None:
+    """Cost of the most recent LLM call as reported by the gateway, or None.
+
+    None in direct-backend mode (there the caller prices the call itself from
+    `services.pricing`), and None when the gateway's backend declares no
+    pricing. Never 0.0 as a stand-in for "unknown".
+    """
+    return getattr(_BACKEND_TLS, "cost", None)
+
+
+def cost_of_call(cfg, prompt_tokens: int, completion_tokens: int,
+                 cached_tokens: int = 0) -> float | None:
+    """Cost of one LLM call, from whichever source is authoritative here.
+
+    Gateway mode → whatever the gateway charged us (it knows the backend).
+    Direct mode  → priced locally from configs/pricing.yaml by LLM_MODEL.
+    Unknown model / unpriced backend → None. Never a guess.
+    """
+    if getattr(cfg, "llm_via_gateway", False):
+        return read_last_seen_cost()
+    from services.pricing import cost_for  # local import: keeps yaml optional
+
+    return cost_for(
+        getattr(cfg, "llm_model", "") or "",
+        prompt_tokens, completion_tokens, cached_tokens,
+    )

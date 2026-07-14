@@ -732,6 +732,7 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 | `LLM_API_BASE_URL` | OpenAI-compatible base URL (e.g. Dashscope, or an SDLCMA `llm-gateway` instance) |
 | `LLM_MODEL` | Model name (e.g. `qwen3-coder-480b-a35b-instruct`). When `LLM_VIA_GATEWAY=true` this is informational — the gateway rewrites `model` to the selected backend's declared name. |
 | `LLM_VIA_GATEWAY` | Optional. Set `true` when `LLM_API_BASE_URL` points at an SDLCMA `llm-gateway` (orthogonal opt-in). Worker attaches `X-Sdlcma-Bug-Id` + `X-Sdlcma-Attempt` hint headers to every LLM call and skips the self-hosted startup model-name probe. Default `false` = byte-identical to the pre-gateway path. See "LLM Gateway" below. |
+| `BF_MAX_COST_USD` | Optional. Abort the run if its LLM calls exceed this many dollars. Off by default. The only cap that bounds **spend** rather than **work** — the token cap can't substitute, because price per token varies ~100x across backends. |
 | `LLM_AUTH_MODE` | Optional. `api_key` (default) or `entra`. `entra` authenticates with a Microsoft Entra ID token instead of a static key — this is the **Managed Identity** path on Azure compute, and resolves to your `az login` session locally. Requires `azure-identity`. |
 | `LLM_PARAM_PROFILE` | Optional. `chat` (default) or `reasoning`. **Reasoning models (o-series, the gpt-5 family) reject `temperature` outright** — Azure returns HTTP 400. Set `reasoning` to omit it. |
 
@@ -773,6 +774,40 @@ before deploying.
 **Determinism caveat.** Reasoning models will not accept `temperature=0`, which is what pinned
 run-to-run reproducibility for evaluation sweeps. On these backends, use the LLM Gateway's replay
 cache (`cache.mode: replay`) as the determinism anchor instead.
+
+### Cost tracking and the `BF_MAX_COST_USD` ceiling
+
+Every run records what its LLM calls cost, on `RunRecord.total_cost_usd`.
+
+- **Through the gateway** — the gateway is authoritative. It is the only component that knows which
+  backend the inference policy actually selected and what that backend charges (a fallback ladder can
+  touch two prices in one run), and it hands the figure back in a response header. Prices live on
+  each backend in the gateway YAML, which is the right home: the same model costs different amounts
+  depending on where it is served.
+- **Direct to a backend** — the worker prices the call itself from `configs/pricing.yaml`, keyed by
+  `LLM_MODEL`.
+
+An unpriced backend or an unknown model reports **no cost at all** (`None`), never `$0.00`. A
+fabricated zero in a cost dashboard reads as "this was free"; a blank reads as "go find out".
+
+```bash
+export BF_MAX_COST_USD=0.50     # abort the run if it spends more than $0.50
+```
+
+This is the only cap that bounds **spend** rather than **work** — the existing token cap cannot
+substitute for it, because the price per token varies by two orders of magnitude across backends
+(self-hosted is free; a reasoning model bills its hidden reasoning tokens as output). It is **off by
+default**: a dollar figure is an operator decision, not a sane default. A malformed value means *no
+cap*, never a cap of zero — which would abort every run before its first LLM call.
+
+**The replay cache makes repeat runs free.** With `cache.mode: cache` in the gateway config, the
+first run records every response and every run after it replays them at zero cost. Measured against
+Azure `gpt-5-mini` on fixture F01: first run **$0.001179**, second run **$0.000000**, identical
+tokens and an identical fix. Since reasoning models no longer accept `temperature=0`, this is also
+what now pins run-to-run determinism for evaluation sweeps.
+
+Dashboard: the "LLM cost & cache" row shows spend to date, cost per fix, live spend rate per backend,
+and what the cache saved you. Full design contract in `docs/azure.md`.
 
 ### LLM Gateway (optional, opt-in)
 

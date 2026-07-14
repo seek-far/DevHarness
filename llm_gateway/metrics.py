@@ -45,3 +45,50 @@ UPSTREAM_WALLCLOCK_MS = Histogram(
     # up storage; too wide would lose useful resolution near p50.
     buckets=(100, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000),
 )
+
+# ── spend ────────────────────────────────────────────────────────────────────
+#
+#   sdlcma_llm_upstream_cost_usd_total{backend, model}
+#       Money actually spent upstream. Cache hits are NOT counted here — they
+#       cost nothing, and folding them in would make the cache look expensive.
+#
+#   sdlcma_llm_cache_saved_usd_total{backend, model}
+#       What a cache hit WOULD have cost, priced with the backend that
+#       originally served it. This is the number that justifies the cache, and
+#       for a replayed stress test it is the whole bill you didn't pay.
+#
+#   sdlcma_llm_upstream_tokens_total{backend, model, kind}
+#       kind ∈ {input, output, cached_input}. `cached_input` is a SUBSET of
+#       `input`, not an addition to it — don't sum the two.
+#
+# ⚠️ The `upstream_` prefix is load-bearing, not decoration. `tools/
+# runrecord_to_metrics.py` already exports `sdlcma_llm_tokens_total{type,
+# model_slug}` — journal-derived, recomputed per-RUN on every scrape. These
+# here are live, per-CALL, from the gateway. Same name would put two
+# semantically different things in one metric: the dashboard's
+# `sum by (type)(sdlcma_llm_tokens_total)` would silently absorb gateway series
+# that have no `type` label, and summing across both double-counts every token.
+# Keep the two families namespaced apart. (Caught 2026-07-14 before it shipped.)
+#
+# Cardinality: backend names come from the YAML (1-3 typical), models likewise,
+# kind is 3 values. No per-bug / per-project labels, ever (project rule).
+
+COST_USD = Counter(
+    "sdlcma_llm_upstream_cost_usd_total",
+    "Upstream LLM spend in USD, by backend and model (cache hits excluded)",
+    ["backend", "model"],
+)
+
+COST_SAVED_USD = Counter(
+    "sdlcma_llm_cache_saved_usd_total",
+    "USD not spent because the response came from the replay cache",
+    ["backend", "model"],
+)
+
+TOKENS = Counter(
+    "sdlcma_llm_upstream_tokens_total",
+    "Live per-call LLM tokens at the gateway, by backend/model/kind. Distinct "
+    "from the journal-derived sdlcma_llm_tokens_total (per-run, recomputed). "
+    "cached_input is a SUBSET of input.",
+    ["backend", "model", "kind"],
+)

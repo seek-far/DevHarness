@@ -1,19 +1,28 @@
 {
   "title": "SDLCMA",
   "uid": "sdlcma-main",
-  "tags": ["sdlcma", "bug-fix"],
+  "tags": [
+    "sdlcma",
+    "bug-fix"
+  ],
   "timezone": "browser",
   "schemaVersion": 38,
   "version": 1,
   "refresh": "30s",
-  "time": {"from": "now-1h", "to": "now"},
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "datasource",
         "type": "datasource",
         "query": "prometheus",
-        "current": {"text": "Prometheus", "value": "Prometheus"},
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
         "hide": 0,
         "label": "Data source"
       }
@@ -23,8 +32,13 @@
     {
       "id": 1,
       "type": "row",
-      "title": "Health — these should stay near zero",
-      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "title": "Health \u2014 these should stay near zero",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
@@ -32,8 +46,16 @@
       "type": "stat",
       "title": "bug_id collisions",
       "description": "Should be 0 forever post-Item-1 (urandom tail). Non-zero = regression.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 0, "y": 1, "w": 6, "h": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(sdlcma_bug_id_collisions_total)",
@@ -46,8 +68,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "red", "value": 1}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
             ]
           }
         }
@@ -58,8 +86,16 @@
       "type": "stat",
       "title": "Dead-letter rate (5m)",
       "description": "Should stay 0. Non-zero = orchestrator received malformed payload or parser bug.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 6, "y": 1, "w": 6, "h": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(rate(sdlcma_dead_letter_total[5m]))",
@@ -74,8 +110,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "red", "value": 0.0001}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.0001
+              }
             ]
           }
         }
@@ -86,8 +128,16 @@
       "type": "stat",
       "title": "Worker restarts (5m)",
       "description": "HealthMonitor restart rate. Non-zero in steady state = worker instability.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 12, "y": 1, "w": 6, "h": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(rate(sdlcma_worker_restarts_total[5m]))",
@@ -102,8 +152,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "red", "value": 0.0001}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.0001
+              }
             ]
           }
         }
@@ -114,8 +170,16 @@
       "type": "stat",
       "title": "RunRecord scan age",
       "description": "Time since runrecord_to_metrics last completed. Stale = cron broken.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 18, "y": 1, "w": 6, "h": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "time() - sdlcma_runrecord_last_scan_timestamp",
@@ -129,9 +193,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 120},
-              {"color": "red", "value": 300}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
             ]
           }
         }
@@ -141,7 +214,12 @@
       "id": 10,
       "type": "row",
       "title": "Capacity & backlog",
-      "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
@@ -149,8 +227,16 @@
       "type": "timeseries",
       "title": "Active workers by status",
       "description": "warmup + running only. done/failed are filtered by registry.all_active() and not exposed.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sdlcma_active_workers",
@@ -158,15 +244,27 @@
           "legendFormat": "{{status}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "id": 12,
       "type": "timeseries",
       "title": "Stream pending (real backlog)",
-      "description": "XPENDING — orchestrator's consumer-group backlog. Distinct from XLEN (cumulative).",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "description": "XPENDING \u2014 orchestrator's consumer-group backlog. Distinct from XLEN (cumulative).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sdlcma_stream_pending",
@@ -174,13 +272,22 @@
           "legendFormat": "{{stream}} / {{group}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "id": 20,
       "type": "row",
       "title": "Throughput",
-      "gridPos": {"x": 0, "y": 14, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
@@ -188,8 +295,16 @@
       "type": "timeseries",
       "title": "Webhooks received by classification (1m rate)",
       "description": "bug_reported = real workload; validation = our own auto-fix CI; other/invalid = noise.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 0, "y": 15, "w": 12, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum by (classification) (rate(sdlcma_webhooks_received_total[1m]))",
@@ -197,15 +312,27 @@
           "legendFormat": "{{classification}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
     },
     {
       "id": 22,
       "type": "timeseries",
       "title": "Runs completed by outcome (cumulative)",
       "description": "From RunRecord journal scan. fixed = success; error/no_fix = failure modes; already_fixed = R10 short-circuit.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 12, "y": 15, "w": 12, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 15,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum by (outcome) (sdlcma_runs_total)",
@@ -213,13 +340,22 @@
           "legendFormat": "{{outcome}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "id": 30,
       "type": "row",
       "title": "Latency",
-      "gridPos": {"x": 0, "y": 23, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
@@ -227,8 +363,16 @@
       "type": "timeseries",
       "title": "Gateway handle latency p50/p95 (ms)",
       "description": "Receive to XADD. Should stay sub-10ms even under burst.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.50, sum by (le) (rate(sdlcma_gateway_handle_ms_bucket[5m])))",
@@ -241,15 +385,27 @@
           "legendFormat": "p95"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "ms"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
     },
     {
       "id": 32,
       "type": "timeseries",
       "title": "LLM upstream wallclock p50/p95 by backend (ms)",
       "description": "Cache hits NOT included. Spike = backend slowdown.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.50, sum by (le, backend) (rate(sdlcma_llm_upstream_wallclock_ms_bucket[5m])))",
@@ -262,13 +418,22 @@
           "legendFormat": "p95 {{backend}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "ms"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
     },
     {
       "id": 40,
       "type": "row",
       "title": "LLM cost & cache",
-      "gridPos": {"x": 0, "y": 32, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
@@ -276,8 +441,16 @@
       "type": "timeseries",
       "title": "Tokens by type (cumulative)",
       "description": "From RunRecord. prompt = input, completion = output, cached = backend prompt-cache hits. Cost driver.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 0, "y": 33, "w": 12, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 12,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum by (type) (sdlcma_llm_tokens_total)",
@@ -285,15 +458,27 @@
           "legendFormat": "{{type}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "id": 42,
       "type": "stat",
       "title": "Cache hit rate (5m)",
       "description": "rate(hit) / rate(total). Higher = more tokens saved by cache.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 12, "y": 33, "w": 6, "h": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(rate(sdlcma_llm_cache_lookups_total{result=\"hit\"}[5m])) / clamp_min(sum(rate(sdlcma_llm_cache_lookups_total[5m])), 1e-12)",
@@ -307,9 +492,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red", "value": null},
-              {"color": "yellow", "value": 0.3},
-              {"color": "green", "value": 0.7}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.3
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
             ]
           }
         }
@@ -319,8 +513,16 @@
       "id": 43,
       "type": "timeseries",
       "title": "Cache lookups by result (5m rate)",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 18, "y": 33, "w": 6, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 33,
+        "w": 6,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum by (result) (rate(sdlcma_llm_cache_lookups_total[5m]))",
@@ -328,15 +530,27 @@
           "legendFormat": "{{result}}"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "ops"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      }
     },
     {
       "id": 44,
       "type": "stat",
       "title": "Tokens per fix (avg)",
-      "description": "Total tokens divided by completed fixes. Useful for cost-per-fix tracking. Stress_test_1 showed 2K-5K as the typical range for the bundled fixtures on Qwen3-Coder — tune the thresholds to your model + fixture mix.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 12, "y": 37, "w": 6, "h": 4},
+      "description": "Total tokens divided by completed fixes. Useful for cost-per-fix tracking. Stress_test_1 showed 2K-5K as the typical range for the bundled fixtures on Qwen3-Coder \u2014 tune the thresholds to your model + fixture mix.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 37,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(sdlcma_llm_tokens_total) / clamp_min(sum(sdlcma_runs_total), 1)",
@@ -350,19 +564,165 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "green", "value": null},
-              {"color": "yellow", "value": 10000},
-              {"color": "red", "value": 20000}
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10000
+              },
+              {
+                "color": "red",
+                "value": 20000
+              }
             ]
           }
         }
       }
     },
     {
+      "id": 64,
+      "type": "timeseries",
+      "title": "Spend to date (journal)",
+      "description": "Cumulative USD across all RunRecords in the journal. Journal-derived: the exporter recomputes it from scratch each scrape, so the series is born-at-value \u2014 sum(), never rate()/increase().",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(sdlcma_llm_cost_usd_total)",
+          "legendFormat": "total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 65,
+      "type": "timeseries",
+      "title": "Cost per fix (journal, avg)",
+      "description": "Cumulative spend / cumulative runs. Same born-at-value rule.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 41
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(sdlcma_llm_cost_usd_total) / clamp_min(sum(sdlcma_runs_total), 1)",
+          "legendFormat": "avg $/run",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 66,
+      "type": "timeseries",
+      "title": "Gateway spend rate (5m)",
+      "description": "Live upstream spend per backend, extrapolated to $/hour. Gateway counters are true monotonic per-call counters with a real 0 baseline, so rate() IS correct here \u2014 unlike the journal-derived series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 41
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (backend) (rate(sdlcma_llm_upstream_cost_usd_total[5m])) * 3600",
+          "legendFormat": "{{backend}} $/h",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 67,
+      "type": "timeseries",
+      "title": "Saved by replay cache (cumulative)",
+      "description": "What the cache hits WOULD have cost, priced with the backend that originally served them. On a replayed stress test this is the entire bill you did not pay.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 41
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(sdlcma_llm_cache_saved_usd_total)",
+          "legendFormat": "saved",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
       "id": 50,
       "type": "row",
       "title": "Quality",
-      "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
@@ -370,8 +730,16 @@
       "type": "stat",
       "title": "Fix success rate (cumulative)",
       "description": "Fraction of completed RunRecords whose outcome was `fixed`. Drops on system issues or LLM-side regression.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 0, "y": 42, "w": 8, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 8,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum(sdlcma_runs_total{outcome=\"fixed\"}) / clamp_min(sum(sdlcma_runs_total), 1)",
@@ -385,9 +753,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              {"color": "red", "value": null},
-              {"color": "yellow", "value": 0.6},
-              {"color": "green", "value": 0.85}
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.6
+              },
+              {
+                "color": "green",
+                "value": 0.85
+              }
             ]
           }
         }
@@ -398,8 +775,16 @@
       "type": "timeseries",
       "title": "parse_trace_fallback (cumulative)",
       "description": "Was ~100% live before the 2026-05-29 parser fix. Spike = parser regression (wrong cost: every fix burns 1-2 extra LLM calls fetching files the parser should have surfaced).",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 8, "y": 42, "w": 8, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 50,
+        "w": 8,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "sum(sdlcma_parse_trace_fallback_total) or vector(0)",
@@ -407,13 +792,22 @@
           "legendFormat": "fallback count"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "short"}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
     },
     {
       "id": 60,
       "type": "row",
       "title": "System resources (node-exporter)",
-      "gridPos": {"x": 0, "y": 50, "w": 24, "h": 1},
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false
     },
     {
@@ -421,8 +815,16 @@
       "type": "timeseries",
       "title": "Node CPU usage (%)",
       "description": "Aggregated to a single value: the kind nodes share one WSL2 host, so node-exporter reports the same VM. 100 * (1 - idle), rate over 1m. On a real multi-node cluster, switch to avg by (instance) for per-node lines.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 0, "y": 51, "w": 8, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 8,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])))",
@@ -430,15 +832,29 @@
           "legendFormat": "usage"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      }
     },
     {
       "id": 62,
       "type": "timeseries",
       "title": "Node memory total vs used",
       "description": "total = MemTotal; used = MemTotal - MemAvailable (excludes reclaimable cache, matches what `free`/k8s call used).",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 8, "y": 51, "w": 8, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 59,
+        "w": 8,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "max(node_memory_MemTotal_bytes)",
@@ -451,15 +867,28 @@
           "legendFormat": "used"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "bytes", "min": 0}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        }
+      }
     },
     {
       "id": 63,
       "type": "timeseries",
       "title": "Node memory usage (%)",
       "description": "100 * (1 - MemAvailable / MemTotal).",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"x": 16, "y": 51, "w": 8, "h": 8},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 59,
+        "w": 8,
+        "h": 8
+      },
       "targets": [
         {
           "expr": "avg(100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
@@ -467,7 +896,13 @@
           "legendFormat": "usage"
         }
       ],
-      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      }
     }
   ]
 }

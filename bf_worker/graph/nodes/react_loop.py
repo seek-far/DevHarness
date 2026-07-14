@@ -39,7 +39,11 @@ from graph.state import BugFixState
 from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from services.budget import extract_cached_input_tokens, extract_token_usage
-from services.llm_client import build_llm_with_headers, read_last_seen_backend
+from services.llm_client import (
+    build_llm_with_headers,
+    cost_of_call,
+    read_last_seen_backend,
+)
 from services.prompt_guard import sanitize_untrusted
 from services.react_tools import TOOLS_SCHEMA, execute_tool
 from services.runtime_context import get_budget, get_hooks, get_provider
@@ -540,6 +544,10 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
     total_completion_tokens = int(state.get("total_completion_tokens") or 0)
     total_llm_wallclock_s   = float(state.get("total_llm_wallclock_s") or 0.0)
     total_cached_input_tokens: int | None = state.get("total_cached_input_tokens")
+    # Money, same None-vs-0 discipline: stays None on unpriced backends
+    # (self-hosted, or a gateway backend with no `pricing:` block), because
+    # "we don't know what this cost" must never render as "this was free".
+    total_cost_usd: float | None = state.get("total_cost_usd")
     # Per-call wallclock list — carries forward across react_loop re-entries
     # the same way the sums do. Copy so we don't mutate the prior state's
     # list in place (state dicts are passed by reference in LangGraph).
@@ -575,8 +583,14 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         llm_call_wallclock_ms.append(_call_wallclock_ms)
         if cached_tok is not None:
             total_cached_input_tokens = (total_cached_input_tokens or 0) + cached_tok
+        # Gateway mode: the gateway already priced this call and told us in a
+        # response header (it knows which backend the policy picked). Direct
+        # mode: price it here from configs/pricing.yaml. Unpriced → None.
+        _call_cost = cost_of_call(cfg, in_tok, out_tok, cached_tok or 0)
+        if _call_cost is not None:
+            total_cost_usd = (total_cost_usd or 0.0) + _call_cost
         if budget is not None:
-            budget.record_call(in_tok, out_tok)
+            budget.record_call(in_tok, out_tok, cost_usd=_call_cost)
         # Phase-4 marker. Indexed by llm_call_count (1-based, run-wide
         # across react_loop + reflection) so a post-processor can compute
         # per-call p50/p95 latency and spot which call dominated each fix.
@@ -704,6 +718,9 @@ def react_loop(state: BugFixState, config: Optional[RunnableConfig] = None) -> B
         "total_prompt_tokens":       total_prompt_tokens,
         "total_completion_tokens":   total_completion_tokens,
         "total_cached_input_tokens": total_cached_input_tokens,
+        "total_cost_usd":            (
+            round(total_cost_usd, 6) if total_cost_usd is not None else None
+        ),
         "total_llm_wallclock_s":     round(total_llm_wallclock_s, 6),
         "llm_call_wallclock_ms":     llm_call_wallclock_ms,
         "llm_backend_name":          backend_name,

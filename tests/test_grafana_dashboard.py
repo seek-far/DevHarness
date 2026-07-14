@@ -52,6 +52,15 @@ KNOWN_METRICS = {
     "sdlcma_runs_total",
     "sdlcma_run_elapsed_seconds_total",
     "sdlcma_llm_tokens_total",
+    # journal-derived (runrecord exporter) — cumulative, born-at-value
+    "sdlcma_llm_cost_usd_total",
+    # gateway-side, live per-call counters. The `upstream_`/`cache_` prefixes
+    # keep these from colliding with the journal-derived family above: same
+    # name, different label sets and different semantics would silently
+    # double-count every token.
+    "sdlcma_llm_upstream_cost_usd_total",
+    "sdlcma_llm_cache_saved_usd_total",
+    "sdlcma_llm_upstream_tokens_total",
     "sdlcma_llm_calls_total",
     "sdlcma_parse_trace_fallback_total",
     "sdlcma_reflection_fires_total",
@@ -185,10 +194,15 @@ _JOURNAL_DERIVED_METRICS = {
     "sdlcma_runs_total",
     "sdlcma_run_elapsed_seconds_total",
     "sdlcma_llm_tokens_total",
+    "sdlcma_llm_cost_usd_total",
     "sdlcma_llm_calls_total",
     "sdlcma_parse_trace_fallback_total",
     "sdlcma_reflection_fires_total",
 }
+# NOT journal-derived, despite the similar names: the gateway's
+# sdlcma_llm_upstream_* / sdlcma_llm_cache_saved_* counters are true in-process
+# monotonic per-call counters with a real 0 baseline, so rate() over them IS
+# meaningful. The prefixes exist precisely to keep the two families apart.
 
 
 def test_journal_metrics_not_wrapped_in_rate_or_increase(dashboard):

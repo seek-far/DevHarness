@@ -1,0 +1,47 @@
+# Azure OpenAI / Foundry backend, keyless (Entra ID → Managed Identity on Azure).
+#
+# Azure's /openai/v1/ route is plain OpenAI shape: no api-version query param,
+# no /openai/deployments/<dep>/ URL, no api-key: header. So the ordinary
+# `base_url` + bearer-token machinery works unchanged — `auth: entra` only
+# changes where the bearer token comes from.
+#
+# Run:
+#   az login                       # locally; on Azure compute the MI is used instead
+#   LLM_GATEWAY_CONFIG=configs/llm_gateway/azure.yaml \
+#     uvicorn llm_gateway.app:app --port 9000
+#
+# Worker:
+#   LLM_VIA_GATEWAY=true
+#   LLM_API_BASE_URL=http://localhost:9000/v1
+#
+# The identity needs the `Cognitive Services OpenAI User` data-plane role on the
+# resource. Subscription Owner is NOT enough.
+
+backends:
+  - name: azure-gpt-5-mini
+    base_url: https://lishuqiusuo-us-east-resource.openai.azure.com/openai/v1
+    model: gpt-5-mini            # the DEPLOYMENT name
+    auth: entra                  # keyless; no api_key / api_key_env
+    param_profile: reasoning     # gpt-5 family REJECTS `temperature` (HTTP 400)
+    reasoning_effort: low        # keep reasoning-token spend (billed as output) down
+    request_timeout: 120
+    pricing:                     # confirm against the portal for your region/SKU
+      input_per_1m: 0.25
+      output_per_1m: 2.00
+      cached_input_per_1m: 0.025
+      currency: USD
+
+inference_policy:
+  type: ordered
+  order: [azure-gpt-5-mini]
+  advance_on:
+    fix_failure: true
+
+# Reasoning models will not accept temperature=0, which is what used to pin
+# run-to-run determinism for evaluation sweeps. On these backends the replay
+# cache IS the determinism anchor — record once, then replay for free.
+cache:
+  mode: cache                    # replay on hit, record on miss
+  db_path: /tmp/sdlcma_llm_cache_azure.sqlite
+  normalize_content: true
+  log_every_n: 20

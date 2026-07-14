@@ -69,7 +69,19 @@ def is_self_hosted(cfg: Any) -> bool:
 
     See settings/worker_settings.py:llm_api_key default and the CLAUDE.md
     Configuration section. Cloud backends override the key via the env file.
+
+    **Keyless auth breaks that convention** and has to be excluded explicitly.
+    A worker on `LLM_AUTH_MODE=entra` never sets `LLM_API_KEY` — there is no key
+    to set — so it keeps the ``"EMPTY"`` default and would be misread as
+    self-hosted. It would then probe ``{base_url}/models`` unauthenticated,
+    get a 401, and only survive because a failed probe is treated as a network
+    blip and waved through. That is a silent misclassification resting on a
+    silent failure: the moment the probe were made strict, every Azure keyless
+    run would abort at startup. Azure is a cloud backend regardless of whether
+    the credential is a static key or a minted token.
     """
+    if getattr(cfg, "llm_auth_mode", "api_key") == "entra":
+        return False
     return getattr(cfg, "llm_api_key", None) == "EMPTY"
 
 

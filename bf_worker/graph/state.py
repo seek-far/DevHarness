@@ -58,6 +58,10 @@ class BugFixState(TypedDict, total=False):
     total_prompt_tokens: int | None
     total_completion_tokens: int | None
     total_cached_input_tokens: int | None
+    # USD spent on this run's LLM calls. None on unpriced backends
+    # (self-hosted, or a gateway backend with no `pricing:` block) — an
+    # unknown cost must never render as a confident $0.00.
+    total_cost_usd: float | None
     total_llm_wallclock_s: float | None
     # Per-call wallclock breakdown — one int (ms) per LLM call, ordered by
     # call. Carries forward across react_loop re-entries (retries, acting-

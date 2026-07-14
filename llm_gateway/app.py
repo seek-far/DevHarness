@@ -39,9 +39,18 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from .azure_auth import EntraTokenProvider, GatewayAuthError
 from .cache import Cache
 from .config import BackendConfig, GatewayConfig, load_config
-from .metrics import CACHE_LOOKUPS, UPSTREAM_WALLCLOCK_MS
+from .cost import cost_of, extract_usage
+from .metrics import (
+    CACHE_LOOKUPS,
+    COST_SAVED_USD,
+    COST_USD,
+    TOKENS,
+    UPSTREAM_WALLCLOCK_MS,
+)
+from .params import apply_param_profile
 
 # Configure logging at module import so the gateway's own INFO logs
 # (config loaded, cache enabled, per-request phase_marker lines) actually
@@ -73,6 +82,7 @@ _state: dict[str, Any] = {
     "backend_health": {},  # name -> {"last_ok_ts": float | None, "last_err": str | None}
     "cache": None,         # llm_gateway.cache.Cache | None
     "cache_request_count": 0,  # for periodic stats summary log
+    "entra": None,         # llm_gateway.azure_auth.EntraTokenProvider
 }
 
 # Header names — defined once so the worker and gateway never drift.
@@ -84,6 +94,12 @@ HEADER_BACKEND = "x-sdlcma-backend-name"
 # log line instead), but they're useful for ad-hoc curl debugging.
 HEADER_CACHE_RESULT = "x-sdlcma-cache"      # hit | miss | disabled
 HEADER_CACHE_KEY = "x-sdlcma-cache-key"     # short prefix only
+# What this call cost, so the worker can put it on RunRecord.total_cost_usd and
+# debit its run budget. The gateway is authoritative: only it knows which
+# backend the policy picked and what that backend charges. "0" on a cache hit.
+# Absent when the backend declares no pricing — the worker must then leave the
+# cost unknown rather than assume zero.
+HEADER_COST_USD = "x-sdlcma-cost-usd"
 
 # Upstream transient retry. The worker side has its own `_invoke_llm_with_retry`
 # but it can't see which backend served the request, so it can't make a sound
@@ -124,10 +140,16 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         else:
             _state["cache"] = None
         _state["cache_request_count"] = 0
+        _state["entra"] = EntraTokenProvider()
         logger.info(
             "gateway: loaded config %s (%d backend(s), policy=%s, order=%s)",
             path, len(cfg.backends), cfg.policy.type, list(cfg.policy.order),
         )
+        for b in cfg.backends:
+            logger.info(
+                "gateway: backend %s model=%s auth=%s param_profile=%s priced=%s",
+                b.name, b.model, b.auth, b.param_profile, b.pricing is not None,
+            )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -137,6 +159,9 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         cache: Cache | None = _state.get("cache")
         if cache is not None:
             cache.close()
+        entra: EntraTokenProvider | None = _state.get("entra")
+        if entra is not None:
+            await entra.aclose()
 
     @app.get("/metrics")
     async def metrics_endpoint():
@@ -257,6 +282,11 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                     entry.response_body,
                     default={"raw": entry.response_body.decode("utf-8", "replace")},
                 )
+                # A hit cost nothing. Price it against the backend that
+                # ORIGINALLY served it and book it as savings — this is the
+                # number that justifies the cache, and for a replayed stress
+                # test it is the entire bill you did not pay.
+                saved = _record_cache_saving(cfg, entry.original_backend_name, body)
                 return JSONResponse(
                     content=body,
                     status_code=entry.response_status_code,
@@ -264,6 +294,8 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                         HEADER_BACKEND: entry.original_backend_name or "cache",
                         HEADER_CACHE_RESULT: "hit",
                         HEADER_CACHE_KEY: short_key(cache_key),
+                        HEADER_COST_USD: "0",
+                        **({"x-sdlcma-cost-saved-usd": f"{saved:.6f}"} if saved else {}),
                     },
                 )
             # Miss in replay mode = strict failure. 409 Conflict so the
@@ -326,6 +358,12 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
 
         if outcome["kind"] == "ok":
             _mark_backend_ok(sel.backend.name)
+            # Meter the spend. The gateway is authoritative here: it is the only
+            # component that knows both which backend served this call and what
+            # that backend charges.
+            spend = _record_spend(sel.backend, outcome["body"])
+            if spend is not None:
+                resp_headers[HEADER_COST_USD] = f"{spend:.6f}"
             # Cache write: only on real upstream success. We DO NOT cache
             # 4xx/5xx — replaying a stored error would mask real issues
             # on subsequent runs ("the model returned 400 every time" is a
@@ -408,6 +446,53 @@ def _safe_json(data: bytes, default: Any) -> Any:
         return default
 
 
+def _record_spend(backend: BackendConfig, body: Any) -> float | None:
+    """Meter tokens + money for one real upstream call. Returns the USD cost, or
+    None when it cannot be known (backend declares no pricing, or the upstream
+    reported no usage). None — not 0.0: a fabricated $0.00 in a cost dashboard
+    reads as "this was free", which is a lie."""
+    usage = extract_usage(body)
+    if usage is None:
+        return None
+
+    TOKENS.labels(
+        backend=backend.name, model=backend.model, kind="input"
+    ).inc(usage.prompt_tokens)
+    TOKENS.labels(
+        backend=backend.name, model=backend.model, kind="output"
+    ).inc(usage.completion_tokens)
+    if usage.cached_tokens:
+        # NB: a SUBSET of input, not an addition to it. Don't sum the two.
+        TOKENS.labels(
+            backend=backend.name, model=backend.model, kind="cached_input"
+        ).inc(usage.cached_tokens)
+
+    spend = cost_of(backend, usage)
+    if spend is None:
+        return None
+    COST_USD.labels(backend=backend.name, model=backend.model).inc(spend)
+    return spend
+
+
+def _record_cache_saving(
+    cfg: GatewayConfig, original_backend_name: str | None, body: Any
+) -> float | None:
+    """Book what a cache hit WOULD have cost, priced with the backend that
+    originally served it. Never touches the spend counter — a hit costs nothing."""
+    if not original_backend_name:
+        return None
+    backend = cfg.backends_by_name.get(original_backend_name)
+    if backend is None:
+        # The config was edited since this entry was recorded. We can't price it
+        # honestly, so we don't.
+        return None
+    saved = cost_of(backend, extract_usage(body))
+    if saved is None:
+        return None
+    COST_SAVED_USD.labels(backend=backend.name, model=backend.model).inc(saved)
+    return saved
+
+
 def _mark_backend_ok(name: str) -> None:
     _state["backend_health"][name] = {"last_ok_ts": time.time(), "last_err": None}
 
@@ -439,6 +524,19 @@ def _maybe_emit_cache_summary() -> None:
     )
 
 
+async def _bearer_for(backend: BackendConfig) -> str:
+    """The credential this backend authenticates with.
+
+    Both modes end up in the SAME `Authorization: Bearer …` header — Azure's
+    /openai/v1 route asks for nothing more. `entra` merely changes where the
+    string comes from, which is why keyless Azure needs no special HTTP path.
+    """
+    if backend.auth == "entra":
+        provider: EntraTokenProvider = _state["entra"]
+        return await provider.get_token(backend.entra_scope, backend.entra_client_id)
+    return backend.api_key
+
+
 async def _forward(
     *,
     client: httpx.AsyncClient,
@@ -455,9 +553,25 @@ async def _forward(
          "error": short reason string}
     """
     body_json["model"] = backend.model
+    # Absorb per-backend parameter divergence here so the worker only ever emits
+    # one canonical request shape (see params.py).
+    apply_param_profile(body_json, backend)
     url = backend.base_url.rstrip("/") + "/chat/completions"
+    try:
+        bearer = await _bearer_for(backend)
+    except GatewayAuthError as exc:
+        # A keyless backend we cannot get a token for is a config/RBAC problem,
+        # not a transient one. Surface it immediately rather than burning the
+        # retry budget on a failure that will never resolve itself.
+        return {
+            "kind": "fail",
+            "status": 502,
+            "headers": {},
+            "body_bytes": b"",
+            "error": f"GatewayAuthError: {exc}",
+        }
     headers = {
-        "authorization": f"Bearer {backend.api_key}",
+        "authorization": f"Bearer {bearer}",
         "content-type": "application/json",
         "accept": "application/json",
     }
