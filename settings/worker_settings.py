@@ -64,6 +64,36 @@ class WorkerSettings(BaseAppSettings):
     # until the backend's own limit. Cloud backends never need this long
     # and can override down via env (e.g. LLM_REQUEST_TIMEOUT=60).
     llm_request_timeout: int = 600
+    # How the LLM endpoint expects to be authenticated.
+    #   api_key (default) — send cfg.llm_api_key, i.e. today's behaviour.
+    #   entra             — mint a Microsoft Entra ID access token and send
+    #                       THAT where the key would go. Works because the
+    #                       OpenAI client emits `Authorization: Bearer <key>`,
+    #                       which is exactly what Azure's /openai/v1 route
+    #                       wants — so keyless Azure needs no HTTP-layer
+    #                       special case, only a different key source.
+    # `entra` is also the Managed Identity path: DefaultAzureCredential
+    # resolves to the assigned identity on Azure compute and to `az login`
+    # locally, exercising the same code either way.
+    llm_auth_mode: str = "api_key"
+    # Scope the Entra token is minted for. Verified 2026-07-14 against
+    # gpt-5-mini on an AIServices resource.
+    llm_entra_scope: str = "https://cognitiveservices.azure.com/.default"
+    # Client id of a user-assigned managed identity. Empty → system-assigned
+    # / DefaultAzureCredential's normal resolution order.
+    llm_entra_client_id: str = ""
+    # Which request parameters the backend accepts.
+    #   chat (default) — today's shape: temperature=0 is sent.
+    #   reasoning      — o-series / gpt-5-family reasoning models. They REJECT
+    #                    `temperature` outright: Azure returns HTTP 400
+    #                    `unsupported_value` ("Only the default (1) value is
+    #                    supported") — verified live 2026-07-14 against
+    #                    gpt-5-mini. So the param is omitted entirely rather
+    #                    than set to 1.
+    # NOTE: this costs us `temperature=0` as the determinism anchor for
+    # evaluation runs. On reasoning backends, reproducibility has to come
+    # from the llm_gateway replay cache instead.
+    llm_param_profile: str = "chat"
     # When the worker's LLM endpoint is an SDLCMA llm_gateway (independent
     # FastAPI service that routes to one of N configured backends per the
     # request hint headers), set this flag in the env file so the worker

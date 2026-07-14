@@ -27,6 +27,21 @@ logger = logging.getLogger(__name__)
 
 _VENV_EXCLUDE_PATTERNS = {".venv", ".venv/", "/.venv", "/.venv/"}
 
+# Directories that must never appear in a generated patch. `.venv` and
+# `.pytest_cache` are created by apply_change_and_test INSIDE the work dir, so
+# they exist in the modified tree but not in the user's source dir — the diff
+# would otherwise class every file under them as "new" and inline it. That is
+# not cosmetic: a single run emitted a 39 MB patch whose real content was a
+# 3-line fix (found 2026-07-14 while smoke-testing the Azure backend).
+#
+# The git provider is protected by `_ensure_venv_excluded_from_git`, which
+# writes `.git/info/exclude`. No-git mode has no such gate, so the walk itself
+# has to prune.
+_PATCH_EXCLUDE_DIRS = frozenset({
+    ".venv", "venv", ".git", ".pytest_cache", "__pycache__",
+    ".mypy_cache", ".ruff_cache", ".tox", ".eggs", "node_modules",
+})
+
 
 def _ensure_venv_excluded_from_git(work_dir: Path) -> None:
     """
@@ -343,7 +358,11 @@ class LocalNoGitProvider(SourceProvider, VCSProvider, ReviewProvider):
     def commit_and_push(self, repo_path: Path, message: str) -> dict:
         # Generate a unified diff patch comparing original to modified
         patch_lines = []
-        for root, _dirs, files in os.walk(str(repo_path)):
+        for root, dirs, files in os.walk(str(repo_path)):
+            # Prune in place so os.walk never descends into build/venv/cache
+            # trees. These live in the work dir but not in the source dir, so
+            # without this every file under them is diffed as a new file.
+            dirs[:] = [d for d in dirs if d not in _PATCH_EXCLUDE_DIRS]
             for fname in files:
                 mod_path = Path(root) / fname
                 rel = mod_path.relative_to(repo_path)

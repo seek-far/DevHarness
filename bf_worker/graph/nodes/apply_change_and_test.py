@@ -25,6 +25,30 @@ from services.runtime_context import get_budget, get_hooks, get_provider
 logger = logging.getLogger(__name__)
 
 
+def ensure_venv_gitignored(repo_path: Path) -> bool:
+    """Keep the venv this node creates out of the fix's output. Returns whether
+    a .gitignore entry was written.
+
+    Only meaningful in a git repo — the entire point is to stop `git add -A`
+    from staging `.venv/`. In **no-git mode there is no `git add`**, and writing
+    the file instead INVENTS a change the user never made: the source dir has no
+    .gitignore, so the differ sees a new file and emits it in the user's patch.
+    Guarding on `.git/` keeps patches to real source changes only.
+    (Found 2026-07-14 alongside the .venv-in-patch leak; the no-git patch walk
+    prunes generated *directories*, but .gitignore is a file it can't tell from
+    a genuine edit — so the right fix is not to create it.)
+    """
+    if not (repo_path / ".git").exists():
+        return False
+    gitignore = repo_path / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".venv" in existing:
+        return False
+    with gitignore.open("a", encoding="utf-8") as f:
+        f.write("\n.venv/\n")
+    return True
+
+
 def _finalize(
     state: BugFixState,
     config: Optional[RunnableConfig],
@@ -179,13 +203,7 @@ def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] =
     subprocess.run(["python", "-m", "venv", str(venv_path)], check=True)
     venv_python = venv_path / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
-    # Ensure .venv is ignored by git so it is never committed
-    gitignore = repo_path / ".gitignore"
-    gitignore_entry = "\n.venv/\n"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if ".venv" not in existing:
-        with gitignore.open("a", encoding="utf-8") as f:
-            f.write(gitignore_entry)
+    ensure_venv_gitignored(repo_path)
 
     req_file = repo_path / "requirements.txt"
     if req_file.exists():

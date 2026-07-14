@@ -68,6 +68,41 @@ def _make_event_hook_client(timeout: float):
     )
 
 
+def resolve_api_key(cfg) -> str:
+    """The string that goes in the OpenAI client's `api_key` slot.
+
+    `entra` mode puts a Microsoft Entra access token there instead of a static
+    key. That works — and needs no HTTP-layer special case — because the OpenAI
+    client sends `Authorization: Bearer <api_key>`, which is exactly what
+    Azure's `/openai/v1/` route expects. Token caching / refresh lives in
+    services.azure_auth.
+    """
+    if getattr(cfg, "llm_auth_mode", "api_key") == "entra":
+        from services.azure_auth import get_entra_token  # lazy: azure-identity is optional
+
+        return get_entra_token(
+            getattr(cfg, "llm_entra_scope", ""),
+            getattr(cfg, "llm_entra_client_id", "") or "",
+        )
+    return cfg.llm_api_key
+
+
+def apply_param_profile(kwargs: dict[str, Any], cfg) -> dict[str, Any]:
+    """Drop request params the configured backend rejects.
+
+    `reasoning` backends (o-series, gpt-5 family) reject `temperature`
+    OUTRIGHT — Azure answers HTTP 400 `unsupported_value` with "Only the
+    default (1) value is supported" (verified live 2026-07-14 against
+    gpt-5-mini). Omitting the param is correct; pinning it to 1 would be
+    accepted but is pointless, and 0 is simply refused.
+
+    Mutates and returns `kwargs` so callers can chain.
+    """
+    if getattr(cfg, "llm_param_profile", "chat") == "reasoning":
+        kwargs.pop("temperature", None)
+    return kwargs
+
+
 def build_llm_with_headers(
     *,
     bug_id: str | None,
@@ -91,12 +126,13 @@ def build_llm_with_headers(
     via_gateway = bool(getattr(cfg, "llm_via_gateway", False))
 
     kwargs: dict[str, Any] = dict(
-        api_key=cfg.llm_api_key,
+        api_key=resolve_api_key(cfg),
         base_url=cfg.llm_api_base_url,
         model=cfg.llm_model,
         temperature=0,
         timeout=cfg.llm_request_timeout,
     )
+    apply_param_profile(kwargs, cfg)
     if via_gateway:
         headers: dict[str, str] = {HEADER_ATTEMPT: str(int(attempt))}
         if bug_id:

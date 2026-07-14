@@ -149,13 +149,20 @@ class LLMInspector(Inspector):
         if self._llm is None:
             from langchain_openai import ChatOpenAI
             from settings import worker_cfg as cfg
-            self._llm = ChatOpenAI(
-                api_key=cfg.llm_api_key,
+            from services.llm_client import apply_param_profile, resolve_api_key
+
+            kwargs = dict(
+                api_key=resolve_api_key(cfg),
                 base_url=cfg.llm_api_base_url,
                 model=cfg.llm_model,
                 temperature=0,
                 timeout=cfg.llm_request_timeout,
             )
+            # Reasoning backends reject `temperature` (Azure 400s on it), so the
+            # profile decides whether it is sent at all — same rule as the
+            # bug-fix graph's LLM client.
+            apply_param_profile(kwargs, cfg)
+            self._llm = ChatOpenAI(**kwargs)
             if self._model is None:
                 self._model = cfg.llm_model
         return self._llm

@@ -44,6 +44,13 @@ REPO = Path(__file__).resolve().parents[1]
 # one component image.
 CROSS_CUTTING = {
     "prometheus_client": "prometheus-client",
+    # Entra ID / Managed Identity auth for Azure LLM backends. Imported lazily
+    # (inside a function) by bf_worker/services/azure_auth.py, and by
+    # llm_gateway once its Azure backend lands — the lazy import keeps
+    # non-Azure deployments working without the package, but any image that
+    # BUNDLES the importing source must still install it, or a run with
+    # llm_auth_mode=entra dies at first LLM call.
+    "azure.identity": "azure-identity",
 }
 
 

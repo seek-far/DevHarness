@@ -732,6 +732,47 @@ cp gateway/gateway_local_multi_process.env.example        gateway/gateway_local_
 | `LLM_API_BASE_URL` | OpenAI-compatible base URL (e.g. Dashscope, or an SDLCMA `llm-gateway` instance) |
 | `LLM_MODEL` | Model name (e.g. `qwen3-coder-480b-a35b-instruct`). When `LLM_VIA_GATEWAY=true` this is informational — the gateway rewrites `model` to the selected backend's declared name. |
 | `LLM_VIA_GATEWAY` | Optional. Set `true` when `LLM_API_BASE_URL` points at an SDLCMA `llm-gateway` (orthogonal opt-in). Worker attaches `X-Sdlcma-Bug-Id` + `X-Sdlcma-Attempt` hint headers to every LLM call and skips the self-hosted startup model-name probe. Default `false` = byte-identical to the pre-gateway path. See "LLM Gateway" below. |
+| `LLM_AUTH_MODE` | Optional. `api_key` (default) or `entra`. `entra` authenticates with a Microsoft Entra ID token instead of a static key — this is the **Managed Identity** path on Azure compute, and resolves to your `az login` session locally. Requires `azure-identity`. |
+| `LLM_PARAM_PROFILE` | Optional. `chat` (default) or `reasoning`. **Reasoning models (o-series, the gpt-5 family) reject `temperature` outright** — Azure returns HTTP 400. Set `reasoning` to omit it. |
+
+### Azure OpenAI / Foundry backend
+
+Azure's `/openai/v1/` route is plain OpenAI shape — no `api-version` query param, no
+`/openai/deployments/<name>/` URL, no `api-key:` header — so no Azure-specific client is
+needed. Point the ordinary settings at it:
+
+```bash
+LLM_API_BASE_URL=https://<resource>.openai.azure.com/openai/v1
+LLM_MODEL=<your-deployment-name>        # e.g. gpt-5-mini — the DEPLOYMENT name, not the model id
+LLM_PARAM_PROFILE=reasoning             # gpt-5 / o-series reject `temperature`; omit it
+LLM_AUTH_MODE=api_key                   # + LLM_API_KEY=<key>
+# …or keyless:
+LLM_AUTH_MODE=entra                     # Managed Identity on Azure; `az login` locally
+```
+
+**Keyless (Entra ID / Managed Identity).** `LLM_AUTH_MODE=entra` mints an Entra token and sends
+it as the bearer credential. `DefaultAzureCredential` picks up a managed identity when running on
+Azure compute and your `az login` session when running locally, so **the same code path is
+exercised either way** — you can develop and verify MI without deploying. The identity needs the
+**`Cognitive Services OpenAI User`** data-plane role on the resource (subscription Owner is *not*
+enough); without it the run aborts with an `AzureAuthError` that names the role.
+
+**Picking a model — check quota first.** Azure quota is sliced three ways: **model × region ×
+deployment-type**. "Insufficient quota" while hopping regions usually means the missing dimension
+is the *deployment type*, not the region. Enumerate what you actually have:
+
+```bash
+az cognitiveservices usage list --location eastus -o table
+```
+
+Gotchas worth knowing: `gpt-5` / `gpt-5.1` / `gpt-5.4` commonly carry only **Batch** quota (async
+job API — unusable for the ReAct loop), and some models have **zero** GlobalStandard quota in every
+region while still being listed. Verify the SKU is `GlobalStandard` / `Standard` / `DataZoneStandard`
+before deploying.
+
+**Determinism caveat.** Reasoning models will not accept `temperature=0`, which is what pinned
+run-to-run reproducibility for evaluation sweeps. On these backends, use the LLM Gateway's replay
+cache (`cache.mode: replay`) as the determinism anchor instead.
 
 ### LLM Gateway (optional, opt-in)
 
