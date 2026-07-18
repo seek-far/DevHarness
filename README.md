@@ -215,6 +215,48 @@ python -m bf_worker.standalone \
 | `--review` | off | Interactive review before applying (no-git mode) |
 | `--config` | | Path to an agent-spec JSON (same shape as `configs/*.json`). When given, the standalone runner uses the first spec in the file and instantiates any `enhancements` declared on it (e.g. `configs/memory.json`). When omitted, runs a plain `LangGraphAgent` with no enhancements. |
 
+### SWE-bench (mini-swe-agent substrate)
+
+Fix a single [SWE-bench](https://www.swebench.com/) Verified instance using the
+[mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) substrate wrapped
+behind the shared `Agent` seam, graded by the official SWE-bench harness:
+
+```bash
+# One-time (dev/eval venv only — heavy deps stay out of the service images):
+uv pip install -r evaluation/requirements-swebench.txt
+uv pip install -e /path/to/mini-swe-agent      # the fork (editable, PR-ready)
+
+# Point the LLM at the gateway (replay cache + cost metering) or any backend
+# via worker settings (LLM_API_BASE_URL / LLM_MODEL / LLM_API_KEY), then:
+python -m bf_worker.swebench_single \
+  --subset verified --split test \
+  --instance sympy__sympy-20590 \
+  --config configs/swebench/mini.yaml
+
+python -m bf_worker.swebench_single --instance <id> --no-grade   # patch only, skip harness
+```
+
+Batch over many instances (the whole Verified subset by default, or a chosen
+set), graded together with a resolved-rate report:
+
+```bash
+python -m bf_worker.swebench_batch --instances sympy__sympy-22914,sympy__sympy-23950
+python -m bf_worker.swebench_batch --subset verified --split test --slice 0:10 --workers 8
+python -m bf_worker.swebench_batch --instances-file ids.txt --filter '^django__'
+python -m evaluation.cli report <run_id>        # per-agent table incl. resolved_rate
+```
+
+Results land in `evaluation/runs/<run_id>/` (`preds.json`, per-instance
+`records/`, `summary.json`, `results.json`). Batch is **resumable** — re-run the
+same `--run-id` to continue; it skips instances already done. Full Verified is
+~500 instances × multi-GB images, so run a subset first.
+
+Needs Docker (the harness runs `FAIL_TO_PASS`/`PASS_TO_PASS` inside the
+per-instance SWE-bench image). The run writes a `preds.json` + a journal entry
+whose `RunRecord` carries `swebench_instance_id` and the `resolved` verdict.
+Design contract + roadmap (shared sandbox seam, batch sweep, capability layer):
+`docs/swebench.md`.
+
 ### Code Inspection (standalone, independent of bug fix)
 
 A separate code review agent that targets defects the bug-fix test oracle
@@ -1303,4 +1345,9 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 
 ## License
 
-MIT
+MIT (Copyright (c) 2026 Shu Li).
+
+This project uses third-party software under their own licenses — notably
+[mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) (MIT, © 2025
+Kilian A. Lieret and Carlos E. Jimenez), which powers the SWE-bench support.
+Full notices in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

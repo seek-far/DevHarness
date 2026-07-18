@@ -1,0 +1,17 @@
+# SWE-bench eval extra — the mini-swe-agent substrate + official grading harness.
+#
+# DELIBERATELY separate from the service images (worker/gateway/orchestrator):
+# these are heavy (docker-driven grading, HF datasets, litellm) and must NOT
+# leak into those images. tests/test_image_dependencies.py guards that boundary.
+#
+# Install into the dev/eval venv only:
+#   uv pip install -r evaluation/requirements-swebench.txt
+#   uv pip install -e /path/to/mini-swe-agent          # the fork (editable, PR-ready)
+#
+# mini-swe-agent itself is installed editable from the sibling fork checkout
+# (github.com/seek-far/mini-swe-agent), NOT from PyPI, so upstream PRs stay easy.
+# Its own runtime deps (litellm, jinja2, pydantic, rich, platformdirs, typer,
+# datasets, …) come in via that editable install.
+
+datasets            # SWE-bench instance loading (mini uses it too)
+swebench            # official grading harness (FAIL_TO_PASS / PASS_TO_PASS in the image)

@@ -34,6 +34,13 @@ def aggregate(run_id: str) -> list[dict]:
         raise FileNotFoundError(f"no such run: {run_id}")
     records = json.loads(summary_path.read_text(encoding="utf-8"))
 
+    # SWE-bench runs carry a `resolved` verdict (official harness). Only surface
+    # the resolved-rate columns when the run actually has that data, so the
+    # F01–F10 fix-rate reports stay unchanged. resolved-rate ≠ fix_rate:
+    # outcome="fixed" means the agent submitted a patch; resolved=True means the
+    # patch passed FAIL_TO_PASS/PASS_TO_PASS.
+    has_resolved = any(r.get("resolved") is not None for r in records)
+
     by_agent: dict[str, list[dict]] = defaultdict(list)
     for r in records:
         by_agent[r["agent_name"]].append(r)
@@ -42,6 +49,7 @@ def aggregate(run_id: str) -> list[dict]:
     for agent_name, recs in sorted(by_agent.items()):
         n = len(recs)
         n_fixed = sum(1 for r in recs if r.get("outcome") == "fixed")
+        n_resolved = sum(1 for r in recs if r.get("resolved") is True)
         n_match = sum(1 for r in recs if r.get("matches_expected"))
         # Per-cell total tokens = prompt + completion; only counted when both
         # were reported (i.e. cell has llm_call_count > 0). tokens_per_s uses
@@ -63,11 +71,16 @@ def aggregate(run_id: str) -> list[dict]:
         avg_total_tokens   = _mean(per_cell_total_tokens)
         avg_llm_wallclock  = _mean(per_cell_wallclock)
         tokens_per_s       = (sum_tokens / sum_wallclock) if sum_wallclock > 0 else None
-        rows.append({
+        row = {
             "agent_name":          agent_name,
             "n_fixtures":          n,
             "n_fixed":             n_fixed,
             "fix_rate":            round(n_fixed / n, 3) if n else 0.0,
+        }
+        if has_resolved:
+            row["n_resolved"]    = n_resolved
+            row["resolved_rate"] = round(n_resolved / n, 3) if n else 0.0
+        row.update({
             "n_match_expected":    n_match,
             "match_rate":          round(n_match / n, 3) if n else 0.0,
             "avg_iterations":      round(sum(r.get("iterations", 0) for r in recs) / n, 2) if n else 0,
@@ -76,6 +89,7 @@ def aggregate(run_id: str) -> list[dict]:
             "avg_llm_wallclock_s": round(avg_llm_wallclock, 2) if avg_llm_wallclock is not None else None,
             "tokens_per_s":        round(tokens_per_s, 1) if tokens_per_s is not None else None,
         })
+        rows.append(row)
     return rows
 
 

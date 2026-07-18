@@ -1,0 +1,24 @@
+# SWE-bench overlay for the mini-swe-agent substrate.
+#
+# This is layered ON TOP of mini's builtin config/benchmarks/swebench.yaml by
+# bf_worker/swebench_single.py (it always bases on the builtin, then merges this).
+# Keep it purely additive — do NOT restate mini's system/instance templates here.
+#
+# The MODEL ENDPOINT is NOT set here: bf_worker/swebench_single.py redirects
+# mini's litellm model at the LLM gateway / OpenAI-compatible backend from
+# worker settings (LLM_API_BASE_URL / LLM_MODEL / LLM_API_KEY) via
+# agents.mini_swe_agent.build_gateway_model_config. Point that at the gateway
+# (LLM_VIA_GATEWAY=true, LLM_API_BASE_URL=http://<gateway>:9000/v1) to get the
+# replay cache + cost metering for cheap, deterministic reruns. See docs/swebench.md.
+
+agent:
+  # Spend ceiling per instance (USD). mini stops the loop once exceeded.
+  cost_limit: 3.0
+  # Hard step cap so a stuck run can't loop forever on the ReAct budget.
+  step_limit: 250
+
+environment:
+  # SWE-bench images run the repo at /testbed; commands time out per-step.
+  environment_class: docker
+  cwd: /testbed
+  timeout: 60

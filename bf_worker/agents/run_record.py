@@ -180,6 +180,16 @@ class RunRecord:
     # 2 = both react_loop entries exhausted, run went to handle_failure.
     # None when no react_loop run ever happened (e.g. R10 short-circuit).
     no_fix_retry_count:         int   | None = None
+    # ── SWE-bench (additive 2026-07-18; SCHEMA_VERSION unchanged at "1") ──────
+    # Set only by the mini-swe-agent substrate path (bf_worker/swebench_single.py
+    # + MiniSweAgent). None for every GitLab/standalone/local run — same
+    # additive-field convention as the blocks above. `resolved` is the official
+    # SWE-bench harness verdict (FAIL_TO_PASS/PASS_TO_PASS), computed AFTER
+    # fix() by the entry point, not by the agent. None = harness not run /
+    # not a SWE-bench run — deliberately NOT False, which would claim the
+    # patch was graded and failed.
+    swebench_instance_id:       str   | None = None
+    resolved:                   bool  | None = None
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -266,15 +276,23 @@ class RunRecord:
             total_cached_input_tokens  = s.get("total_cached_input_tokens"),
             total_cost_usd             = s.get("total_cost_usd"),
             cost_currency              = ("USD" if s.get("total_cost_usd") is not None else None),
+            # An agent that knows its own cost source (e.g. the mini-swe-agent
+            # substrate → "mini_litellm") sets it in state; otherwise fall back
+            # to the gateway-vs-direct inference the LangGraph path relies on.
             cost_source                = (
-                ("gateway" if getattr(_worker_cfg(), "llm_via_gateway", False) else "local_pricing")
-                if s.get("total_cost_usd") is not None else None
+                s.get("cost_source")
+                or (
+                    ("gateway" if getattr(_worker_cfg(), "llm_via_gateway", False) else "local_pricing")
+                    if s.get("total_cost_usd") is not None else None
+                )
             ),
             total_llm_wallclock_s      = s.get("total_llm_wallclock_s"),
             llm_call_wallclock_ms      = s.get("llm_call_wallclock_ms"),
             llm_model_served           = llm_model_served,
             llm_backend_name           = s.get("llm_backend_name"),
             no_fix_retry_count         = s.get("no_fix_retry_count"),
+            swebench_instance_id       = s.get("swebench_instance_id"),
+            resolved                   = s.get("resolved"),
         )
 
     def to_dict(self) -> dict[str, Any]:
