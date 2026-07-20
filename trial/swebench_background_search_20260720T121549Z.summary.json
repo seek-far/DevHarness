@@ -1,0 +1,14 @@
+{
+  "output": "trial/swebench_background_search_20260720T121549Z.jsonl",
+  "dataset": "princeton-nlp/SWE-Bench_Verified",
+  "split": "test",
+  "attempted": 1,
+  "errors": 0,
+  "model": "deepseek-v4-pro",
+  "search_provider": "duckduckgo_html",
+  "max_queries": 3,
+  "max_results": 5,
+  "fetch_pages": false,
+  "max_pages": 5,
+  "summarize": true
+}

@@ -133,13 +133,16 @@ def update_pred(preds_path: Path, instance_id: str, model_name: str, patch: str)
 # ── per-instance work ────────────────────────────────────────────────────────
 
 def run_one(
-    instance: dict, mini_config: dict, model_name: str, records_dir: Path, preds_path: Path
+    instance: dict, mini_config: dict, model_name: str, records_dir: Path, preds_path: Path,
+    workflow_mode: int = 0,
 ) -> dict:
     """Fix one instance and persist its record.json + preds entry (resolved is
     backfilled after batch grading). Returns the record dict."""
     iid = instance["instance_id"]
     bug_input = BugInput(bug_id=iid, provider=None, metadata={"swebench_instance": instance})
-    agent = MiniSweAgent(mini_config=mini_config, agent_config={"llm_model": model_name})
+    agent = MiniSweAgent(mini_config=mini_config, workflow_mode=workflow_mode,
+                         trajectory_dir=records_dir.parent / "trajectories",
+                         agent_config={"llm_model": model_name, "workflow_mode": workflow_mode})
 
     t0 = time.monotonic()
     try:
@@ -156,14 +159,16 @@ def run_one(
     update_pred(preds_path, iid, model_name, fs.get("model_patch") or "")
 
     record = RunRecord.from_outputs(
-        agent_name="mini_swe_agent",
+        # agent.name encodes the workflow mode (mini_swe_agent / mini_swe_agent_wfN)
+        # so bench report groups modes on separate rows for comparison.
+        agent_name=agent.name,
         bug_id=iid,
         outcome=fix.outcome,
         error=fix.error,
         iterations=fix.iterations,
         final_state=fs,
         elapsed_s=round(elapsed, 3),
-        agent_config={"llm_model": model_name},
+        agent_config={"llm_model": model_name, "workflow_mode": workflow_mode},
         llm_model=model_name,
     )
     d = record.to_dict()
@@ -191,6 +196,10 @@ def main() -> None:
     parser.add_argument("--grade-workers", type=int, default=4, help="Parallel harness workers (default: 4).")
     parser.add_argument("--config", action="append", default=[], help="mini config spec; repeatable.")
     parser.add_argument("--model", default=None, help="Override model name (else worker settings / config).")
+    parser.add_argument("--workflow-mode", type=int, default=0,
+                        help=("Agent workflow: 0=mini default single loop, 1=two-phase waterfall, "
+                              "2=stage-report single loop, 3=two-phase back-edge, "
+                              "4=mode 0 + per-instance background knowledge."))
     parser.add_argument("--run-id", default=None, help="Run id (default: timestamp). Reuse to resume.")
     parser.add_argument("--redo-existing", action="store_true", help="Re-run instances already in preds.json.")
     parser.add_argument("--no-grade", action="store_true", help="Skip harness grading (produce patches only).")
@@ -225,7 +234,8 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
-            ex.submit(run_one, inst, mini_config, model_name, records_dir, preds_path): inst["instance_id"]
+            ex.submit(run_one, inst, mini_config, model_name, records_dir, preds_path,
+                      args.workflow_mode): inst["instance_id"]
             for inst in todo
         }
         for fut in as_completed(futures):

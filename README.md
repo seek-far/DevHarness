@@ -251,6 +251,26 @@ Results land in `evaluation/runs/<run_id>/` (`preds.json`, per-instance
 same `--run-id` to continue; it skips instances already done. Full Verified is
 ~500 instances × multi-GB images, so run a subset first.
 
+`--workflow-mode N` selects the agent workflow (both entry points): `0` (default)
+is mini's single ReAct loop; `1` is a two-phase Investigate→Solve waterfall;
+`2` is mode 0 with structured stage reporting; `3` is mode 1 with bounded
+Investigate⇄Solve back-edges; `4` is mode 0 with per-instance background
+knowledge injected after the problem statement. The mode is recorded and encoded
+in the agent name (`mini_swe_agent_wf1`, etc.) so `bench report` compares modes'
+resolved-rates side by side.
+
+Trial helper for background-knowledge retrieval: ask an LLM to propose only
+non-code web searches from each problem statement, run those searches, and write
+one JSON object per instance. Without a search API key, `--provider auto` uses
+DuckDuckGo's HTML search page; add `--fetch-pages` to fetch text from the top
+result pages before the LLM writes `search_summary`.
+
+```bash
+python trial/swebench_background_search.py sympy__sympy-20590
+python trial/swebench_background_search.py --slice 0:10 --fetch-pages
+python trial/swebench_background_search.py --all
+```
+
 Needs Docker (the harness runs `FAIL_TO_PASS`/`PASS_TO_PASS` inside the
 per-instance SWE-bench image). The run writes a `preds.json` + a journal entry
 whose `RunRecord` carries `swebench_instance_id` and the `resolved` verdict.

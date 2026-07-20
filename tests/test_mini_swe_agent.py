@@ -27,7 +27,11 @@ sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "bf_worker"))
 
 from agents.base import BugInput  # noqa: E402
-from agents.mini_swe_agent import MiniSweAgent, build_gateway_model_config  # noqa: E402
+from agents.mini_swe_agent import (  # noqa: E402
+    MiniSweAgent,
+    _task_with_background_knowledge,
+    build_gateway_model_config,
+)
 from agents.run_record import RunRecord  # noqa: E402
 
 from minisweagent.environments.local import LocalEnvironment  # noqa: E402
@@ -57,6 +61,10 @@ _SUBMIT_CMD = (
 
 def _bug_input():
     return BugInput(bug_id="SWE-1", provider=None, metadata={"swebench_instance": _INSTANCE})
+
+
+def _bug_input_for(instance):
+    return BugInput(bug_id=instance["instance_id"], provider=None, metadata={"swebench_instance": instance})
 
 
 def test_submission_sentinel_yields_fixed(tmp_path):
@@ -204,6 +212,158 @@ def test_runrecord_swebench_fields_default_none():
     )
     assert rec.swebench_instance_id is None
     assert rec.resolved is None
+
+
+def _out_usage(content, actions, *, pt, ct, cached=None):
+    """A DeterministicModel output carrying a litellm-shaped usage block, like a
+    real assistant message (mini stores the full response under extra.response)."""
+    o = make_output(content, actions)
+    usage = {"prompt_tokens": pt, "completion_tokens": ct}
+    if cached is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached}
+    o["extra"]["response"] = {"usage": usage}
+    return o
+
+
+def test_token_stats_and_trajectory_written(tmp_path):
+    model = DeterministicModel(outputs=[
+        _out_usage("looking", [{"command": "echo hi"}], pt=1000, ct=50),
+        _out_usage("submit", [{"command": _SUBMIT_CMD}], pt=1500, ct=80, cached=200),
+    ])
+    env = LocalEnvironment(cwd=str(tmp_path))
+    agent = MiniSweAgent(model=model, env=env, mini_config={"agent": _AGENT_CFG},
+                         trajectory_dir=tmp_path)
+
+    state = agent.fix(_bug_input()).final_state or {}
+
+    assert state["total_prompt_tokens"] == 2500
+    assert state["total_completion_tokens"] == 130
+    assert state["max_input_tokens"] == 1500          # peak per-call prompt size
+    assert state["total_cached_input_tokens"] == 200
+    # trajectory saved to disk for offline analysis
+    assert (tmp_path / "astropy__astropy-12345.traj.json").exists()
+
+
+def test_no_usage_leaves_token_fields_absent(tmp_path):
+    # DeterministicModel without a response block → no token fields, so RunRecord
+    # keeps them None (never a fabricated 0).
+    model = DeterministicModel(outputs=[make_output("submit", [{"command": _SUBMIT_CMD}])])
+    env = LocalEnvironment(cwd=str(tmp_path))
+    agent = MiniSweAgent(model=model, env=env, mini_config={"agent": _AGENT_CFG})
+
+    state = agent.fix(_bug_input()).final_state or {}
+    assert "total_prompt_tokens" not in state
+    assert "max_input_tokens" not in state
+
+
+def test_mode2_injects_stage_suffix(tmp_path):
+    # The stage-report suffix must be appended to the base instance_template.
+    model = DeterministicModel(outputs=[])
+    env = LocalEnvironment(cwd=str(tmp_path))
+    agent = MiniSweAgent(model=model, env=env, mini_config={"agent": _AGENT_CFG})
+    built = agent._build_mini_agent(model, env, instance_template_suffix="ZZZ-MARK")
+    assert built.config.instance_template.endswith("ZZZ-MARK")
+    assert "{{task}}" in built.config.instance_template   # base preserved
+
+
+def _stage_out(stage, content, command):
+    # mode 2 reads the stage from the STRUCTURED action, not from text.
+    return make_output(content, [{"command": command, "stage": stage}])
+
+
+def test_mode2_stage_sequence_and_back_edges(tmp_path):
+    model = DeterministicModel(outputs=[
+        _stage_out(1, "analyzing", "echo a"),
+        _stage_out(3, "editing", "echo b"),
+        _stage_out(4, "verifying", "echo c"),
+        _stage_out(1, "re-analyzing", "echo d"),        # 4 → 1 = back-edge
+        _stage_out(3, "re-edit + submit", _SUBMIT_CMD),
+    ])
+    env = LocalEnvironment(cwd=str(tmp_path))
+    # cost_limit=0 disables the cost cap (5 scripted calls would exceed the
+    # default $3 at $1/call); step_limit high enough for all 5 steps.
+    agent = MiniSweAgent(model=model, env=env, workflow_mode=2,
+                         mini_config={"agent": {**_AGENT_CFG, "cost_limit": 0, "step_limit": 10}})
+
+    out = agent.fix(_bug_input())
+
+    assert out.outcome == "fixed"
+    assert agent.name == "mini_swe_agent_wf2"
+    state = out.final_state or {}
+    assert state["stage_sequence"] == [1, 3, 4, 1, 3]
+    assert state["stage_back_edges"] == 1        # the 4 → 1 transition
+    assert state["workflow_mode"] == 2
+
+
+def test_stage_model_tool_requires_stage_and_parses_it():
+    import json
+    from types import SimpleNamespace
+    from agents.mini_stage_model import BASH_TOOL_WITH_STAGE, StageReportingModel
+
+    # the augmented tool schema requires `stage`
+    params = BASH_TOOL_WITH_STAGE["function"]["parameters"]
+    assert "stage" in params["properties"] and "stage" in params["required"]
+    assert params["properties"]["stage"]["enum"] == [1, 2, 3, 4, 5]
+
+    # _parse_actions lifts the structured `stage` off each tool call
+    def _tc(cmd, stage, i):
+        return SimpleNamespace(id=f"c{i}", function=SimpleNamespace(
+            name="bash", arguments=json.dumps({"command": cmd, "stage": stage})))
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        tool_calls=[_tc("echo a", 1, 0), _tc("echo b", 3, 1)]))])
+    model = StageReportingModel(model_name="deepseek/deepseek-v4-pro")
+    actions = model._parse_actions(resp)
+    assert [a["command"] for a in actions] == ["echo a", "echo b"]
+    assert [a["stage"] for a in actions] == [1, 3]
+
+
+def test_mode0_has_no_stage_fields(tmp_path):
+    model = DeterministicModel(outputs=[make_output("submit", [{"command": _SUBMIT_CMD}])])
+    env = LocalEnvironment(cwd=str(tmp_path))
+    agent = MiniSweAgent(model=model, env=env, mini_config={"agent": _AGENT_CFG})  # mode 0
+    state = agent.fix(_bug_input()).final_state or {}
+    assert "stage_sequence" not in state and "stage_back_edges" not in state
+
+
+def test_mode4_background_knowledge_appends_after_problem_statement():
+    instance = {
+        "instance_id": "django__django-15098",
+        "problem_statement": "Internationalisation did not support language locale containing both script and region.",
+    }
+
+    task, meta = _task_with_background_knowledge(instance, instance["problem_statement"])
+
+    assert task.startswith(instance["problem_statement"] + "\n\n## Background knowledge")
+    assert "BCP 47 Language Tags" in task
+    assert "IANA Language Subtag Registry" in task
+    assert "published standard or specification" in task
+    assert "Do not hard-code the examples" in task
+    assert meta["background_knowledge_injected"] is True
+    assert meta["background_knowledge_chars"] > 0
+
+
+def test_mode4_only_injects_configured_instance():
+    task, meta = _task_with_background_knowledge(_INSTANCE, _INSTANCE["problem_statement"])
+
+    assert task == _INSTANCE["problem_statement"]
+    assert meta == {"background_knowledge_injected": False}
+
+
+def test_mode4_records_background_injection_metadata(tmp_path):
+    instance = {
+        "instance_id": "django__django-15098",
+        "problem_statement": "Internationalisation did not support language locale containing both script and region.",
+    }
+    model = DeterministicModel(outputs=[make_output("submit", [{"command": _SUBMIT_CMD}])])
+    env = LocalEnvironment(cwd=str(tmp_path))
+    agent = MiniSweAgent(model=model, env=env, mini_config={"agent": _AGENT_CFG}, workflow_mode=4)
+
+    state = agent.fix(_bug_input_for(instance)).final_state or {}
+
+    assert agent.name == "mini_swe_agent_wf4"
+    assert state["workflow_mode"] == 4
+    assert state["background_knowledge_injected"] is True
+    assert state["background_knowledge_path"].endswith("trial/BCP47.md")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,24 @@
+{
+  "runs": [
+    {
+      "name": "sdlcma",
+      "root": "/mnt/d/minus/sdlcma/wf0_0_100",
+      "report_path": "/mnt/d/minus/sdlcma/wf0_0_100/deepseek__deepseek-v4-pro.wf0_0_100.json",
+      "resolved": 77,
+      "submitted": 100
+    },
+    {
+      "name": "mini",
+      "root": "/mnt/d/PL/mini-swe-agent/verified_1-100.BASE_ENV_full",
+      "report_path": "/mnt/d/PL/mini-swe-agent/verified_1-100.BASE_ENV_full/deepseek__deepseek-v4-pro.bashenv_full100.w16.json",
+      "resolved": 77,
+      "submitted": 100
+    }
+  ],
+  "disagreeing_instances": 10,
+  "attempted": 0,
+  "errors": 10,
+  "correct": 0,
+  "accuracy": null,
+  "output": "trial/best_of_n_20260720T075459Z.jsonl"
+}

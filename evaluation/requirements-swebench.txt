@@ -15,3 +15,11 @@
 
 datasets            # SWE-bench instance loading (mini uses it too)
 swebench            # official grading harness (FAIL_TO_PASS / PASS_TO_PASS in the image)
+litellm[proxy]      # mini declares plain `litellm`, but litellm 1.9x's
+                    # completion() eagerly imports its MCP/proxy handler chain
+                    # (litellm.responses.mcp → litellm.proxy...), which needs the
+                    # proxy dep set (fastapi, orjson, uvicorn, …). Without the
+                    # [proxy] extra every LLM call dies with a cascade of
+                    # ModuleNotFoundErrors (fastapi → orjson → …). Masked on a
+                    # FastAPI dev box where those happen to be installed; a clean
+                    # eval-only venv needs them declared. See docs/swebench.md.

@@ -1,0 +1,11 @@
+{
+  "output": "trial/swebench_background_search_20260720T120618Z.jsonl",
+  "dataset": "princeton-nlp/SWE-Bench_Verified",
+  "split": "test",
+  "attempted": 1,
+  "errors": 0,
+  "model": "deepseek-v4-pro",
+  "search_provider": "duckduckgo",
+  "max_queries": 3,
+  "max_results": 5
+}

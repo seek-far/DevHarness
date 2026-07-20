@@ -190,6 +190,10 @@ def main() -> None:
                         help="mini config spec (path/filename/key=value); repeatable. "
                              "Default: mini's builtin benchmarks/swebench.yaml.")
     parser.add_argument("--model", default=None, help="Override the model name (else worker settings / config).")
+    parser.add_argument("--workflow-mode", type=int, default=0,
+                        help=("Agent workflow: 0=mini default single loop, 1=two-phase waterfall, "
+                              "2=stage-report single loop, 3=two-phase back-edge, "
+                              "4=mode 0 + per-instance background knowledge."))
     parser.add_argument("--output-dir", default=None,
                         help="Where to write preds.json + harness artifacts (default: temp dir).")
     parser.add_argument("--no-grade", action="store_true",
@@ -211,7 +215,9 @@ def main() -> None:
     model_name = (mini_config.get("model") or {}).get("model_name")
 
     bug_input = BugInput(bug_id=bug_id, provider=None, metadata={"swebench_instance": instance})
-    agent = MiniSweAgent(mini_config=mini_config, agent_config={"llm_model": model_name})
+    agent = MiniSweAgent(mini_config=mini_config, workflow_mode=args.workflow_mode,
+                         trajectory_dir=output_dir / "trajectories",
+                         agent_config={"llm_model": model_name, "workflow_mode": args.workflow_mode})
 
     t0 = time.monotonic()
     fix_output = agent.fix(bug_input)
@@ -253,7 +259,8 @@ def main() -> None:
         iterations=fix_output.iterations,
         final_state=final_state,
         elapsed_s=round(elapsed, 3),
-        agent_config={"llm_model": model_name, "subset": args.subset, "split": args.split},
+        agent_config={"llm_model": model_name, "subset": args.subset, "split": args.split,
+                      "workflow_mode": args.workflow_mode},
         llm_model=model_name,
     )
     JournalWriter().write(record, final_state)
