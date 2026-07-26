@@ -73,6 +73,22 @@ def build_sb_environment(mini_config: dict, instance: dict) -> Any:
 
     env_config = dict(mini_config.get("environment") or {})
     env_config.setdefault("environment_class", "docker")
+    # Determinism env applied to EVERY command mini runs in the container. This
+    # removes the two non-normalizable sources of tool-output drift found by the
+    # cache-miss diagnostics (docs/swebench.md): PYTHONUNBUFFERED makes stdout
+    # unbuffered so it interleaves with stderr in a stable order (kills the
+    # "traceback appears before/after the print" divergence), and PYTHONHASHSEED
+    # pins set/dict iteration + unittest test-discovery order (kills the
+    # "different test ran at this position" divergence). Both are standard
+    # reproducibility settings; they only affect what the AGENT observes while
+    # solving — the official harness grades the final patch in its own env — but
+    # they DO change trajectories, so a cache recorded with them only replays
+    # against runs that also set them. Set on a COPY so we never mutate the
+    # shared builtin config dict.
+    env_env = dict(env_config.get("env") or {})
+    env_env.setdefault("PYTHONUNBUFFERED", "1")
+    env_env.setdefault("PYTHONHASHSEED", "0")
+    env_config["env"] = env_env
     image = swebench_docker_image_name(instance)
     ec = env_config["environment_class"]
     if ec in ("docker", "swerex_modal"):

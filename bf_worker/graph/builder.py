@@ -14,6 +14,8 @@ from langgraph.graph import StateGraph, END
 from graph.state import BugFixState
 from graph.routing import (
     route_after_precheck,
+    route_after_fetch_trace,
+    route_after_mini_react_loop,
     route_after_parse_trace,
     route_after_react_loop,
     route_after_create_fix_branch,
@@ -26,6 +28,7 @@ from graph.nodes.fetch_trace           import fetch_trace
 from graph.nodes.parse_trace           import parse_trace
 from graph.nodes.fetch_source_file     import fetch_source_file
 from graph.nodes.react_loop            import react_loop
+from graph.nodes.mini_react_loop       import mini_react_loop
 from graph.nodes.create_fix_branch     import create_fix_branch
 from graph.nodes.apply_change_and_test import apply_change_and_test
 from graph.nodes.code_review           import code_review
@@ -52,6 +55,7 @@ def build_graph(checkpointer=None) -> StateGraph:
     g.add_node("parse_trace",            parse_trace)
     g.add_node("fetch_source_file",      fetch_source_file)
     g.add_node("react_loop",             react_loop)
+    g.add_node("mini_react_loop",        mini_react_loop)
     g.add_node("create_fix_branch",      create_fix_branch)
     g.add_node("apply_change_and_test",  apply_change_and_test)
     g.add_node("code_review",            code_review)
@@ -65,7 +69,6 @@ def build_graph(checkpointer=None) -> StateGraph:
     g.set_entry_point("precheck_already_fixed")
 
     # ── unconditional edges ───────────────────────────────────────────────────
-    g.add_edge("fetch_trace",       "parse_trace")
     g.add_edge("fetch_source_file", "react_loop")
     g.add_edge("commit_change",     "wait_ci_result")
     g.add_edge("create_mr",         END)
@@ -78,6 +81,26 @@ def build_graph(checkpointer=None) -> StateGraph:
         {
             "fetch_trace":   "fetch_trace",
             "already_fixed": END,
+        },
+    )
+
+    # workflow_ver == 99 forks here: SWE-bench substrate skips parse/fetch_source
+    # and runs mini in the docker image; ver 0 (default) → parse_trace unchanged.
+    g.add_conditional_edges(
+        "fetch_trace",
+        route_after_fetch_trace,
+        {
+            "parse_trace":     "parse_trace",
+            "mini_react_loop": "mini_react_loop",
+        },
+    )
+
+    g.add_conditional_edges(
+        "mini_react_loop",
+        route_after_mini_react_loop,
+        {
+            "create_fix_branch": "create_fix_branch",
+            "handle_failure":    "handle_failure",
         },
     )
 

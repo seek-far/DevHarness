@@ -1,0 +1,27 @@
+# deepseek-v4-pro backend + persistent response cache — for the ver99 vs
+# standalone-swebench cache-hit experiment. Record a case via one path, replay
+# via the other; the mini prompts are identical (see docs/swebench.md) so the
+# second pass hits the cache and costs zero tokens.
+backends:
+  - name: deepseek_v4_pro
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-v4-pro
+    api_key_env: DEEPSEEK_API_KEY
+    request_timeout: 120
+
+inference_policy:
+  type: ordered
+  order: [deepseek_v4_pro]
+
+cache:
+  mode: cache                 # replay on hit, record on miss
+  # NOT /tmp. A recorded cache is the expensive artifact here (a 100-instance
+  # SWE-bench recording is real money), and /tmp is cleared on reboot — that is
+  # exactly how the minus box lost its 0:100 deepseek recording. `~` and $VARs
+  # are expanded and parent dirs created (llm_gateway/cache.py).
+  # Ship it between machines with `python -m tools.llm_cache_transfer export`,
+  # never `cp` — the live file is WAL-mode and the rows sit in the `-wal`.
+  db_path: ~/.sdlcma/llm_cache.db
+  replay_with_latency: false  # cost demo — don't sleep on hits
+  log_every_n: 20
+  normalize_content: true     # strip per-run volatiles (timestamps, SHAs, bug_id)

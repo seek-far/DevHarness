@@ -1,0 +1,5 @@
+{
+  "agent": "langgraph",
+  "workflow_ver": 99,
+  "note": "SWE-bench substrate through the GitLab worker graph. workflow_ver=99 makes the worker read .swebench/instance.json from the instance branch, run mini-swe-agent in the per-instance eval docker image, git-apply its diff, skip local pytest (GitLab CI is the oracle), then MR. Worker host needs docker + the eval image + mini deps. See docs/swebench.md."
+}

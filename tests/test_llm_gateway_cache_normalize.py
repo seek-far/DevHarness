@@ -300,3 +300,110 @@ def test_assistant_messages_still_excluded_with_normalize():
     }]
     assert derive_key(body_a, normalize_content=True) \
         == derive_key(body_b, normalize_content=True)
+
+
+# ── volatiles found leaking into mini's bash tool observations (SWE-bench) ────
+# Each was the FIRST cache-miss divergence of a real ver99 replay of the 0:100
+# mini-solve recording on ls4900 (2026-07-25). Two runs of the SAME command
+# produced content differing only in these volatiles.
+
+def test_python_object_repr_address_collapsed():
+    """`<Foo object at 0x7fa5c4a19080>` — CPython's default repr embeds id()
+    as a hex address that changes every process. The single biggest divergence
+    source when the agent `python -c`-prints objects (django-11790, -12125)."""
+    a = "field: <django.contrib.auth.forms.UsernameField object at 0x7fa5c4a19080>"
+    b = "field: <django.contrib.auth.forms.UsernameField object at 0x7f592d9b5080>"
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+    assert "0x<ADDR>" in _normalize_volatile_content(a)
+    assert "0x7fa5c4a19080" not in _normalize_volatile_content(a)
+
+
+def test_object_address_pattern_keeps_surrounding_repr():
+    out = _normalize_volatile_content("<SourceFileLoader object at 0x7f544edbc668>")
+    assert out == "<SourceFileLoader object at 0x<ADDR>>"
+
+
+def test_unittest_run_duration_collapsed():
+    """Django's test runner uses unittest's `Ran N tests in X.XXXs` (not
+    pytest's format). Count is semantic (kept); duration drifts (django-11433)."""
+    a = "Ran 164 tests in 0.411s"
+    b = "Ran 164 tests in 0.409s"
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+    assert "Ran 164 tests in <DUR>s" == _normalize_volatile_content(a)
+
+
+def test_unittest_run_duration_keeps_count():
+    # a genuinely different test count must NOT collapse to equal
+    assert _normalize_volatile_content("Ran 164 tests in 0.4s") != \
+        _normalize_volatile_content("Ran 999 tests in 0.4s")
+
+
+def test_grep_binary_file_matches_line_dropped():
+    """`grep -r`'s filesystem traversal order isn't stable, so a
+    `grep: <path>.pyc: binary file matches` warning lands at a different
+    position between runs. The line is pure machinery noise → drop it, which
+    removes the reordering divergence (django-11885)."""
+    a = ("31:def construct_instance\n"
+         "grep: /testbed/django/db/models/__pycache__/deletion.cpython-36.pyc: binary file matches\n"
+         "42:    def _raw_delete")
+    b = ("31:def construct_instance\n"
+         "42:    def _raw_delete\n"
+         "grep: /testbed/django/db/models/__pycache__/deletion.cpython-36.pyc: binary file matches")
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+    assert "binary file matches" not in _normalize_volatile_content(a)
+
+
+def test_address_pattern_does_not_touch_plain_hex_literals():
+    # a hex literal NOT in ` at 0x…` repr context must be preserved
+    src = "MASK = 0xdeadbeef  # a constant in the source"
+    assert _normalize_volatile_content(src) == src
+
+
+def test_pytest_no_tests_ran_duration_collapsed():
+    a = "=========================== no tests ran in 0.56s ============================"
+    b = "=========================== no tests ran in 0.83s ============================"
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+
+
+def test_uuid_collapsed():
+    a = "pk after Sample(): 4dac5a86-324c-4b8f-8364-f6de94bdbfca"
+    b = "pk after Sample(): a6466b9d-872f-4a7e-8616-05f5388027cb"
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+    assert "<UUID>" in _normalize_volatile_content(a)
+
+
+def test_tmp_mkdtemp_path_collapsed():
+    a = "__path__: _NamespacePath(['/tmp/tmp_rwecx43/testapp/migrations'])"
+    b = "__path__: _NamespacePath(['/tmp/tmp3__1bvya/testapp/migrations'])"
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+    # the stable suffix after the random part is preserved
+    assert "/testapp/migrations" in _normalize_volatile_content(a)
+
+
+def test_git_stash_sha_collapsed():
+    a = "Dropped refs/stash@{0} (7c64b2a19de43fe6903de79571c6475e2e40d123)"
+    b = "Dropped refs/stash@{0} (0cbd3d2917b59fd446e06fc2e190465f3c52b05c)"
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+    assert "<SHA>" in _normalize_volatile_content(a)
+
+
+def test_ls_l_mtime_collapsed():
+    a = "drwxr-xr-x   1 root root  4096 Jul 25 04:59 .."
+    b = "drwxr-xr-x   1 root root  4096 Jul 25 09:55 .."
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+
+
+def test_ls_date_pattern_does_not_match_prose():
+    # a sentence that isn't an ls timestamp must be preserved
+    s = "The release is planned for Dec 2026 at some point."
+    assert _normalize_volatile_content(s) == s
+
+
+def test_ansi_colour_stripped_then_duration_collapses():
+    """pytest colours its summary; the ANSI codes sit between the count words
+    and ` in <dur>s`, so without stripping them the duration rule can't fire."""
+    a = "\x1b[32m\x1b[1m201 passed\x1b[0m, \x1b[33m4 skipped\x1b[0m\x1b[32m in 0.84s\x1b[0m"
+    b = "\x1b[32m\x1b[1m201 passed\x1b[0m, \x1b[33m4 skipped\x1b[0m\x1b[32m in 0.98s\x1b[0m"
+    assert _normalize_volatile_content(a) == _normalize_volatile_content(b)
+    assert "\x1b[" not in _normalize_volatile_content(a)
+    assert "201 passed" in _normalize_volatile_content(a)  # semantic content kept

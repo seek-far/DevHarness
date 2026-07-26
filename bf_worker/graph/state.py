@@ -27,6 +27,16 @@ class BugFixState(TypedDict, total=False):
     # orchestrator → spawner → worker chain (Item 3).
     source_branch: str
 
+    # Workflow selector. 0 (default / absent) = the legacy LangGraph bug-fix
+    # path (parse_trace → fetch_source_file → react_loop → apply+test → …),
+    # byte-identical to before. 99 = the SWE-bench substrate path: skip
+    # parse_trace/fetch_source_file, run mini-swe-agent in the per-instance
+    # docker image (mini_react_loop), git-apply its unified diff to the clone,
+    # and let GitLab CI be the test oracle (apply node skips local pytest).
+    # This is a DIFFERENT axis from MiniSweAgent.workflow_mode (0-4). See
+    # docs/swebench.md.
+    workflow_ver: int
+
     # ── trace / parse ─────────────────────────────────────────────────────────
     trace: str
     error_info: str
@@ -62,6 +72,14 @@ class BugFixState(TypedDict, total=False):
     # (self-hosted, or a gateway backend with no `pricing:` block) — an
     # unknown cost must never render as a confident $0.00.
     total_cost_usd: float | None
+    # Who priced `total_cost_usd`. Set by an agent that knows its own source
+    # (the mini-swe-agent substrate → "mini_litellm"); when absent RunRecord
+    # INFERS "gateway"/"local_pricing" from llm_via_gateway. That inference is
+    # wrong on the mini path — mini prices calls itself via litellm's model_cost
+    # table, including REPLAYED ones, so a fully cache-hit run still shows a
+    # bill. Without this key in the schema LangGraph drops the update and the
+    # journal silently reads "gateway" (observed on ls4900 ver99 runs).
+    cost_source: str | None
     total_llm_wallclock_s: float | None
     # Per-call wallclock breakdown — one int (ms) per LLM call, ordered by
     # call. Carries forward across react_loop re-entries (retries, acting-
@@ -95,6 +113,15 @@ class BugFixState(TypedDict, total=False):
     code_review_findings: list | None  # compact per-finding dicts for offline evaluation
     code_review_note: str | None    # acting mode only: advisory feedback fed into react_loop (rendered by _format_retry_feedback); None in shadow mode
     code_review_rounds: int | None  # acting mode only: independent fixer↔review round counter (bounds the code_review→react_loop loop; separate from fix_retry_count)
+
+    # ── swebench substrate (workflow_ver == 99) ───────────────────────────────
+    # The unified diff mini-swe-agent produced in the docker /testbed. Set by
+    # mini_react_loop; git-applied to the GitLab clone by apply_change_and_test
+    # (which skips local pytest on this path — CI is the oracle). None ⇒ mini
+    # produced no patch ⇒ route to handle_failure.
+    model_patch: str | None
+    swebench_instance_id: str | None   # e.g. "sympy__sympy-22914" (telemetry / RunRecord)
+    resolved: bool | None              # SWE-bench resolved verdict; on this path it mirrors CI success
 
     # ── branch / apply ────────────────────────────────────────────────────────
     fix_branch_name: str | None

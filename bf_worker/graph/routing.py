@@ -40,6 +40,34 @@ def route_after_precheck(state: BugFixState) -> str:
     return "fetch_trace"
 
 
+# ── after fetch_trace ──────────────────────────────────────────────────────────
+
+def route_after_fetch_trace(state: BugFixState) -> str:
+    """
+    workflow_ver == 99 (SWE-bench substrate) → mini_react_loop: skip
+    parse_trace / fetch_source_file entirely and hand the instance to
+    mini-swe-agent running in the per-instance docker image.
+
+    Otherwise → parse_trace (the legacy path — byte-identical to before,
+    since workflow_ver defaults to 0 / absent).
+    """
+    if int(state.get("workflow_ver") or 0) == 99:
+        return "mini_react_loop"
+    return "parse_trace"
+
+
+# ── after mini_react_loop (workflow_ver == 99) ─────────────────────────────────
+
+def route_after_mini_react_loop(state: BugFixState) -> str:
+    """
+    mini produced a diff → create_fix_branch (then apply git-applies it).
+    No diff (mini exhausted its budget / crashed) → handle_failure.
+    """
+    if state.get("model_patch"):
+        return "create_fix_branch"
+    return "handle_failure"
+
+
 # ── after parse_trace ──────────────────────────────────────────────────────────
 
 def route_after_parse_trace(state: BugFixState) -> str:
@@ -107,6 +135,14 @@ def route_after_apply_and_test(state: BugFixState) -> str:
     """
     if state.get("test_passed"):
         return "code_review"
+
+    # workflow_ver == 99: there is no local react_loop to retry into (mini
+    # already produced its best patch in the docker container, and this node
+    # only git-applies it — a failed apply means the diff doesn't fit the
+    # clone, which re-running the same mini output won't fix). Go straight to
+    # handle_failure.
+    if int(state.get("workflow_ver") or 0) == 99:
+        return "handle_failure"
 
     if state.get("fix_retry_count", 0) < MAX_FIX_RETRIES:
         return "react_loop"

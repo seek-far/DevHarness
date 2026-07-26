@@ -137,6 +137,10 @@ class LangGraphAgent(Agent):
             "project_web_url": bug_input.project_web_url,
             "job_id":          bug_input.job_id,
             "source_branch":   bug_input.source_branch or "",
+            # Workflow selector from the agent spec ("workflow_ver": 99 selects
+            # the SWE-bench substrate path). Absent/0 = legacy path, so every
+            # existing spec and mode is byte-identical. See graph/state.py.
+            "workflow_ver":    int(self._agent_config.get("workflow_ver") or 0),
             "llm_retry_count": 0,
             "fix_retry_count": 0,
         }

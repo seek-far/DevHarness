@@ -109,6 +109,44 @@ HEADER_COST_USD = "x-sdlcma-cost-usd"
 _TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
 _TRANSIENT_STATUS_CODES = (429, 500, 502, 503, 504)
 
+# ── cache-miss diagnostics (opt-in via CACHE_DEBUG_MISS_DUMP=<dir>) ───────────
+# When set, the FIRST cache miss per bug_id dumps the missing request's messages
+# to <dir>/<bug_id>.json. Used to find the volatile leaking into a mini tool
+# observation that makes an otherwise-replayable trajectory diverge: with the
+# gateway in `replay` mode the first miss also 409s, so the agent aborts that
+# instance right at the divergence (everything after the first divergence is
+# just downstream of it). Diff the dumped last tool message against the recorded
+# trajectory's message at the same turn to see exactly what differs.
+_DEBUG_MISS_DIR = os.environ.get("CACHE_DEBUG_MISS_DUMP") or None
+_debug_miss_dumped: set[str] = set()
+
+
+def _dump_first_miss(bug_id: str | None, cache_key_short: str, body_json: dict) -> None:
+    """Dump the first missing request per bug_id (best-effort; never raises into
+    the request path)."""
+    if not _DEBUG_MISS_DIR or not bug_id or bug_id in _debug_miss_dumped:
+        return
+    _debug_miss_dumped.add(bug_id)
+    try:
+        import pathlib
+        d = pathlib.Path(_DEBUG_MISS_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        msgs = body_json.get("messages") or []
+        # last tool/user message = the observation that just changed and caused
+        # the miss (all earlier messages hit, i.e. matched the recording).
+        last_obs = next((m for m in reversed(msgs)
+                         if m.get("role") in ("tool", "user")), None)
+        (d / f"{bug_id}.json").write_text(json.dumps({
+            "bug_id": bug_id, "cache_key": cache_key_short,
+            "n_messages": len(msgs),
+            "divergent_observation": last_obs,
+            "messages": msgs,
+        }, indent=2, default=str), encoding="utf-8")
+        logger.info("cache-miss dump: bug_id=%s → %s.json (%d msgs)",
+                    bug_id, bug_id, len(msgs))
+    except Exception as exc:  # diagnostics must never break a run
+        logger.warning("cache-miss dump failed for %s: %s", bug_id, exc)
+
 
 def _init_app(cfg_path: str | None = None) -> FastAPI:
     app = FastAPI(title="sdlcma-llm-gateway")
@@ -308,14 +346,23 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                     short_key(cache_key), bug_id or "",
                 )
                 CACHE_LOOKUPS.labels(result="miss", mode="replay").inc()
+                _dump_first_miss(bug_id, short_key(cache_key), body_json)
                 _maybe_emit_cache_summary()
+                # Normal replay: 409 so the worker distinguishes "cache gap" from
+                # "backend down" (502). In miss-diagnostics mode we instead return
+                # 404 → litellm NotFoundError, which is in mini's abort_exceptions,
+                # so the agent aborts THIS instance at its first divergence
+                # immediately (no retry/backoff) and the orchestrator moves to the
+                # next one — everything past the first divergence is downstream of
+                # it, so there's nothing to gain from continuing.
+                miss_status = 404 if _DEBUG_MISS_DIR else 409
                 return JSONResponse(
                     content={"error": {
                         "message": "cache miss in replay mode",
                         "type": "cache_miss_replay",
                         "cache_key": short_key(cache_key),
                     }},
-                    status_code=409,
+                    status_code=miss_status,
                     headers={
                         HEADER_CACHE_RESULT: "miss",
                         HEADER_CACHE_KEY: short_key(cache_key),
@@ -323,6 +370,7 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
                 )
             # cache mode + miss → count it, fall through, forward, then store.
             CACHE_LOOKUPS.labels(result="miss", mode=cache_cfg.mode).inc()
+            _dump_first_miss(bug_id, short_key(cache_key), body_json)
 
         # Single backend selection per request. The policy is stateless: it
         # picks one backend based on `attempt`, the gateway forwards (with

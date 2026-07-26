@@ -94,6 +94,13 @@ def _normalize_messages(messages: Any, normalize_content: bool = False) -> list[
 # failure mode than not normalizing — the latter only lowers hit rate;
 # the former silently feeds the LLM the wrong cached response.
 _NORMALIZE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # ANSI SGR colour escapes — MUST be first. pytest colours its summary
+    # (`\x1b[32m201 passed\x1b[0m, … in 0.84s\x1b[0m`) when the eval container's
+    # stdout is a tty; the codes are presentation-only and identical every run,
+    # but they sit BETWEEN the count words and ` in <dur>s`, so the duration
+    # rules below can't match until they're gone. Stripping them is semantics-
+    # preserving and unblocks every count/duration pattern.
+    (re.compile(r"\x1b\[[0-9;]*m"), ""),
     # ISO-8601 timestamp with optional fractional seconds + Z. GitLab CI
     # logs prefix every line with one of these — the biggest single
     # source of per-run drift in the prompt.
@@ -135,6 +142,50 @@ _NORMALIZE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # produces in `_handle_message`.
     (re.compile(r"\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}_\d(?:_[a-f0-9]{4})?"),
      "<BUG_ID>"),
+    # ── volatiles observed leaking into mini's bash tool observations ────────
+    # (SWE-bench agentic replay; each identified from the first cache-miss
+    # divergence of a real ver99 replay — see docs/swebench.md.)
+    #
+    # Python object repr address: `<... object at 0x7fa5c4a19080>`,
+    # `<SourceFileLoader object at 0x...>`. Any object without a custom
+    # __repr__ prints its id() as a hex address that changes every process —
+    # the single biggest divergence source when the agent `python -c`-prints
+    # objects. Anchored on ` at 0x<hex>` (the CPython repr shape) so it can't
+    # match a hex literal in source. The trailing `>` is kept.
+    (re.compile(r" at 0x[0-9a-fA-F]+"), " at 0x<ADDR>"),
+    # unittest / Django runtests summary duration: `Ran 164 tests in 0.411s`.
+    # Same idea as the pytest-duration rule above but Django's test runner uses
+    # unittest's format, not pytest's. The test COUNT is semantic (kept); only
+    # the wallclock duration drifts with host load.
+    (re.compile(r"(Ran \d+ tests? in )\d+\.\d+s"), r"\1<DUR>s"),
+    # `grep -r` binary-file warning: `grep: <path>.pyc: binary file matches`.
+    # These are grep machinery warnings (about compiled .pyc caches, not the
+    # source), and `grep -r`'s filesystem traversal order isn't stable, so the
+    # line lands at a different position between runs and busts an otherwise
+    # identical result. Drop the whole line — it carries no fix-relevant
+    # content. (Leading newline consumed so we don't leave a blank line.)
+    (re.compile(r"\n?grep: [^\n]*: binary file matches"), ""),
+    # pytest empty-selection summary: `==== no tests ran in 0.56s ====`. The
+    # outcome-word duration rule above requires a count word (passed/failed/…);
+    # "no tests ran" has none, so it drifts on duration alone (astropy/django
+    # print it when a `-k`/path selection matches nothing).
+    (re.compile(r"(no tests ran in )\d+\.\d+s"), r"\1<DUR>s"),
+    # Random UUID4 (e.g. a model pk the agent prints): 8-4-4-4-12 hex. The shape
+    # is specific enough to not hit real hex content.
+    (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{12}\b"), "<UUID>"),
+    # tempfile.mkdtemp / NamedTemporaryFile suffix: `/tmp/tmpXXXXXXXX`. Random
+    # every run — django migration tests build a temp app package under it and
+    # print its `_NamespacePath`.
+    (re.compile(r"/tmp/tmp[A-Za-z0-9_]{6,}"), "/tmp/tmp<RAND>"),
+    # `git stash pop` drop line: `Dropped refs/stash@{0} (<40-hex>)`. The stash
+    # commit sha is new every run (the agent stashes/pops around its edits).
+    (re.compile(r"(Dropped refs/stash@\{\d+\} \()[0-9a-f]{40}(\))"), r"\1<SHA>\2"),
+    # `ls -l` mtime of container-created entries (`.`/`..`, temp dirs): the
+    # `Mon DD HH:MM` field is the container build time, different every run.
+    # Pinned to real month abbreviations so it can't match arbitrary text.
+    (re.compile(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +"
+                r"\d{1,2} +\d{2}:\d{2}\b"), "<LS_DATE>"),
 )
 
 

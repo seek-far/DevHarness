@@ -368,3 +368,30 @@ def test_mode4_records_background_injection_metadata(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_build_sb_environment_injects_determinism_env(monkeypatch):
+    """Every mini command must run with PYTHONUNBUFFERED/PYTHONHASHSEED so
+    stdout/stderr interleaving and set/dict/test-discovery order are stable —
+    the two non-normalizable cache-miss divergence sources. Verify the env is
+    added without mutating the shared config, and pre-existing env is kept."""
+    import agents.mini_swe_agent as m
+
+    captured = {}
+
+    def fake_get_environment(env_config):
+        captured.update(env_config)
+        return SimpleNamespace(execute=lambda *a, **k: {"returncode": 0})
+
+    monkeypatch.setattr("minisweagent.environments.get_environment",
+                        fake_get_environment, raising=False)
+    monkeypatch.setattr(m, "swebench_docker_image_name", lambda inst: "img:latest")
+
+    shared = {"environment": {"env": {"PAGER": "cat"}}}
+    m.build_sb_environment(shared, {"instance_id": "x"})
+
+    assert captured["env"]["PYTHONUNBUFFERED"] == "1"
+    assert captured["env"]["PYTHONHASHSEED"] == "0"
+    assert captured["env"]["PAGER"] == "cat"          # existing env preserved
+    # the shared/builtin config dict must NOT be mutated
+    assert "PYTHONUNBUFFERED" not in shared["environment"]["env"]

@@ -101,6 +101,60 @@ def _finalize(
     return {**result, **delta}
 
 
+def _apply_model_patch_ver99(state: BugFixState, repo_path: Path) -> dict:
+    """workflow_ver == 99: git-apply the mini-produced unified diff to the clone
+    and SKIP local pytest (GitLab CI in the eval image is the oracle).
+
+    The clone is already on the auto/bf branch at base_commit (create_fix_branch
+    ran first) and mini's diff is relative to base_commit, so the contexts line
+    up. Tries `git apply --3way` → `git apply` → `patch -p1` for robustness. On
+    success test_passed=True (no local test run); on failure the run routes to
+    handle_failure (route_after_apply_and_test handles the ver==99 no-retry rule).
+    """
+    patch = (state.get("model_patch") or "")
+    if not patch.strip():
+        return {"test_passed": False, "apply_error": "empty model_patch",
+                "test_output": "[ver99] no diff to apply", "error": "ver99: empty model_patch"}
+    if not patch.endswith("\n"):
+        patch += "\n"   # git apply rejects a diff without a trailing newline
+
+    # Write outside the repo tree so a later `git add -A` in commit_change can't
+    # stage the patch file itself.
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False,
+                                     encoding="utf-8") as tf:
+        tf.write(patch)
+        patch_file = tf.name
+
+    last = ""
+    try:
+        for cmd in (
+            ["git", "apply", "--3way", patch_file],
+            ["git", "apply", patch_file],
+            ["patch", "-p1", "-i", patch_file],
+        ):
+            proc = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True)
+            if proc.returncode == 0:
+                logger.info("[ver99] model_patch applied via '%s'; local test skipped (CI is oracle)",
+                            " ".join(cmd[:2]))
+                return {
+                    "test_passed": True,
+                    "apply_error": None,
+                    "test_output": f"[ver99] model_patch applied via {' '.join(cmd[:2])}; "
+                                   f"local pytest skipped — GitLab CI is the test oracle.",
+                }
+            last = (proc.stderr or proc.stdout or "").strip()
+        logger.warning("[ver99] model_patch did not apply to clone: %s", last[-400:])
+        return {
+            "test_passed": False,
+            "apply_error": f"git apply of model_patch failed: {last[-800:]}",
+            "test_output": f"[ver99] could not apply model_patch:\n{last[-800:]}",
+            "error": "ver99: model_patch did not apply to the clone",
+        }
+    finally:
+        Path(patch_file).unlink(missing_ok=True)
+
+
 def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] = None) -> BugFixState:
     provider = get_provider(config)
     bug_id = state["bug_id"]
@@ -119,6 +173,15 @@ def apply_change_and_test(state: BugFixState, config: Optional[RunnableConfig] =
     # Resolve repo path — provider.ensure_repo_ready was already called in
     # create_fix_branch, so we reconstruct the path the same way.
     repo_path = provider.ensure_repo_ready(bug_id)
+
+    # workflow_ver == 99 (SWE-bench substrate): the "fix" is a unified diff mini
+    # produced in the docker container, carried on state["model_patch"]. We
+    # git-apply it to the clone (already on the auto/bf branch at base_commit)
+    # and SKIP the local venv + pytest entirely — GitLab CI in the eval image
+    # is the test oracle for this path. Branches out before touching
+    # llm_result["fixes"] (which ver==99 never populates).
+    if int(state.get("workflow_ver") or 0) == 99:
+        return _finalize(state, config, _apply_model_patch_ver99(state, repo_path))
 
     llm_result = state["llm_result"]
     change_infos = llm_result["fixes"]
