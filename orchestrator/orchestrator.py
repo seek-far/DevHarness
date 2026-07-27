@@ -100,6 +100,19 @@ class Orchestrator:
                 worker_env=self._cfg.ecs_worker_env,
                 worker_network_mode=self._cfg.ecs_worker_network_mode,
             )
+        elif spawner_kind == "distr-pull":
+            from orchestrator.dispatcher import DistributedDispatcher
+            from orchestrator.daemon_monitor import DaemonMonitor
+            self._spawner = DistributedDispatcher(
+                redis=self._redis,
+                registry=self._registry,
+                cache_ttl=getattr(self._cfg, "worker_daemon_cache_ttl", 5),
+            )
+            self._daemon_monitor = DaemonMonitor(
+                redis=self._redis,
+                dispatcher=self._spawner,
+                interval=getattr(self._cfg, "worker_daemon_recovery_interval", 15),
+            )
         else:
             self._spawner = WorkerSpawner(self._registry, self._cfg.redis_url)
         self._router = MessageRouter(
@@ -203,6 +216,8 @@ class Orchestrator:
                              "%s:%d: %s (metrics disabled this run)",
                              metrics_bind, metrics_port, e)
         self._monitor.start()
+        if hasattr(self, "_daemon_monitor"):
+            self._daemon_monitor.start()
         self._consumer.start()
         logger.info("[Orchestrator] running")
 

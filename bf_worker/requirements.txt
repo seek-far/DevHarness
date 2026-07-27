@@ -7,3 +7,4 @@ requests[socks]>=2.31
 pydantic
 pydantic-settings
 azure-identity>=1.19  # keyless (Entra ID / Managed Identity) auth for Azure LLM backends — services/azure_auth.py
+psutil>=5.9  # worker_daemon free-memory admission control

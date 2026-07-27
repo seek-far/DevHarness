@@ -120,6 +120,16 @@ class OrchestratorSettings(BaseAppSettings):
     # this to the EC2 host's private IPv4 (e.g. via CloudFormation).
     ecs_worker_redis_url: str = ""
 
+    # ── distr-pull mode ─────────────────────────────────────────
+    # Read only by orchestrator.dispatcher.DistributedDispatcher and
+    # orchestrator.daemon_monitor.DaemonMonitor when WORKER_SPAWNER=distr-pull.
+    # Scoped here (not base_settings) because only the orchestrator reads them;
+    # daemons receive these values via their own CLI / env.
+    worker_daemon_cache_ttl: int = 5         # seconds before daemon state cache refreshes
+    worker_daemon_recovery_interval: int = 15  # seconds between DaemonMonitor ticks
+    worker_daemon_hb_ttl: int = 30           # seconds before daemon heartbeat key expires
+    worker_daemon_hb_interval: int = 10      # seconds between daemon heartbeat writes
+
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / f"orchestrator_{_probe.env}.env",
         env_file_encoding="utf-8",

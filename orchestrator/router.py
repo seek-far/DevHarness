@@ -21,14 +21,31 @@ class MessageRouter:
 
     async def route(self, event: ValidationStatusEvent) -> bool:
         entry = self._registry.get(event.bug_id)
-        if not entry or entry.status not in ("warmup", "running"):
-            logger.warning("[Router] no active worker for bug_id=%s", event.bug_id)
-            return False
+        if entry and entry.status in ("warmup", "running"):
+            # Existing path: worker registered in the in-memory WorkerRegistry
+            # (subprocess / Docker / ECS / K8s spawner modes).
+            inbox_stream = self._inbox_stream_tpl.format(bug_id=event.bug_id)
+            await self._redis.xadd(inbox_stream, {"data": json.dumps(event.raw)})
+            logger.info(
+                "[Router] routed to stream=%r status=%s", inbox_stream, event.status
+            )
+            return True
 
-        inbox_stream = self._inbox_stream_tpl.format(bug_id=event.bug_id)
-        # XADD writes to the worker inbox stream; "*" lets Redis auto-generate the entry ID
-        await self._redis.xadd(inbox_stream, {"data": json.dumps(event.raw)})
-        logger.info(
-            "[Router] routed to stream=%r status=%s", inbox_stream, event.status
-        )
-        return True
+        # distr-pull fallback: no local registry entry.  The worker is a
+        # subprocess spawned by a daemon on some machine.  Check the
+        # task:owner:{bug_id} key that the daemon sets on spawn.
+        owner_key = f"task:owner:{event.bug_id}"
+        owner = await self._redis.get(owner_key)
+        if owner:
+            inbox_stream = self._inbox_stream_tpl.format(bug_id=event.bug_id)
+            await self._redis.xadd(inbox_stream, {"data": json.dumps(event.raw)})
+            logger.info(
+                "[Router] routed to stream=%r (distr-pull, owner=%s) status=%s",
+                inbox_stream,
+                owner.decode() if isinstance(owner, bytes) else owner,
+                event.status,
+            )
+            return True
+
+        logger.warning("[Router] no active worker for bug_id=%s", event.bug_id)
+        return False
