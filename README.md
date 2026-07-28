@@ -1,6 +1,6 @@
 # DevHarness
 
-**DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file.
+**DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file. For larger workloads, it can distribute bug-fix jobs across multiple worker nodes while keeping one central GitLab/webhook control plane.
 
 A built-in evaluation harness benchmarks bug-fix agents against a curated fixture set, and the engine itself is pluggable via an `Agent` interface — so alternative agents (Aider, SWE-agent, custom) can be swapped in and compared head-to-head.
 
@@ -14,10 +14,14 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   raw-trace prompt instead of failing); provider abstraction so the same graph
   runs against GitLab, local git, or a plain directory.
 
-- **Deployment**
+- **Deployment & distributed processing**
   - Local: standalone CLI; multi-process or docker-compose against a local
     GitLab; docker-compose against gitlab.com.
   - Public-host / AWS ECS / Kubernetes (kind + Helm), all against gitlab.com.
+  - Distributed pull-worker mode (`WORKER_SPAWNER=distr-pull`) for processing
+    many bug-fix jobs over multiple worker nodes through Redis Streams, with
+    per-node slot and memory admission and no change to the GitLab provider
+    path.
   - Supports both API-based LLMs (OpenAI-compatible, Alibaba Dashscope) and
     self-hosted backends (vLLM, llama.cpp server, Ollama).
   - Optional **LLM Gateway** — independent FastAPI service that proxies
@@ -74,8 +78,10 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
 
 - **Evaluation & Quality** — `bench` CLI for agent × fixture sweeps; curated
   fixtures (`F01`–`F10`) plus journal-promoted real bugs; `RunRecord`
-  aggregation into per-agent fix-rate / iterations / wallclock; regression
-  coverage across every surface (unit `pytest`, end-to-end
+  aggregation into per-agent fix-rate / iterations / wallclock; SWE-bench
+  single-instance and batch runs via the mini-swe-agent substrate, plus the
+  GitLab-integrated SWE-bench path (`workflow_ver=99`) where GitLab CI is the
+  oracle; regression coverage across every surface (unit `pytest`, end-to-end
   `integration_test.py`, eval sweeps, per-deployment real-host smokes —
   consolidated in `tests/TESTING.md`). **Deterministic replay** via the
   LLM Gateway response cache (sqlite-backed, portable across machines via
@@ -258,6 +264,48 @@ Investigate⇄Solve back-edges; `4` is mode 0 with per-instance background
 knowledge injected after the problem statement. The mode is recorded and encoded
 in the agent name (`mini_swe_agent_wf1`, etc.) so `bench report` compares modes'
 resolved-rates side by side.
+
+#### SWE-bench through GitLab (`workflow_ver=99`)
+
+`workflow_ver` is a separate axis from `workflow_mode`: it selects the GitLab
+worker graph path, not mini's internal agent shape. `workflow_ver=99` runs a
+SWE-bench instance through the real GitLab pipeline: the worker reads
+`.swebench/instance.json` from an `instance/<id>` branch, runs mini-swe-agent in
+the per-instance eval Docker image, git-applies the unified diff, skips local
+pytest, and lets GitLab CI (`FAIL_TO_PASS` + `PASS_TO_PASS`) decide `resolved`.
+
+The worker host must have Docker plus the SWE-bench/mini eval dependencies; the
+service images intentionally do not carry those heavy packages.
+
+```bash
+# One-time: create/update instance branches in a GitLab group like swebench/sympy.
+# Use --ci-skip when preparing branches in bulk; otherwise each push fires a red
+# baseline pipeline immediately.
+export $(grep -E '^(GITLAB_API|GITLAB_PRIVATE_TOKEN|GITLAB_USERNAME)=' \
+         settings/worker_local_multi_process.env | xargs)
+python infra/swebench-gitlab/setup_instance.py \
+  --instance sympy__sympy-22914 \
+  --ci-skip
+
+# Run the normal GitLab stack with ver99 selected for workers.
+# Shell 1:
+uvicorn gateway.gateway:app --host 0.0.0.0 --port 8000
+
+# Shell 2:
+export ENV=local_multi_process
+export BF_AGENT_CONFIG=configs/swebench/gitlab_ver99.json
+python -m orchestrator.orchestrator
+
+# In another shell, trigger and report one or many instances.
+python infra/swebench-gitlab/sweep.py \
+  --instances sympy__sympy-22914 sympy__sympy-23950 \
+  --concurrency 2
+python infra/swebench-gitlab/sweep.py --report-only --instances sympy__sympy-22914
+```
+
+`sweep.py` is resumable, passes `ci_skip=True` while preparing branches, and
+floors journal lookup at the trigger instant so re-runs do not read stale
+verdicts. Full contract: [`docs/swebench.md`](docs/swebench.md).
 
 Trial helper for background-knowledge retrieval: ask an LLM to propose only
 non-code web searches from each problem statement, run those searches, and write
@@ -912,7 +960,7 @@ The gateway records the chosen backend in `RunRecord.llm_backend_name` (additive
 
 ## Deployment Methods for GitLab Running Mode
 
-In GitLab mode, DevHarness can be deployed in six ways, controlled by `settings/.env` and (for spawners that diverge from the historical by-env default) the additive `WORKER_SPAWNER` setting:
+In GitLab mode, DevHarness can be deployed in seven ways, controlled by `settings/.env` and (for spawners that diverge from the historical by-env default) the additive `WORKER_SPAWNER` setting:
 
 ### Mode 1: Local Multi-Process (`ENV=local_multi_process`)
 
@@ -1206,6 +1254,75 @@ bug).
 
 Full K8s deployment runbook in `infra/k8s/README.md`.
 
+### Mode 7: Distributed Pull Workers (`WORKER_SPAWNER=distr-pull`)
+
+Distributed host-subprocess variant for large real-host sweeps, especially
+`workflow_ver=99` SWE-bench runs where each task needs Docker, mini-swe-agent,
+and multi-GB eval images on the worker host. The gateway and orchestrator stay
+central; long-lived daemons on one or more machines pull tasks from Redis
+Streams, enforce local slot/memory admission, spawn ordinary `bf_worker.py`
+subprocesses, and report ownership so validation webhooks route back to the
+right worker inbox.
+
+- Reuses the existing GitLab env (`local_multi_process` for the current
+  self-hosted GitLab setup, or the env that matches your GitLab). Do not invent
+  a new `ENV=distr-pull`; `WORKER_SPAWNER=distr-pull` only changes where workers
+  run.
+- Daemons register in Redis under `worker-daemons`, heartbeat resource snapshots
+  into `worker-daemon:<id>`, and receive jobs on `worker-daemon:<id>:inbox`.
+  If all daemons are full, tasks wait in `worker-daemon:pending`; rejected or
+  orphaned tasks are retried by the orchestrator-side monitor.
+- `bf_worker.py` is unchanged: same env vars, same provider code, same journal
+  writer. This is a spawner/distribution swap, not a new worker mode.
+
+Start the central services on the orchestrator host:
+
+```bash
+# Shell 1:
+export ENV=local_multi_process
+export WORKER_SPAWNER=distr-pull
+export BF_AGENT_CONFIG=configs/swebench/gitlab_ver99.json   # optional; needed for ver99
+export REDIS_URL=${REDIS_URL:-redis://localhost:6379/0}
+uvicorn gateway.gateway:app --host 0.0.0.0 --port 8000
+
+# Shell 2:
+export ENV=local_multi_process
+export WORKER_SPAWNER=distr-pull
+export BF_AGENT_CONFIG=configs/swebench/gitlab_ver99.json   # optional; needed for ver99
+export REDIS_URL=${REDIS_URL:-redis://localhost:6379/0}
+python -m orchestrator.orchestrator
+```
+
+Start one daemon per worker host:
+
+```bash
+cd ~/sdlcma
+export ENV=local_multi_process
+export REDIS_URL=redis://<orchestrator-host>:6379/0
+export BF_AGENT_CONFIG=configs/swebench/gitlab_ver99.json   # optional; needed for ver99
+set -a
+. settings/worker_local_multi_process.env
+set +a
+
+python -m bf_worker.worker_daemon \
+  --daemon-id "$(hostname)" \
+  --redis-url "$REDIS_URL" \
+  --concurrency 4 \
+  --min-free-memory-mb 2048
+```
+
+Basic health checks from the orchestrator host:
+
+```bash
+redis-cli SMEMBERS worker-daemons
+redis-cli HGETALL worker-daemon:<daemon-id>
+redis-cli XLEN worker-daemon:pending
+```
+
+For the two-host SWE-bench validation procedure and failure-recovery checks,
+see [`docs/distr-pull-test-runbook.md`](docs/distr-pull-test-runbook.md).
+Design details are in [`docs/distr-pull-design.md`](docs/distr-pull-design.md).
+
 ### GitLab Webhook Setup
 
 In your GitLab project → Settings → Webhooks:
@@ -1219,6 +1336,7 @@ In your GitLab project → Settings → Webhooks:
 | AWS ECS | `https://<assigned>.trycloudflare.com/webhook` (cloudflared sidecar inside the ECS services task; URL changes every service task replacement) |
 | Kubernetes / kind | `https://<assigned>.trycloudflare.com/webhook` (cloudflared Deployment; new URL on each pod restart — use a named tunnel for stability) |
 | Kubernetes / kind (ingress) | `http://<host-or-tailnet-ip-or-hostname>:18080/webhook` (when GitLab can route to the agent host directly — ingress-nginx + kind `:18080→:80` port mapping; CN networks use the `m.daocloud.io` proxy that `infra/k8s/setup.sh` rewrites in) |
+| Distributed Pull Workers | Same URL as the central gateway host; `distr-pull` only changes how workers are dispatched after the webhook enters Redis |
 
 Trigger: **Pipeline events**
 
@@ -1234,14 +1352,14 @@ quick reference.
 
 ### One-command regression per deployment
 
-Every deployment method — plus `integration_test.py` — has a single-entrypoint
-regression script that **detects code/image staleness, updates if needed,
-sets up the stack, runs an end-to-end smoke, then restores prior state**, all
-with timestamped progress lines and standard exit codes (`0` PASS · `2` FAIL
-· `3` TIMEOUT · `4` PRE-FLIGHT FAIL). This is the project's main "is this
-still working?" entry point — re-running it is the fastest way to verify any
-code change end-to-end against any deployment without thinking about which
-preconditions you forgot.
+The primary deployment methods — plus `integration_test.py` — have a
+single-entrypoint regression script that **detects code/image staleness,
+updates if needed, sets up the stack, runs an end-to-end smoke, then restores
+prior state**, all with timestamped progress lines and standard exit codes
+(`0` PASS · `2` FAIL · `3` TIMEOUT · `4` PRE-FLIGHT FAIL). This is the main
+"is this still working?" entry point for those paths. `distr-pull` is validated
+by the real-host SWE-bench runbook because it requires multiple daemon hosts
+and resource/admission scenarios.
 
 | Script | Deployment | Smoke target |
 |---|---|---|
@@ -1256,6 +1374,8 @@ Common flags: `--timeout N`, `--no-update`, `--no-teardown`, `--keep-env`.
 Full contract + per-script knobs in [`tests/TESTING.md`](tests/TESTING.md)
 §4. Each `infra/*/` directory also retains the lower-level `setup.sh` /
 `gitlab-smoke.sh` / `teardown.sh` building blocks for manual / partial runs.
+`WORKER_SPAWNER=distr-pull` checks live in
+[`docs/distr-pull-test-runbook.md`](docs/distr-pull-test-runbook.md).
 
 ### Integration Test
 
@@ -1293,7 +1413,7 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 
 ```
 ├── gateway/                  # FastAPI webhook receiver
-├── orchestrator/             # Async orchestrator (consumer, spawner, monitor, router)
+├── orchestrator/             # Async orchestrator (consumer, spawners/dispatcher, monitors, router)
 ├── bf_worker/
 │   ├── agents/               # Agent abstraction layer (unit of comparison)
 │   │   ├── base.py           #   Agent ABC, BugInput, FixOutput
@@ -1310,6 +1430,7 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   └── local_provider.py   # Local git + no-git implementations
 │   ├── graph/
 │   │   ├── nodes/            # LangGraph nodes (platform-agnostic via provider)
+│   │   │   └── mini_react_loop.py  # workflow_ver=99 SWE-bench substrate node
 │   │   ├── builder.py        # Graph definition and edges
 │   │   ├── routing.py        # Conditional edge functions
 │   │   └── state.py          # BugFixState TypedDict (includes provider ref)
@@ -1323,6 +1444,9 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   │   └── react_tools.py    # LLM tool definitions (provider-agnostic)
 │   ├── journal.py            # Auto-captures running-mode runs for retrospective curation
 │   ├── bf_worker.py          # Entry point for GitLab mode (with Redis heartbeat)
+│   ├── worker_daemon.py      # Long-lived distr-pull daemon; spawns worker subprocesses
+│   ├── swebench_single.py    # One SWE-bench instance via mini-swe-agent substrate
+│   ├── swebench_batch.py     # Batch SWE-bench runner with resumable resolved-rate reporting
 │   └── standalone.py         # Entry point for standalone local mode
 ├── evaluation/               # Evaluation mode: sweep agents × fixtures
 │   ├── fixtures/             # Curated benchmark (10 single-file Python bugs by default)
@@ -1336,8 +1460,10 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 ├── configs/                  # Agent specs (consumed by evaluation sweeps and `standalone --config`)
 │   ├── baseline.json         #   No-enhancements reference point
 │   ├── memory.json           #   Memory-only single spec — pass to `bf_worker.standalone --config`
+│   ├── swebench/             #   mini-swe-agent and GitLab ver99 configs
 │   ├── memory_vs_baseline.json  # Baseline + memory enhancement, side by side (eval sweep)
 │   └── reflection_vs_baseline.json  # Baseline + reflection enhancement, side by side (eval sweep)
+├── infra/swebench-gitlab/    # Build instance branches + drive workflow_ver=99 GitLab sweeps
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender
