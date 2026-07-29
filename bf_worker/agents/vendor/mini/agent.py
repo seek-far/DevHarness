@@ -8,7 +8,13 @@
 #   commit   : 8a40ea289725436bb0a84aaf4393326cc631036d
 #   license  : MIT — see ./LICENSE and /THIRD_PARTY_NOTICES.md
 #
-# Everything below this header is byte-identical to the installed package.
+# Everything below this header is byte-identical to the installed package
+# EXCEPT the four lines whitelisted in ./UPSTREAM.md (W2): two calls to
+# `_sdlcma_resume` / `_sdlcma_checkpoint` inside `run()`, plus those two methods
+# defined here as no-ops. Nothing upstream wrote was removed or altered, and the
+# seams do nothing unless `ResumableAgent` (agents/mini_resume.py) overrides
+# them — so this file's behaviour still equals upstream's.
+#
 # Running a formatter over it, or editing it without recording the change in
 # ./UPSTREAM.md, breaks tests/test_vendor_mini_parity.py (that is the point:
 # the parity test is what enforces this file's provenance).
@@ -105,6 +111,7 @@ class DefaultAgent:
             self.model.format_message(role="system", content=self._render_template(self.config.system_template)),
             self.model.format_message(role="user", content=self._render_template(self.config.instance_template)),
         )
+        self._sdlcma_resume()
         while True:
             try:
                 self.step()
@@ -115,9 +122,16 @@ class DefaultAgent:
                 raise
             finally:
                 self.save(self.config.output_path)
+                self._sdlcma_checkpoint()
             if self.messages[-1].get("role") == "exit":
                 break
         return self.messages[-1].get("extra", {})
+
+    def _sdlcma_resume(self) -> None:
+        """SDLCMA W2 seam. Restore a persisted prefix into self before the loop."""
+
+    def _sdlcma_checkpoint(self) -> None:
+        """SDLCMA W2 seam. Persist the current prefix at a loop-iteration boundary."""
 
     def step(self) -> list[dict]:
         """Query the LM, execute actions."""

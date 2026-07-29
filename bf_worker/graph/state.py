@@ -122,6 +122,11 @@ class BugFixState(TypedDict, total=False):
     model_patch: str | None
     swebench_instance_id: str | None   # e.g. "sympy__sympy-22914" (telemetry / RunRecord)
     resolved: bool | None              # SWE-bench resolved verdict; on this path it mirrors CI success
+    # Intra-loop step checkpoint telemetry (W2). None unless BF_STEP_CHECKPOINT
+    # was on for this run — see RunRecord for why that is not a 0.
+    step_resume_count: int | None
+    step_resumed_from_step: int | None
+    step_replayed_command_count: int | None
 
     # ── branch / apply ────────────────────────────────────────────────────────
     fix_branch_name: str | None

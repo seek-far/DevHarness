@@ -217,6 +217,15 @@ class DockerWorkerSpawner:
             "BF_CHECKPOINT_BACKEND": "none",
         }
 
+        # Worker-side knobs that must survive the spawn boundary. Conditional so
+        # an unset variable leaves the container spec byte-identical to before
+        # (same "empty means unchanged" convention as journal_host_path).
+        # MINI_IMPL / BF_STEP_CHECKPOINT select the vendored mini loop and its
+        # intra-loop resume (plan item W2).
+        for var in ("MINI_IMPL", "BF_STEP_CHECKPOINT", "BF_AGENT_CONFIG"):
+            if os.getenv(var):
+                environment[var] = os.environ[var]
+
         if self._ssh_private_key:
             environment["SSH_PRIVATE_KEY"] = self._ssh_private_key
 
@@ -427,8 +436,14 @@ class EcsWorkerSpawner:
             # Docker spawner). "none" == pre-checkpointing behaviour.
             "BF_CHECKPOINT_BACKEND": "none",
         }
-        if os.getenv("BF_AGENT_CONFIG"):
-            environment["BF_AGENT_CONFIG"] = os.environ["BF_AGENT_CONFIG"]
+        # Worker-side knobs that must survive the spawn boundary. Conditional so
+        # an unset variable leaves the container spec byte-identical to before
+        # (same "empty means unchanged" convention as journal_host_path).
+        # MINI_IMPL / BF_STEP_CHECKPOINT select the vendored mini loop and its
+        # intra-loop resume (plan item W2).
+        for var in ("MINI_IMPL", "BF_STEP_CHECKPOINT", "BF_AGENT_CONFIG"):
+            if os.getenv(var):
+                environment[var] = os.environ[var]
 
         run_kwargs = {
             "cluster": self._cluster,
@@ -649,9 +664,14 @@ class K8sJobSpawner:
             # (project invariant #4). Same rationale as Docker/ECS spawners.
             client.V1EnvVar(name="BF_CHECKPOINT_BACKEND", value="none"),
         ]
-        if os.getenv("BF_AGENT_CONFIG"):
-            env.append(client.V1EnvVar(name="BF_AGENT_CONFIG",
-                                       value=os.environ["BF_AGENT_CONFIG"]))
+        # Worker-side knobs that must survive the spawn boundary. Conditional so
+        # an unset variable leaves the container spec byte-identical to before
+        # (same "empty means unchanged" convention as journal_host_path).
+        # MINI_IMPL / BF_STEP_CHECKPOINT select the vendored mini loop and its
+        # intra-loop resume (plan item W2).
+        for var in ("MINI_IMPL", "BF_STEP_CHECKPOINT", "BF_AGENT_CONFIG"):
+            if os.getenv(var):
+                env.append(client.V1EnvVar(name=var, value=os.environ[var]))
         # Surface the journal mount to the worker code path. The worker reads
         # BF_JOURNAL_DIR (see bf_worker/journal.py) and writes record.json
         # under it. Empty journal_host_path → variable not set → journal lives

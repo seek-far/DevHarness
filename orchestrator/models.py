@@ -29,6 +29,14 @@ class OtherEvent:
 
 WARMUP_GRACE = 120  # seconds to wait for first heartbeat before declaring failure
 
+# How many times HealthMonitor will re-spawn one bug's worker before giving up.
+# A cap is not optional: both restart triggers (heartbeat expiry, abnormal
+# process exit) fire again on the replacement, so a worker that dies
+# deterministically — a bad patch that segfaults the test suite, an instance
+# whose container will not start — would otherwise be re-spawned forever,
+# burning LLM budget and a worker slot with nothing to show for it.
+MAX_WORKER_RESTARTS = 3
+
 WorkerStatus = Literal["warmup", "running", "failed", "done"]
 
 

@@ -191,6 +191,20 @@ class RunRecord:
     swebench_instance_id:       str   | None = None
     resolved:                   bool  | None = None
 
+    # ── intra-loop step checkpoint (plan item W2; BF_STEP_CHECKPOINT) ─────────
+    # All None unless the run had step checkpointing on — "never resumed" and
+    # "resume was not enabled" are different facts, and a confident 0 would
+    # conflate them. Additive, so SCHEMA_VERSION is unchanged.
+    #   step_resume_count           how many times the loop restored a prefix
+    #   step_resumed_from_step      loop iteration it continued from
+    #   step_replayed_command_count commands re-issued because the in-container
+    #                               marker said they MIGHT already have run —
+    #                               the measurement of at-least-once execution
+    #                               that was previously invisible
+    step_resume_count:           int  | None = None
+    step_resumed_from_step:      int  | None = None
+    step_replayed_command_count: int  | None = None
+
     # ── construction ─────────────────────────────────────────────────────────
 
     @classmethod
@@ -293,6 +307,9 @@ class RunRecord:
             no_fix_retry_count         = s.get("no_fix_retry_count"),
             swebench_instance_id       = s.get("swebench_instance_id"),
             resolved                   = s.get("resolved"),
+            step_resume_count           = s.get("step_resume_count"),
+            step_resumed_from_step      = s.get("step_resumed_from_step"),
+            step_replayed_command_count = s.get("step_replayed_command_count"),
         )
 
     def to_dict(self) -> dict[str, Any]:

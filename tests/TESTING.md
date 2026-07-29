@@ -28,8 +28,14 @@ source .venv-linux/bin/activate && uv run pytest tests/ -q
 ```
 
 Pure-Python, no Redis/GitLab/network. Pass = all green. Current baseline:
-**396 passed** (~28s). This is the regression floor — run it for any
-non-trivial change before reporting done.
+**1037 passed / 17 skipped** (~145s). This is the regression floor — run it for
+any non-trivial change before reporting done.
+
+> Known pre-existing failure:
+> `test_mini_swe_agent.py::test_mode4_background_knowledge_appends_after_problem_statement`
+> asserts a string ("IANA Language Subtag Registry") that `trial/BCP47.md` does
+> not contain. Predates the vendoring work (reproducible with `git stash -u`);
+> whether to fix the file or the assertion is still open.
 
 Notable pinned contracts (don't break silently):
 - `tests/test_gitlab_saas_env.py` — `gitlab_saas` does NO host rewrite +
@@ -38,6 +44,27 @@ Notable pinned contracts (don't break silently):
 - `tests/test_parse_branch.py` — orchestrator parser recognises both the
   legacy `auto/bug_..-patch_..` and the real
   `auto/bf/{bug_id}-{base_commit[:8]}` fix-branch names.
+
+### 1b. Docker-backed resume tests (opt-in, default skipped)
+
+```bash
+BF_TEST_DOCKER=1 uv run pytest tests/test_mini_resume_docker.py -v
+```
+
+Covers the W2 intra-loop checkpoint against **real containers**: re-attach after
+the owning process is gone, a dead container purging the agent records with it,
+the in-container step marker, and — the load-bearing one — a real `kill -9` of a
+child process *while a command is running*, then a second process that
+re-attaches, notices the ambiguous half-step, replays that command and finishes.
+Only that shape can demonstrate the premise the whole feature rests on: mini's
+container cleanup hangs off `__del__`, so SIGKILL leaves the container alive. An
+in-process exception would run `__del__` and prove nothing.
+
+Requires a local image with bash (`BF_TEST_DOCKER_IMAGE`, default
+`redis:latest`) — it is **never pulled**, since one of the hosts these run on is
+behind the CN network. Takes ~70s, most of it the deliberate 60s command the
+kill lands inside. Leaves no containers behind; check with
+`docker ps -a --filter name=minisweagent-`.
 
 ## 2. Integration test (full pipeline, in-process)
 

@@ -59,32 +59,66 @@ _VENDORED = [
 
 # ── L1: source parity ────────────────────────────────────────────────────────
 
-def _strip_vendor_header(text: str) -> str:
-    """Remove the vendor header block — the ONLY whitelisted difference.
+# Whitelist entry 2 (W2): the four lines added to agent.py — two hook call
+# sites inside run(), and the two no-op methods they call. Removing exactly
+# these must reconstruct upstream byte for byte; nothing upstream wrote was
+# removed or altered, which is why every rule here is a pure deletion.
+#
+# This tuple IS the authoritative statement of "what we changed relative to
+# upstream". Keep it in sync with vendor/mini/UPSTREAM.md.
+_W2_SEAMS = {
+    "agent.py": (
+        "        self._sdlcma_resume()\n",
+        "                self._sdlcma_checkpoint()\n",
+        '\n    def _sdlcma_resume(self) -> None:\n'
+        '        """SDLCMA W2 seam. Restore a persisted prefix into self before the loop."""\n'
+        '\n    def _sdlcma_checkpoint(self) -> None:\n'
+        '        """SDLCMA W2 seam. Persist the current prefix at a loop-iteration boundary."""\n',
+    ),
+    "docker_env.py": (),   # deliberately empty — the env is subclassed, not edited
+}
 
-    When W2 starts modifying the vendored loop, new whitelist entries get
-    normalised here, and this function becomes the authoritative statement of
-    "what we changed relative to upstream". Keep it in sync with
-    vendor/mini/UPSTREAM.md.
-    """
+
+def _strip_vendor_header(text: str) -> str:
     assert text.startswith(_HEADER_BEGIN), "vendored file must start with the vendor header"
     _, _, body = text.partition(_HEADER_END)
     assert body, "vendor header is missing its (end) marker"
     return body
 
 
+def _revert_whitelisted(filename: str, body: str) -> str:
+    """Undo the whitelisted edits, so what remains must equal upstream.
+
+    Each rule must match EXACTLY ONCE. A rule that stops matching means someone
+    reformatted or moved a seam; a rule that matches twice means a seam was
+    duplicated. Both are exactly the kind of drift this test exists to catch,
+    so neither is tolerated.
+    """
+    for snippet in _W2_SEAMS[filename]:
+        count = body.count(snippet)
+        assert count == 1, (
+            f"whitelisted W2 seam appears {count}x in vendored {filename} (expected 1x):\n"
+            f"{snippet!r}\n"
+            f"Update the seam, or update _W2_SEAMS + vendor/mini/UPSTREAM.md together."
+        )
+        body = body.replace(snippet, "", 1)
+    return body
+
+
 @pytest.mark.parametrize("filename,upstream_module", _VENDORED)
 def test_vendored_source_matches_upstream(filename, upstream_module):
     upstream_path = Path(inspect.getsourcefile(importlib.import_module(upstream_module)))
-    ours = _strip_vendor_header((_VENDOR_DIR / filename).read_text(encoding="utf-8"))
+    ours = _revert_whitelisted(
+        filename, _strip_vendor_header((_VENDOR_DIR / filename).read_text(encoding="utf-8"))
+    )
     theirs = upstream_path.read_text(encoding="utf-8")
 
     assert ours == theirs, (
         f"vendored {filename} has drifted from {upstream_module}.\n"
         f"Either an edit/formatter touched it (record the change in "
-        f"bf_worker/agents/vendor/mini/UPSTREAM.md and add a normalisation "
-        f"rule to _strip_vendor_header), or upstream was upgraded (re-sync "
-        f"per UPSTREAM.md and update the pin)."
+        f"bf_worker/agents/vendor/mini/UPSTREAM.md and add a rule to "
+        f"_W2_SEAMS), or upstream was upgraded (re-sync per UPSTREAM.md "
+        f"and update the pin)."
     )
 
 
@@ -160,6 +194,50 @@ def test_explicit_environment_class_still_wins(monkeypatch):
         {"instance_id": "astropy__astropy-1"},
     )
     assert captured["environment_class"] == "local"
+
+
+def test_minis_own_docker_default_is_replaced(monkeypatch):
+    """`environment_class: docker` from mini's config must NOT pin the choice.
+
+    mini's builtin benchmarks/swebench.yaml sets it explicitly, so treating it
+    as a caller decision left ver99 and the batch runner on the upstream
+    environment regardless of MINI_IMPL — invisible while the vendored copy was
+    byte-identical, and fatal once the subclass carries behaviour (W2 resume).
+    """
+    monkeypatch.setenv("MINI_IMPL", "vendored")
+    captured = {}
+    monkeypatch.setattr("minisweagent.environments.get_environment",
+                        lambda config: captured.update(config) or object())
+    M.build_sb_environment(
+        {"environment": {"environment_class": "docker", "cwd": "/testbed"}},
+        {"instance_id": "astropy__astropy-1"},
+    )
+    assert captured["environment_class"] == M._VENDORED_DOCKER_ENV_CLASS
+    assert captured["cwd"] == "/testbed", "the rest of the env config must survive"
+    # Load-bearing: the image is assigned by matching the environment class,
+    # and the first version of that check compared against the literal string
+    # "docker". Swapping in a dotted path silently skipped it, and the failure
+    # surfaced as pydantic's "image Field required" from inside the environment
+    # constructor — nowhere near the cause. Asserting only the class name here
+    # is what let that through.
+    assert captured["image"].endswith("astropy_1776_astropy-1:latest")
+
+
+@pytest.mark.parametrize("impl,expected", [
+    (None, "docker"),
+    ("vendored", M._VENDORED_DOCKER_ENV_CLASS),
+])
+def test_image_is_set_for_every_docker_family_class(monkeypatch, impl, expected):
+    """Whichever docker-family class is selected, the image must reach it."""
+    monkeypatch.delenv("MINI_IMPL", raising=False)
+    if impl:
+        monkeypatch.setenv("MINI_IMPL", impl)
+    captured = {}
+    monkeypatch.setattr("minisweagent.environments.get_environment",
+                        lambda config: captured.update(config) or object())
+    M.build_sb_environment({"environment": {}}, {"instance_id": "sympy__sympy-1"})
+    assert captured["environment_class"] == expected
+    assert "image" in captured, f"{expected} got no image"
 
 
 # ── L2: behavioural parity ───────────────────────────────────────────────────

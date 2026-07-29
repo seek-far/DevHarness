@@ -202,8 +202,19 @@ def main() -> None:
                               "4=mode 0 + per-instance background knowledge."))
     parser.add_argument("--run-id", default=None, help="Run id (default: timestamp). Reuse to resume.")
     parser.add_argument("--redo-existing", action="store_true", help="Re-run instances already in preds.json.")
+    parser.add_argument("--step-checkpoint", choices=["none", "file"], default="none",
+                        help="Intra-loop step checkpoint (plan item W2). Default none. "
+                             "Requires MINI_IMPL=vendored. Records key on the instance id, "
+                             "which repeats across batches, so this is opt-in per run rather "
+                             "than inherited from the environment.")
     parser.add_argument("--no-grade", action="store_true", help="Skip harness grading (produce patches only).")
     args = parser.parse_args()
+
+    # Set explicitly, never merely defaulted: an ambient BF_STEP_CHECKPOINT
+    # inherited from the shell would silently let a re-run of the same instance
+    # resume an earlier batch's loop state (bug_id == instance_id here), which
+    # is the eval-contamination hazard of project invariant #4 in a new place.
+    os.environ["BF_STEP_CHECKPOINT"] = args.step_checkpoint
 
     instances = select_instances(
         args.subset, args.split, ids=[s for s in args.instances.split(",") if s.strip()],

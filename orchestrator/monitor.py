@@ -5,6 +5,7 @@ import time
 from redis.asyncio import Redis
 
 from .metrics import ACTIVE_WORKERS, STREAM_PENDING, WORKER_RESTARTS
+from .models import MAX_WORKER_RESTARTS
 from .registry import WorkerRegistry
 from .spawner import WorkerSpawner
 
@@ -81,8 +82,28 @@ class HealthMonitor:
                 entry.process.reload_status()
 
             if entry.process.returncode is not None:
-                logger.info(f"[Monitor] bug_id={bug_id} process exited (rc={entry.process.returncode}), marking done")
-                self._registry.update_status(bug_id, "done")
+                rc = entry.process.returncode
+                completed_key = self._completed_key_tpl.format(bug_id=bug_id)
+                # rc == 0, or the worker's own completion key, means it ran to
+                # the end and there is nothing to recover. Anything else is a
+                # death: SIGKILL from the OOM killer or an operator (rc < 0), or
+                # a crash before the worker could finish (rc > 0). Those are
+                # exactly the cases restart exists for — treating every exit as
+                # "done" (the behaviour until 2026-07-30) meant an OOM-killed
+                # worker was silently abandoned, which is the failure mode the
+                # multi-node plan expects most (several ver99 workers landing on
+                # one node). Discovered while testing W2's intra-loop resume: a
+                # deliberately SIGKILLed worker was never re-spawned.
+                if rc == 0 or await self._redis.exists(completed_key):
+                    logger.info(f"[Monitor] bug_id={bug_id} process exited (rc={rc}), marking done")
+                    self._registry.update_status(bug_id, "done")
+                else:
+                    logger.warning(
+                        f"[Monitor] bug_id={bug_id} process died (rc={rc}) without "
+                        f"completing, restarting"
+                    )
+                    WORKER_RESTARTS.labels(cause="process_died").inc()
+                    await self._restart(bug_id)
                 continue
 
             if ttl > 0:
@@ -120,6 +141,19 @@ class HealthMonitor:
 
     async def _restart(self, bug_id: str) -> None:
         entry = self._registry.get(bug_id)
+        # The cap lives here rather than at either call site so both triggers
+        # (heartbeat expiry, abnormal exit) are bounded by one rule. Until the
+        # exit-code fix above, only the heartbeat path could restart and it was
+        # unbounded — a worker that reliably dies mid-run would loop forever.
+        if entry.restart_count >= MAX_WORKER_RESTARTS:
+            logger.error(
+                "[Monitor] bug_id=%s exhausted %d restarts — giving up. The worker "
+                "is dying deterministically; restarting again would only re-spend "
+                "the same budget.",
+                bug_id, MAX_WORKER_RESTARTS,
+            )
+            self._registry.update_status(bug_id, "failed")
+            return
         try:
             await self._spawner.restart(
                 bug_id, entry.project_id, entry.project_web_url, entry.job_id,

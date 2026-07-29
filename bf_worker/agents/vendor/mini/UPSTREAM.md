@@ -56,12 +56,35 @@ Both are upstream implementation details with no extension seam, hence the copy.
 Everything the parity test normalizes away before comparing. Keep this list and
 the test's normalization rules in sync — the test is the source of truth.
 
-| # | Difference | Rationale | Added |
-|---|---|---|---|
-| 1 | The `# === SDLCMA VENDOR HEADER (begin) ===` … `(end) ===` block at the top of each file | Provenance marker; stripped by the parity test | vendoring (W1) |
+| # | File | Difference | Rationale | Added |
+|---|---|---|---|---|
+| 1 | both | The `# === SDLCMA VENDOR HEADER (begin) ===` … `(end) ===` block at the top | Provenance marker; stripped by the parity test | vendoring (W1) |
+| 2 | `agent.py` | Four **added** lines: `self._sdlcma_resume()` after the seed messages in `run()`; `self._sdlcma_checkpoint()` in the loop's `finally`, next to `save()`; and the two methods themselves, defined here with empty bodies | The two missing seams for resumable runs. Everything else about W2 lives in `agents/mini_resume.py`, which subclasses this file — see below | W2 |
 
-Below the header, the files are **byte-identical** to upstream. No import
-rewriting was needed.
+`docker_env.py` remains **byte-identical** below the header: `_start_container()`
+and `cleanup()` are ordinary methods reached through `self`, so
+`agents/mini_resume_env.py` overrides them from a subclass. It needs no
+vendored change at all.
+
+### Why entry 2 is only four lines
+
+The resume logic itself is NOT here. `ResumableAgent` (in
+`bf_worker/agents/mini_resume.py`) subclasses this file and overrides the two
+hooks; this file only gains the two *call sites*, which is precisely what a
+subclass cannot add because they sit inside `run()`'s body.
+
+Consequences worth stating, because they are what keeps the parity story cheap:
+
+- **No upstream line was removed or modified** — the diff is purely additive.
+- With the hooks left as the no-ops defined here, this file behaves **exactly**
+  like upstream, so W1's L1/L2/L3 equivalence results still hold for
+  `MINI_IMPL=vendored` with `BF_STEP_CHECKPOINT` unset.
+- `_sdlcma_checkpoint()` sits in `finally`, i.e. it also runs when `step()`
+  raised. That is deliberate: `InterruptAgentFlow` (`Submitted`,
+  `LimitsExceeded`, …) is caught by the `except` clause *before* `finally`, so
+  the terminal `role="exit"` message is already in `self.messages` and gets
+  recorded. Anything overriding these hooks MUST swallow its own exceptions —
+  an exception raised inside `finally` would mask the agent's real one.
 
 ## Known behavioural differences from upstream (not code differences)
 

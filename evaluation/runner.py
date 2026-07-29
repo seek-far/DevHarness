@@ -12,6 +12,7 @@ shape for every cell, ready for metrics aggregation.
 from __future__ import annotations
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -113,6 +114,14 @@ def run_sweep(
     run_id = run_id or datetime.now(timezone.utc).strftime("run_%Y%m%dT%H%M%SZ")
     run_dir = _RUNS_ROOT / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Twin of the checkpointer=None rule in make_agent, for the same reason.
+    # The intra-loop step checkpoint (BF_STEP_CHECKPOINT, plan item W2) is keyed
+    # on bug_id, which in evaluation is the *fixture id* — identical across
+    # specs, sweeps and parallel processes. An inherited BF_STEP_CHECKPOINT from
+    # the ambient environment would let one cell resume another's loop state.
+    # Eval cells are independent fresh trials; resume is meaningless here.
+    os.environ["BF_STEP_CHECKPOINT"] = "none"
 
     summary: list[dict] = []
 

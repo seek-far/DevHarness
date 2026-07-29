@@ -51,6 +51,10 @@ _MINI_TELEMETRY_KEYS = (
     "total_llm_wallclock_s",
     "max_input_tokens",
     "cost_source",
+    # W2 resume telemetry — present only when BF_STEP_CHECKPOINT was on.
+    "step_resume_count",
+    "step_resumed_from_step",
+    "step_replayed_command_count",
 )
 
 

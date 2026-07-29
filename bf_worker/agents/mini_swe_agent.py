@@ -60,6 +60,14 @@ _BACKGROUND_KNOWLEDGE_BY_INSTANCE = {
 _MINI_IMPL_UPSTREAM = "upstream"
 _MINI_IMPL_VENDORED = "vendored"
 _VENDORED_DOCKER_ENV_CLASS = "agents.vendor.mini.docker_env.DockerEnvironment"
+_RESUMABLE_DOCKER_ENV_CLASS = "agents.mini_resume_env.ResumableDockerEnvironment"
+
+# Environment classes that take a bare image name (as opposed to the
+# "docker://"-prefixed form singularity/contree want). Ours are all docker
+# under the hood, so they belong here — see build_sb_environment.
+_DOCKER_FAMILY_ENV_CLASSES = (
+    "docker", "swerex_modal", _VENDORED_DOCKER_ENV_CLASS, _RESUMABLE_DOCKER_ENV_CLASS,
+)
 
 
 def _mini_impl() -> str:
@@ -80,14 +88,36 @@ def _mini_impl() -> str:
     return impl
 
 
+def _resume_enabled() -> bool:
+    """Whether intra-loop step checkpointing is on (plan item W2).
+
+    Resume requires the vendored loop, because upstream's `run()` has no seam to
+    restore a prefix into. Mixing the two is fatal rather than a silent no-op:
+    "the flag looked set but wasn't" is the exact failure this project has
+    already paid for twice, and the verdict here costs a 100-instance sweep.
+    """
+    backend = (os.environ.get("BF_STEP_CHECKPOINT") or "none").strip().lower()
+    if backend == "none":
+        return False
+    if _mini_impl() != _MINI_IMPL_VENDORED:
+        raise ValueError(
+            f"BF_STEP_CHECKPOINT={backend!r} requires MINI_IMPL={_MINI_IMPL_VENDORED!r} "
+            f"(resume support lives in the vendored loop; upstream offers no seam for it)"
+        )
+    return True
+
+
 def _default_agent_class() -> type:
-    """The `DefaultAgent` class to instantiate, per MINI_IMPL.
+    """The `DefaultAgent` class to instantiate, per MINI_IMPL / BF_STEP_CHECKPOINT.
 
     Every construction site in this module goes through here — including the
     per-phase ones in the staged workflows (modes 1/3), which construct the
     class directly. Missing one would leave that workflow mode silently
     running the other implementation.
     """
+    if _resume_enabled():
+        from agents.mini_resume import ResumableAgent
+        return ResumableAgent
     if _mini_impl() == _MINI_IMPL_VENDORED:
         from agents.vendor.mini.agent import DefaultAgent
     else:
@@ -102,6 +132,8 @@ def _default_environment_class() -> str:
     as a dotted path, so pointing it at our vendored class needs no change to
     mini and mirrors how mode 2 swaps in its model class.
     """
+    if _resume_enabled():
+        return _RESUMABLE_DOCKER_ENV_CLASS
     return (
         _VENDORED_DOCKER_ENV_CLASS
         if _mini_impl() == _MINI_IMPL_VENDORED
@@ -123,7 +155,8 @@ def swebench_docker_image_name(instance: dict) -> str:
     return f"docker.io/swebench/sweb.eval.x86_64.{iid}:latest".lower()
 
 
-def build_sb_environment(mini_config: dict, instance: dict) -> Any:
+def build_sb_environment(mini_config: dict, instance: dict, *,
+                         resume_key: str = "", run_fingerprint: str = "") -> Any:
     """Build the per-instance mini Environment (docker by default).
 
     Reimplements mini's get_sb_environment against mini's CORE env layer
@@ -134,10 +167,17 @@ def build_sb_environment(mini_config: dict, instance: dict) -> Any:
     from minisweagent.environments import get_environment
 
     env_config = dict(mini_config.get("environment") or {})
-    # setdefault, not assignment: an explicit environment_class from the caller
-    # still wins (unit tests pass "local" so CI needs no docker), and the
-    # default itself is what MINI_IMPL switches.
-    env_config.setdefault("environment_class", _default_environment_class())
+    # `"docker"` counts as "unspecified", not as a choice. mini's builtin
+    # benchmarks/swebench.yaml SETS `environment_class: docker` explicitly, so a
+    # plain setdefault could never replace it — which silently pinned both ver99
+    # and the batch runner to the upstream environment no matter what MINI_IMPL
+    # said. Harmless while the vendored copy was byte-identical; fatal for
+    # resume, which lives entirely in the subclass. Any OTHER value is a real
+    # decision by the caller and is left alone — unit tests pass "local" so CI
+    # needs no docker.
+    ec = env_config.get("environment_class")
+    if not ec or ec == "docker":
+        env_config["environment_class"] = _default_environment_class()
     # Determinism env applied to EVERY command mini runs in the container. This
     # removes the two non-normalizable sources of tool-output drift found by the
     # cache-miss diagnostics (docs/swebench.md): PYTHONUNBUFFERED makes stdout
@@ -154,9 +194,28 @@ def build_sb_environment(mini_config: dict, instance: dict) -> Any:
     env_env.setdefault("PYTHONUNBUFFERED", "1")
     env_env.setdefault("PYTHONHASHSEED", "0")
     env_config["env"] = env_env
+    # Resume plumbing (W2). Both empty ⇒ the fields stay at their "" defaults,
+    # which is what makes the ResumableDockerEnvironment inert if it is ever
+    # selected without a run key.
+    if resume_key:
+        env_config["sdlcma_resume_key"] = resume_key
+        env_config["sdlcma_run_fingerprint"] = run_fingerprint
+    # How long the container survives an unattended death — i.e. the resume
+    # window. Left at mini's 2h default unless an operator opts in, because a
+    # longer window is paid for by the runs that never come back (they hold
+    # disk and memory for that whole time, and ls4900 runs 12-15 at once).
+    # ver99 reaches this only through the env var: unlike the batch/single
+    # entry points it has no `--config` overlay to layer.
+    if (timeout := os.environ.get("BF_MINI_CONTAINER_TIMEOUT")):
+        env_config.setdefault("container_timeout", timeout)
     image = swebench_docker_image_name(instance)
     ec = env_config["environment_class"]
-    if ec in ("docker", "swerex_modal"):
+    # Match on the docker FAMILY, not on the literal string "docker": once the
+    # class above is swapped for one of ours, `ec` is a dotted path, and a
+    # string comparison silently skips the image assignment — which surfaces as
+    # pydantic's "image Field required" from deep inside the environment
+    # constructor, nowhere near the cause.
+    if ec in _DOCKER_FAMILY_ENV_CLASSES:
         env_config["image"] = image
     elif ec in ("singularity", "contree"):
         env_config["image"] = "docker://" + image
@@ -329,6 +388,28 @@ def _task_with_background_knowledge(instance: dict, task: str) -> tuple[str, dic
     }
 
 
+def _resume_totals(agents: list) -> dict:
+    """Aggregate resume telemetry across the run's agents (W2).
+
+    Returns {} when nothing was resume-bound, so a run with the feature off
+    leaves these RunRecord fields None rather than reporting a confident 0 —
+    "never resumed" and "resume was not even on" are different facts, and this
+    project's convention is that an unknown is None.
+    """
+    from agents.mini_resume import resume_stats
+
+    stats = [s for s in (resume_stats(a) for a in agents) if s]
+    if not stats:
+        return {}
+    from_steps = [s["step_resumed_from_step"] for s in stats
+                  if s.get("step_resumed_from_step") is not None]
+    return {
+        "step_resume_count": sum(s["step_resume_count"] for s in stats),
+        "step_resumed_from_step": max(from_steps) if from_steps else None,
+        "step_replayed_command_count": sum(s["step_replayed_command_count"] for s in stats),
+    }
+
+
 def _phase_extra(agent1: Any, agent2: Any, handoff: str) -> dict:
     return {
         "phase1_handoff": handoff,
@@ -391,6 +472,12 @@ class MiniSweAgent(Agent):
             "mini_swe_agent" if self._workflow_mode == 0
             else f"mini_swe_agent_wf{self._workflow_mode}"
         )
+        # Resume state (W2) — populated per fix() call, inert when the feature
+        # is off so agents built outside fix() (unit tests) behave as before.
+        self._store = None
+        self._run_key = ""
+        self._run_fp = ""
+        self._agent_seq = 0
 
     def fix(self, bug_input: BugInput) -> FixOutput:
         instance = (bug_input.metadata or {}).get("swebench_instance") or {}
@@ -403,22 +490,117 @@ class MiniSweAgent(Agent):
         if self._workflow_mode == 4:
             task, extra = _task_with_background_knowledge(instance, task)
 
+        self._init_resume(bug_input, instance, task)
+
         # Build model + environment ONCE. In phased mode both phases share this
         # environment, so the docker container persists across phases — the repro
         # script and edits carry forward even though the conversation is dropped.
         model = self._model if self._model is not None else self._build_model()
+        owns_env = self._env is None
         env = self._env if self._env is not None else self._build_env(instance)
 
-        if self._workflow_mode == 1:
-            return self._run_phased(bug_input, instance, task, model, env)
-        if self._workflow_mode == 3:
-            return self._run_phased_v3(bug_input, instance, task, model, env)
-        # mode 0 (default), mode 2, and mode 4 share the single-loop path.
-        # mode 2 adds stage reporting; mode 4 has already appended background
-        # knowledge to `task` when configured for this instance.
-        return self._run_single(bug_input, instance, task, model, env,
-                                stage_report=(self._workflow_mode == 2),
-                                extra=extra)
+        try:
+            if self._workflow_mode == 1:
+                result = self._run_phased(bug_input, instance, task, model, env)
+            elif self._workflow_mode == 3:
+                result = self._run_phased_v3(bug_input, instance, task, model, env)
+            else:
+                # mode 0 (default), mode 2, and mode 4 share the single-loop
+                # path. mode 2 adds stage reporting; mode 4 has already appended
+                # background knowledge to `task` for this instance.
+                result = self._run_single(bug_input, instance, task, model, env,
+                                          stage_report=(self._workflow_mode == 2),
+                                          extra=extra)
+        except BaseException:
+            # Abnormal exit — a shutdown signal turned into SystemExit, or a
+            # crash outside the loop's own error handling. This is precisely the
+            # case resume exists for, so the container and the checkpoint must
+            # SURVIVE. (A `finally` here would delete them on the way out, i.e.
+            # exactly when they are about to be needed.)
+            raise
+        # Returning normally — fixed, no_fix or error — means the run finished
+        # in this process, so nothing will ever want the container back. The
+        # only path that keeps it is dying from outside, which never reaches
+        # here. Injected environments are the caller's to dispose of; the
+        # records are ours either way.
+        if owns_env:
+            self._release_env(env)
+        self._purge_resume_records()
+        return result
+
+    # ── resume plumbing (W2) ─────────────────────────────────────────────────
+
+    def _init_resume(self, bug_input: BugInput, instance: dict, task: str) -> None:
+        self._store = None
+        self._run_key = bug_input.bug_id or ""
+        self._run_fp = ""
+        self._agent_seq = 0
+        if not _resume_enabled() or not self._run_key:
+            return
+        from services.step_checkpoint import build_step_checkpoint_store, run_fingerprint
+        from agents.mini_resume import ambiguous_policy
+
+        # Validate the knobs here, once, before any work: deep inside the loop
+        # a bad value would be swallowed by the resume hook's own exception
+        # guard and silently degrade to "no resume".
+        ambiguous_policy()
+        self._store = build_step_checkpoint_store()
+        # Identity of "the thing we are about to run". The environment checks it
+        # before attaching, so re-running the same instance (the batch path keys
+        # on instance_id, which repeats by construction) gets a clean container
+        # rather than one a previous run had already edited.
+        self._run_fp = run_fingerprint(
+            instance_id=instance.get("instance_id"),
+            workflow_mode=self._workflow_mode,
+            model_name=(self._mini_config.get("model") or {}).get("model_name"),
+            agent_config=self._mini_config.get("agent") or {},
+            task=task,
+        )
+
+    def _purge_resume_records(self) -> None:
+        """Drop this run's checkpoint once it has finished in-process.
+
+        Without it a later run under the same key could find a stale record.
+        The fingerprint and container-liveness checks would both reject it, but
+        deleting on completion is the cheap first gate, and it keeps the
+        checkpoint directory from accumulating finished runs.
+        """
+        if self._store is None or not self._run_key:
+            return
+        try:
+            self._store.purge_run(self._run_key)
+        except Exception:
+            logger.warning("failed to purge step checkpoint for %s", self._run_key, exc_info=True)
+
+    def _release_env(self, env: Any) -> None:
+        release = getattr(env, "release", None)
+        if release is None:
+            return
+        try:
+            release()
+        except Exception:
+            logger.warning("failed to release mini environment", exc_info=True)
+
+    def _construct_agent(self, model: Any, env: Any, cfg: dict) -> Any:
+        """The single construction site for mini agents.
+
+        All five call sites route through here so resume binding cannot be
+        forgotten for one workflow mode — the same reason W1 funnelled the class
+        lookup through `_default_agent_class()`.
+        """
+        agent = _default_agent_class()(model, env, **cfg)
+        ordinal, self._agent_seq = self._agent_seq, self._agent_seq + 1
+        if self._store is not None:
+            from services.step_checkpoint import run_fingerprint
+            from agents.mini_resume import bind_resume
+
+            bind_resume(
+                agent, store=self._store, run_key=self._run_key,
+                name=f"agent-{ordinal}",
+                fingerprint=run_fingerprint(run=self._run_fp, ordinal=ordinal),
+                env=env,
+            )
+        return agent
 
     # ── mode 0 / mode 2 / mode 4: single ReAct loop ───────────────────────────
 
@@ -474,7 +656,6 @@ class MiniSweAgent(Agent):
     # ── mode 1: two-phase waterfall (Investigate → Solve) ─────────────────────
 
     def _run_phased(self, bug_input, instance, task, model, env) -> FixOutput:
-        DefaultAgent = _default_agent_class()
         from agents.mini_phases import (
             INVESTIGATE_INSTANCE_TEMPLATE, INVESTIGATE_STEP_LIMIT, INVESTIGATE_SYSTEM_TEMPLATE,
             SOLVE_INSTANCE_TEMPLATE, SOLVE_STEP_LIMIT, SOLVE_SYSTEM_TEMPLATE,
@@ -489,7 +670,7 @@ class MiniSweAgent(Agent):
             base_agent, system_template=INVESTIGATE_SYSTEM_TEMPLATE,
             instance_template=INVESTIGATE_INSTANCE_TEMPLATE, step_limit=INVESTIGATE_STEP_LIMIT,
             output_path=self._traj_path(instance, "phase1"))
-        agent1 = DefaultAgent(model, env, **p1_cfg)
+        agent1 = self._construct_agent(model, env, p1_cfg)
         try:
             info1 = agent1.run(task)
         except Exception as exc:
@@ -512,7 +693,7 @@ class MiniSweAgent(Agent):
             base_agent, system_template=SOLVE_SYSTEM_TEMPLATE,
             instance_template=SOLVE_INSTANCE_TEMPLATE, step_limit=SOLVE_STEP_LIMIT,
             output_path=self._traj_path(instance, "phase2"))
-        agent2 = DefaultAgent(model, env, **p2_cfg)
+        agent2 = self._construct_agent(model, env, p2_cfg)
         try:
             info2 = agent2.run(task, handoff=handoff)
         except Exception as exc:
@@ -542,7 +723,6 @@ class MiniSweAgent(Agent):
     # ── mode 3: two-phase with bounded back-edge (Investigate ⇄ Solve) ────────
 
     def _run_phased_v3(self, bug_input, instance, task, model, env) -> FixOutput:
-        DefaultAgent = _default_agent_class()
         from agents.mini_phases import (
             INVESTIGATE_INSTANCE_TEMPLATE_V3, INVESTIGATE_STEP_LIMIT, INVESTIGATE_SYSTEM_TEMPLATE,
             MAX_BACK_EDGES, REINVEST_MARKER, SOLVE_INSTANCE_TEMPLATE_V3, SOLVE_STEP_LIMIT,
@@ -572,7 +752,7 @@ class MiniSweAgent(Agent):
                 base_agent, system_template=INVESTIGATE_SYSTEM_TEMPLATE,
                 instance_template=INVESTIGATE_INSTANCE_TEMPLATE_V3, step_limit=INVESTIGATE_STEP_LIMIT,
                 output_path=self._traj_path(instance, f"investigate{rnd}"))
-            agent_i = DefaultAgent(model, env, **i_cfg)
+            agent_i = self._construct_agent(model, env, i_cfg)
             agents.append(agent_i)
             try:
                 info_i = agent_i.run(task, reinvest_request=reinvest, prior_handoff=prior_handoff)
@@ -586,7 +766,7 @@ class MiniSweAgent(Agent):
                 base_agent, system_template=SOLVE_SYSTEM_TEMPLATE,
                 instance_template=SOLVE_INSTANCE_TEMPLATE_V3, step_limit=SOLVE_STEP_LIMIT,
                 output_path=self._traj_path(instance, f"solve{rnd}"))
-            agent_s = DefaultAgent(model, env, **s_cfg)
+            agent_s = self._construct_agent(model, env, s_cfg)
             agents.append(agent_s)
             try:
                 info_s = agent_s.run(task, handoff=handoff, can_reinvestigate=can_reinvestigate,
@@ -641,6 +821,7 @@ class MiniSweAgent(Agent):
         if total_cost > 0:
             state["total_cost_usd"] = total_cost
             state["cost_source"] = "mini_litellm"
+        state.update(_resume_totals(agents))
         if extra:
             state.update(extra)
         return state
@@ -658,16 +839,19 @@ class MiniSweAgent(Agent):
     def _build_env(self, instance: dict) -> Any:
         # Resolve the per-instance SWE-bench docker image and start the
         # container (see build_sb_environment — mini's CORE env layer, not its
-        # CLI module).
-        return build_sb_environment(self._mini_config, instance)
+        # CLI module). With resume on, this may attach to a container left
+        # behind by a killed worker instead of starting a new one.
+        return build_sb_environment(
+            self._mini_config, instance,
+            resume_key=self._run_key if self._store is not None else "",
+            run_fingerprint=self._run_fp,
+        )
 
     def _build_mini_agent(self, model: Any, env: Any, output_path: Path | None = None,
                           instance_template_suffix: str = "") -> Any:
-        DefaultAgent = _default_agent_class()
-
         cfg = dict(self._mini_config.get("agent") or {})
         if output_path is not None:
             cfg["output_path"] = output_path
         if instance_template_suffix:
             cfg["instance_template"] = (cfg.get("instance_template") or "") + instance_template_suffix
-        return DefaultAgent(model, env, **cfg)
+        return self._construct_agent(model, env, cfg)
