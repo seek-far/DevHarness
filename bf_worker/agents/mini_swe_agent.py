@@ -47,6 +47,68 @@ _BACKGROUND_KNOWLEDGE_BY_INSTANCE = {
 }
 
 
+# ── mini implementation selector (MINI_IMPL) ─────────────────────────────────
+# Which copy of mini's ReAct loop / docker environment to run:
+#   "upstream" (default) — the installed minisweagent package, i.e. exactly
+#                          what ran before vendoring existed.
+#   "vendored"           — bf_worker/agents/vendor/mini/, our byte-identical
+#                          copy, which is the only place W2's resume support
+#                          can be added (upstream offers no seam for it).
+# Read per call rather than cached at import so tests can monkeypatch the env
+# var, and so a spawned worker picks it up from its environment like every
+# other BF_*/MSWEA_* knob.
+_MINI_IMPL_UPSTREAM = "upstream"
+_MINI_IMPL_VENDORED = "vendored"
+_VENDORED_DOCKER_ENV_CLASS = "agents.vendor.mini.docker_env.DockerEnvironment"
+
+
+def _mini_impl() -> str:
+    """Return the selected implementation, validating it.
+
+    An unrecognised value is fatal on purpose. Silently falling back to
+    upstream would let a run that was *meant* to exercise the vendored code
+    quietly measure the wrong thing — and the expensive verdicts here are
+    100-instance replay sweeps, where "the flag looked set but wasn't" costs
+    hours before anyone notices.
+    """
+    impl = (os.environ.get("MINI_IMPL") or _MINI_IMPL_UPSTREAM).strip().lower()
+    if impl not in (_MINI_IMPL_UPSTREAM, _MINI_IMPL_VENDORED):
+        raise ValueError(
+            f"MINI_IMPL={impl!r} is not valid "
+            f"(expected {_MINI_IMPL_UPSTREAM!r} or {_MINI_IMPL_VENDORED!r})"
+        )
+    return impl
+
+
+def _default_agent_class() -> type:
+    """The `DefaultAgent` class to instantiate, per MINI_IMPL.
+
+    Every construction site in this module goes through here — including the
+    per-phase ones in the staged workflows (modes 1/3), which construct the
+    class directly. Missing one would leave that workflow mode silently
+    running the other implementation.
+    """
+    if _mini_impl() == _MINI_IMPL_VENDORED:
+        from agents.vendor.mini.agent import DefaultAgent
+    else:
+        from minisweagent.agents.default import DefaultAgent
+    return DefaultAgent
+
+
+def _default_environment_class() -> str:
+    """The `environment_class` spec mini's `get_environment` should resolve.
+
+    Upstream's `get_environment_class` falls back to treating an unknown spec
+    as a dotted path, so pointing it at our vendored class needs no change to
+    mini and mirrors how mode 2 swaps in its model class.
+    """
+    return (
+        _VENDORED_DOCKER_ENV_CLASS
+        if _mini_impl() == _MINI_IMPL_VENDORED
+        else "docker"
+    )
+
+
 def swebench_docker_image_name(instance: dict) -> str:
     """Resolve the SWE-bench evaluation docker image for an instance.
 
@@ -72,7 +134,10 @@ def build_sb_environment(mini_config: dict, instance: dict) -> Any:
     from minisweagent.environments import get_environment
 
     env_config = dict(mini_config.get("environment") or {})
-    env_config.setdefault("environment_class", "docker")
+    # setdefault, not assignment: an explicit environment_class from the caller
+    # still wins (unit tests pass "local" so CI needs no docker), and the
+    # default itself is what MINI_IMPL switches.
+    env_config.setdefault("environment_class", _default_environment_class())
     # Determinism env applied to EVERY command mini runs in the container. This
     # removes the two non-normalizable sources of tool-output drift found by the
     # cache-miss diagnostics (docs/swebench.md): PYTHONUNBUFFERED makes stdout
@@ -409,7 +474,7 @@ class MiniSweAgent(Agent):
     # ── mode 1: two-phase waterfall (Investigate → Solve) ─────────────────────
 
     def _run_phased(self, bug_input, instance, task, model, env) -> FixOutput:
-        from minisweagent.agents.default import DefaultAgent
+        DefaultAgent = _default_agent_class()
         from agents.mini_phases import (
             INVESTIGATE_INSTANCE_TEMPLATE, INVESTIGATE_STEP_LIMIT, INVESTIGATE_SYSTEM_TEMPLATE,
             SOLVE_INSTANCE_TEMPLATE, SOLVE_STEP_LIMIT, SOLVE_SYSTEM_TEMPLATE,
@@ -477,7 +542,7 @@ class MiniSweAgent(Agent):
     # ── mode 3: two-phase with bounded back-edge (Investigate ⇄ Solve) ────────
 
     def _run_phased_v3(self, bug_input, instance, task, model, env) -> FixOutput:
-        from minisweagent.agents.default import DefaultAgent
+        DefaultAgent = _default_agent_class()
         from agents.mini_phases import (
             INVESTIGATE_INSTANCE_TEMPLATE_V3, INVESTIGATE_STEP_LIMIT, INVESTIGATE_SYSTEM_TEMPLATE,
             MAX_BACK_EDGES, REINVEST_MARKER, SOLVE_INSTANCE_TEMPLATE_V3, SOLVE_STEP_LIMIT,
@@ -598,7 +663,7 @@ class MiniSweAgent(Agent):
 
     def _build_mini_agent(self, model: Any, env: Any, output_path: Path | None = None,
                           instance_template_suffix: str = "") -> Any:
-        from minisweagent.agents.default import DefaultAgent
+        DefaultAgent = _default_agent_class()
 
         cfg = dict(self._mini_config.get("agent") or {})
         if output_path is not None:
