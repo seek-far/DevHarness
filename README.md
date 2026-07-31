@@ -307,6 +307,26 @@ python infra/swebench-gitlab/sweep.py --report-only --instances sympy__sympy-229
 floors journal lookup at the trigger instant so re-runs do not read stale
 verdicts. Full contract: [`docs/swebench.md`](docs/swebench.md).
 
+Two companion scripts make the stack and its chaos test one command each:
+
+```bash
+# idempotent bring-up (redis → llm_gateway → gateway → orchestrator);
+# RESUME=1 also exports the W2 resume switches before the orchestrator starts
+RESUME=1 infra/swebench-gitlab/ver99_stack_up.sh
+
+# concurrent chaos acceptance for resume: control / control' / chaos arms,
+# ~1/3 of the workers SIGKILLed mid-loop, then a nine-check verdict table
+infra/swebench-gitlab/run_l2c.sh
+
+# at 100-instance scale the LLM cache decides which cells are comparable:
+# keep each arm on the same cache snapshot, then judge only the instances
+# that replayed fully in every arm
+ARMS=A,A2 CACHE_ISOLATION=1 infra/swebench-gitlab/run_l2c.sh
+infra/swebench-gitlab/cache_hitrate.py --arms A A2 --clean-subset clean.txt
+ARMS=C SNAPSHOT_ARM=A CACHE_ISOLATION=1 ONLY_INSTANCES=clean.txt \
+  infra/swebench-gitlab/run_l2c.sh
+```
+
 Trial helper for background-knowledge retrieval: ask an LLM to propose only
 non-code web searches from each problem statement, run those searches, and write
 one JSON object per instance. Without a search API key, `--provider auto` uses
@@ -1464,6 +1484,7 @@ python test_utility/send_pipeline_msg.py [--gateway-url http://localhost:8000] [
 │   ├── memory_vs_baseline.json  # Baseline + memory enhancement, side by side (eval sweep)
 │   └── reflection_vs_baseline.json  # Baseline + reflection enhancement, side by side (eval sweep)
 ├── infra/swebench-gitlab/    # Build instance branches + drive workflow_ver=99 GitLab sweeps
+│                            #   (+ stack bring-up and the L2c concurrent chaos harness)
 ├── settings/                 # Pydantic settings classes and .env files
 ├── test_utility/
 │   ├── send_pipeline_msg.py  # Manual webhook sender

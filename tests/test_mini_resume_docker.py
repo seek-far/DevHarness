@@ -311,7 +311,17 @@ def test_reconcile_discriminates_against_a_real_container_marker(store, tmp_path
     assert env2.attached is True
     assert env2.reconcile(2) == CLEAN        # killed at a boundary
     assert env2.reconcile(1) == AMBIGUOUS    # command #2 had started
-    assert env2.reconcile(0) == MISMATCH     # two commands nobody recorded
+    assert env2.pending_commands == 1
+    # A gap of two is ALSO ambiguous, not "wrong container": one iteration can
+    # issue several commands (mini runs every action in a message).
+    assert env2.reconcile(0) == AMBIGUOUS
+    assert env2.pending_commands == 2
+    # MISMATCH is reserved for the one real identity signal — commands ran but
+    # the marker file is not there.
+    env2._docker("exec", env2.container_id, "sh", "-c", f"rm -f {DEFAULT_MARKER_PATH}")
+    assert env2.reconcile(2) == MISMATCH
+    env2._docker("exec", env2.container_id, "sh", "-c",
+                 f"echo 2 > {DEFAULT_MARKER_PATH}")   # restore for the tail below
 
     # reconcile() also restores the counter, so marker numbering keeps climbing
     # across restarts instead of silently going back to zero.

@@ -237,8 +237,29 @@ class ResumableDockerEnvironment(DockerEnvironment):
         Also restores the counter, so marker numbering keeps climbing across
         restarts — otherwise a second crash would reconcile against a sequence
         that had silently restarted at zero.
+
+        **Any marker ahead of the record is ambiguous, by however much.** The
+        first version treated a gap of exactly 1 as ambiguous and anything
+        larger as "wrong container", on the assumption that one loop iteration
+        issues at most one command. That assumption is false: mini's
+        `execute_actions()` runs *every* action in an assistant message
+        (`for action in message["extra"]["actions"]`), and models routinely emit
+        two bash calls in one message — measured on ls4900, ~25% of steps. A
+        kill landing after the first command of such a step left marker ==
+        env_seq + 2, which the old rule read as a foreign container: it purged
+        the record and aborted a run that was perfectly recoverable (L2c,
+        astropy__astropy-14309). Widening costs nothing, because the whole
+        un-checkpointed step is replayed regardless — its assistant message was
+        never persisted, so the LLM call and *all* of its commands are re-issued
+        either way. The gap only affects bookkeeping (`pending_commands`) and
+        the decision to abort.
+
+        Container identity is not this method's job: the run fingerprint plus
+        the image/cwd check in `_attach` already cover it, and a genuinely
+        foreign container has no marker file at all — which is still MISMATCH.
         """
         self._seq = int(env_seq or 0)
+        self._pending_commands = 0
         if not self._attached or not self._marker_enabled:
             return UNKNOWN
         marker = self._read_marker()
@@ -249,9 +270,13 @@ class ResumableDockerEnvironment(DockerEnvironment):
             return MISMATCH if self._seq > 0 else CLEAN
         if marker <= self._seq:
             return CLEAN
-        if marker == self._seq + 1:
-            return AMBIGUOUS
-        return MISMATCH
+        self._pending_commands = marker - self._seq
+        return AMBIGUOUS
+
+    @property
+    def pending_commands(self) -> int:
+        """How many commands the container started that the record never saw."""
+        return getattr(self, "_pending_commands", 0)
 
     # ── command execution ────────────────────────────────────────────────────
 

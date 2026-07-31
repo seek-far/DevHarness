@@ -141,12 +141,15 @@ class _TestEnv(LocalEnvironment):
         return super().execute(action, cwd, timeout=timeout)
 
     def reconcile(self, env_seq: int) -> str:
+        # Mirrors ResumableDockerEnvironment.reconcile: ANY marker ahead of the
+        # record is ambiguous — one iteration can issue several commands.
         self._seq = int(env_seq or 0)
-        if self._marker <= self._seq:
-            return CLEAN
-        if self._marker == self._seq + 1:
-            return AMBIGUOUS
-        return MISMATCH
+        self._pending_commands = max(0, self._marker - self._seq)
+        return CLEAN if self._marker <= self._seq else AMBIGUOUS
+
+    @property
+    def pending_commands(self) -> int:
+        return getattr(self, "_pending_commands", 0)
 
     def release(self):
         self.released = True
@@ -458,6 +461,41 @@ def test_kill_during_a_command_is_reported_as_ambiguous(tmp_path, store):
     assert second.result.final_state["step_replayed_command_count"] == 1
 
 
+def test_a_multi_command_step_is_ambiguous_and_counts_every_pending_command(tmp_path, store):
+    """One iteration can issue SEVERAL commands, and the gap must not be fatal.
+
+    mini's `execute_actions()` runs every action in an assistant message, and
+    models routinely emit two bash calls at once (~25% of steps, measured on
+    ls4900). A kill after the first of them leaves the marker two ahead of the
+    record. The original rule called any gap > 1 "wrong container", purged the
+    record and aborted — losing a recoverable run (L2c, astropy-14309).
+    """
+    first = _run(tmp_path, bug_id="BUG-1", die_at_command=4)
+    assert isinstance(first.raised, _Killed)
+    rec = store.load("BUG-1", "agent-0")
+    assert (rec["step"], rec["env_seq"]) == (3, 3)
+
+    first.env._marker = 5                      # that iteration issued #4 AND #5
+    assert first.env.reconcile(3) == AMBIGUOUS
+    assert first.env.pending_commands == 2
+
+    second = _run(tmp_path, bug_id="BUG-1", env=first.env)
+    assert second.result.outcome == "fixed"
+    assert second.result.final_state["step_replayed_command_count"] == 2
+
+
+def test_a_missing_marker_is_still_a_mismatch():
+    """Widening ambiguity must not blind the one real identity signal: a
+    container we attached to that ran commands but has no marker file."""
+    from agents import mini_resume_env as mre
+
+    env = mre.ResumableDockerEnvironment.__new__(mre.ResumableDockerEnvironment)
+    env._attached, env._marker_enabled = True, True
+    env._read_marker = lambda: None
+    assert env.reconcile(3) == MISMATCH
+    assert env.reconcile(0) == CLEAN           # nothing ran; nothing to explain
+
+
 def test_clean_kill_reports_no_replayed_command(tmp_path):
     """Reconciliation must discriminate, not always answer "ambiguous"."""
     first = _run(tmp_path, bug_id="BUG-1", die_before_query=4)
@@ -491,15 +529,22 @@ def test_bad_ambiguous_policy_is_fatal(tmp_path, monkeypatch):
     assert attempt.model.queries == 0, "must fail before spending anything"
 
 
-def test_marker_far_ahead_of_the_record_aborts_and_purges(tmp_path, store):
-    """A container that ran commands nobody recorded is not our container."""
+def test_marker_far_ahead_of_the_record_resumes_instead_of_aborting(tmp_path, store):
+    """A marker ahead by more than one no longer condemns the run.
+
+    It used to: "commands nobody recorded ⇒ not our container ⇒ purge + abort".
+    Identity is the fingerprint's job (and a foreign container has no marker
+    file at all — see test_a_missing_marker_is_still_a_mismatch); a large gap
+    just means the un-checkpointed iteration issued several commands, which
+    mini does routinely. Aborting here threw away a recoverable run in L2c.
+    """
     first = _run(tmp_path, bug_id="BUG-1", die_before_query=4)
     first.env._marker = 99
 
     second = _run(tmp_path, bug_id="BUG-1", env=first.env)
-    assert second.result.outcome == "error"
-    assert "marker disagrees" in second.result.error
-    assert store.load("BUG-1", "agent-0") is None, "the next attempt must start clean"
+    assert second.result.outcome == "fixed"
+    assert second.result.final_state["step_resume_count"] == 1
+    assert second.result.final_state["step_replayed_command_count"] == 96
 
 
 def test_records_of_a_different_run_are_ignored(tmp_path, store):

@@ -66,6 +66,105 @@ behind the CN network. Takes ~70s, most of it the deliberate 60s command the
 kill lands inside. Leaves no containers behind; check with
 `docker ps -a --filter name=minisweagent-`.
 
+### 1c. Concurrent chaos acceptance for resume ("L2c") — real host, scripted
+
+The layer above 1b: the same feature, but through the real ver99 pipeline with
+12-15 instances in flight and ~1/3 of the workers `kill -9`'d at a random step.
+It exists to catch what a single-instance test cannot reach by construction —
+records of one run landing in another's directory, a resumed worker attaching to
+a **neighbour's** container, the release path leaking under load.
+
+```bash
+RESUME=1 infra/swebench-gitlab/ver99_stack_up.sh    # stack, resume switches ON
+cat > ~/.sdlcma/w2/instances.txt                    # one instance id per line
+infra/swebench-gitlab/run_l2c.sh                    # arms A, A2, C + verdicts
+ARMS=C infra/swebench-gitlab/run_l2c.sh             # re-run a single arm
+```
+
+Three arms, and **A2 is load-bearing**: the same code run twice does not produce
+identical results (W1 §12.5), so the chaos-vs-control difference is only
+readable against a control-vs-control difference. `verify_l2c.py` prints nine
+checks; the sharp ones are per-instance patch identity, `step_resume_count ≥ 1`
+on every *effective* kill, and re-attach-to-its-own-container.
+
+Two things this harness learned the hard way, both worth knowing before reading
+its output:
+
+- **The patch is fetched from GitLab**, not read off the RunRecord —
+  `model_patch` is not a RunRecord field, so `record["model_patch"]` is `""` for
+  every run and the check passed vacuously in its first version. An
+  unfetchable patch now reports SKIP.
+- **A kill that lands after mini's loop has finished is not a resume failure.**
+  The records are released at that point and the replacement worker legitimately
+  starts over (cheap — the LLM calls replay from cache). The killer re-checks
+  the record right after the SIGKILL and those kills are reported separately, so
+  the arm's verdict does not depend on where the dice landed.
+- **If the verifier dies with `rc=137`, look at `orch.log`, not at GitLab.**
+  The orchestrator inherits every worker's stdout; after 100 instances that log
+  is 12.2 GB / 2.6 M lines, and `read_text().splitlines()` on it cost **60 GB of
+  anonymous RSS** (kernel: `Killed process … anon-rss:60132480kB`) on a swapless
+  host. What you *see* is an I/O storm — no swap means the kernel reclaims page
+  cache and reads it back forever, i.e. `45 % wa` and a box that answers ping
+  but not ssh — so throttling I/O is treating the symptom. The same OOM window
+  also killed redis, five GitLab workers and 60 nginx, which is why GitLab
+  looked overloaded. It is streamed now (`parse_attach_file`), and a test makes
+  `read_text` raise so it stays that way; the same 12.2 GB then reads in 37 s
+  with ssh unaffected. Check `/proc/vmstat`'s `oom_kill` counter and
+  `journalctl -k | grep "Killed process"` before blaming anything remote.
+- **Pace the patch fetches, and cache them.** One branch-compare per instance
+  per arm means an L3 verdict pair is ~230 requests, each making gitaly diff two
+  refs of a large repo. Pass
+  `--fetch-delay 0.5 --diff-cache ~/.sdlcma/w2/diffs.json`: the delay spreads
+  them out, and the cache both removes the control arm's repeat between the two
+  tables and lets a run that died halfway be finished on another machine —
+  the file plus the journal is everything the verdicts need.
+
+Measured on ls4900 (2026-07-30, 15 instances × 3 arms): A and A2 both 15/15
+resolved with **all 15 patches byte-identical** and `llm_call_count` within ±1 on
+3 of them — that is the noise floor any chaos result must be read against.
+
+At 100 instances (2026-07-31, judgeable subset of 58): the noise-floor table
+A vs A2 gives **57/58** patches identical; the chaos table A vs C gives
+**58/58** with 22 effective kills, all 22 resumed, and the other seven checks
+green. The chaos delta is *smaller than the difference between two identical
+runs* — which is the whole reason A2 exists: demanding 58/58 of the chaos arm
+alone would have passed here too, but only by luck. Resume saved 118 LLM steps
+and `Σ step_replayed_command_count = 24`, i.e. at-least-once costs **1.09
+commands per kill**.
+
+⚠️ **The 58 is a known-imperfect subset.** It comes from the hit-rate criterion,
+which admits 4 instances that hit 100 % while following a *different* recorded
+branch and excludes 6 whose only misses were in the recording arm (harmless).
+Judging by the LLM-request **key sequence** instead admits 61; the deferred
+design, including a much stronger chaos-arm assertion, is under *Future
+improvements* in `docs/swebench.md`. This does not move the L3 verdict — on the
+61-instance version the chaos arm is still identical to the control modulo the
+resume repeats — but quote the caveat when you quote the 58.
+
+At 100 instances the same harness needs three more switches, because the cache —
+not the code — decides which cells are comparable:
+
+```bash
+ARMS=A,A2 CACHE_ISOLATION=1 INSTANCES_FILE=~/.sdlcma/w2/instances_l3.txt \
+  infra/swebench-gitlab/run_l2c.sh                     # A records, A2 replays the snapshot
+infra/swebench-gitlab/cache_hitrate.py --arms A A2 \
+  --clean-subset ~/.sdlcma/w2/clean.txt                # who replayed 100% in every arm
+ARMS=C SNAPSHOT_ARM=A CACHE_ISOLATION=1 \
+  ONLY_INSTANCES=~/.sdlcma/w2/clean.txt \
+  infra/swebench-gitlab/run_l2c.sh                     # chaos + verdicts on that set only
+```
+
+`CACHE_ISOLATION=1` matters more than it looks: the gateway records on miss, so
+without it the second arm hits on what the first one sampled and stops being a
+control. Read the verdict together with the printed call-count bias — the
+judgeable subset skews toward short runs.
+
+Prerequisites: instance branches pushed, an LLM cache covering those instances
+(otherwise every arm re-samples the model and nothing is comparable), and the
+resume switches exported **before** the orchestrator starts. Cost on ls4900:
+~4 min wall per arm at concurrency 15. Pure-logic tests for the harness itself:
+`uv run pytest tests/test_l2c_tooling.py`.
+
 ## 2. Integration test (full pipeline, in-process)
 
 ```bash

@@ -241,23 +241,27 @@ class ResumableAgent(DefaultAgent):
             return
 
         if verdict == AMBIGUOUS:
-            # The command from the iteration that never got checkpointed had
-            # started. Whether it finished is unknowable — but it is now
+            # The commands from the iteration that never got checkpointed had
+            # started. Whether they finished is unknowable — but they are now
             # *counted*, which is the difference between a measured risk and a
-            # story about one.
+            # story about one. One iteration can issue several commands (mini
+            # executes every action in a message), so the count is the marker
+            # gap, not a hard-coded 1.
+            pending = max(1, int(getattr(env, "pending_commands", 0) or 0))
+            last = env_seq + pending
             if ambiguous_policy() == "restart":
-                logger.warning("resume: %s/%s — command #%d may have run; "
+                logger.warning("resume: %s/%s — command(s) #%d..#%d may have run; "
                                "BF_STEP_ON_AMBIGUOUS=restart, so discarding the run",
-                               ctx.run_key, ctx.name, env_seq + 1)
+                               ctx.run_key, ctx.name, env_seq + 1, last)
                 ctx.store.purge_run(ctx.run_key)
                 raise StepResumeAborted(
-                    f"command #{env_seq + 1} may already have executed; "
+                    f"command(s) #{env_seq + 1}..#{last} may already have executed; "
                     f"restarting per BF_STEP_ON_AMBIGUOUS=restart"
                 )
-            ctx.replayed_commands += 1
-            logger.warning("resume: %s/%s — command #%d may already have executed; "
-                           "re-issuing it (at-least-once, see design §7.2)",
-                           ctx.run_key, ctx.name, env_seq + 1)
+            ctx.replayed_commands += pending
+            logger.warning("resume: %s/%s — command(s) #%d..#%d may already have executed; "
+                           "re-issuing them (at-least-once, see design §7.2)",
+                           ctx.run_key, ctx.name, env_seq + 1, last)
             return
 
         if verdict == MISMATCH:
