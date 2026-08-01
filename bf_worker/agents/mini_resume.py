@@ -73,6 +73,7 @@ class ResumeCtx:
     resumed_from_step: int | None = None
     replayed_commands: int = 0
     stats: dict = field(default_factory=dict)
+    pending: dict | None = None      # W2.5: an assistant message whose commands are unfinished
 
 
 def bind_resume(agent, *, store, run_key: str, name: str, fingerprint: str, env=None) -> None:
@@ -128,6 +129,79 @@ class ResumableAgent(DefaultAgent):
                 return self.messages[-1].get("extra", {}) if self.messages else {}
         return super().run(task, **kwargs)
 
+    # ── the loop body (W2.5) ─────────────────────────────────────────────────
+
+    def step(self) -> list[dict]:
+        """`execute_actions(query())`, with the query skipped after a resume.
+
+        Persisting the assistant message BEFORE its commands run is what makes
+        exactly-once meaningful. Without it, a restart re-asks the model, and
+        the model may answer with a different command list — at which point the
+        commands the container already ran belong to a trajectory that no longer
+        exists, and "do not run the same command twice" guarantees nothing.
+
+        W2 deliberately refused to persist this state, because resuming into a
+        conversation whose last turn is an unanswered assistant message would
+        make the next `query()` stack a second assistant turn on top of it.
+        That objection dies here: after a resume we do not query at all, we
+        execute the message we already have.
+        """
+        ctx: ResumeCtx | None = getattr(self, _CTX_ATTR, None)
+        if ctx is not None and ctx.pending is not None:
+            # ctx.pending is the RECORD's pending document; the assistant
+            # message is one field of it. Passing the document itself would
+            # find no `extra.actions`, execute nothing, and quietly desynchronise
+            # the conversation from the ledger.
+            pending, ctx.pending = ctx.pending, None
+            return self.execute_actions(pending.get("message") or {})
+        message = self.query()
+        self._write_pending(message)
+        return self.execute_actions(message)
+
+    def _write_pending(self, message: dict) -> None:
+        """Record the half-step: prefix + the assistant message + where its
+        commands start in the container's ledger.
+
+        `n_calls` / `cost` are stored at their post-query values, so restoring
+        needs no arithmetic — the call has happened and has been paid for.
+        """
+        ctx: ResumeCtx | None = getattr(self, _CTX_ATTR, None)
+        if ctx is None or not ctx.store.enabled:
+            return
+        if not getattr(ctx.env, "ledger_enabled", False):
+            # No per-command ledger behind us (BF_STEP_LEDGER=marker, or an
+            # environment that has none). Persisting the half-step would then
+            # buy a *worse* trade than W2's: we would skip the re-query but
+            # re-issue the step's commands blind, with nothing able to tell
+            # which of them had already run. Falling back to the boundary
+            # record keeps that decision with reconcile(), where W2 left it.
+            return
+        try:
+            ctx.store.save(ctx.run_key, ctx.name, {
+                "fingerprint": ctx.fingerprint,
+                "status": "running",
+                "step": ctx.step,
+                "env_seq": int(getattr(ctx.env, "seq", 0) or 0),
+                "n_calls": self.n_calls,
+                "cost": self.cost,
+                "elapsed_s": time.time() - self._start_time,
+                "resume_count": ctx.resume_count,
+                "replayed_command_count": ctx.replayed_commands,
+                "extra_template_vars": self.extra_template_vars,
+                "messages": self.messages[:-1],
+                "pending": {
+                    "message": message,
+                    "first_seq": int(getattr(ctx.env, "seq", 0) or 0) + 1,
+                    "issued_at": time.time(),
+                },
+            })
+            ctx.message_count = len(self.messages)
+        except Exception:
+            # Same contract as the boundary checkpoint: a storage failure costs
+            # a replayed step, never the run.
+            logger.warning("resume: pending write failed for %s/%s",
+                           ctx.run_key, ctx.name, exc_info=True)
+
     # ── seams ────────────────────────────────────────────────────────────────
 
     def _sdlcma_resume(self) -> None:
@@ -142,7 +216,17 @@ class ResumableAgent(DefaultAgent):
             # record, so reconciling first would have its increment of
             # replayed_commands immediately overwritten by the stored value.
             self._restore(ctx, rec)
-            self._reconcile(ctx, int(rec.get("env_seq") or 0))
+            env_seq = int(rec.get("env_seq") or 0)
+            # Unconditional, and it must stay that way: on a boundary crash
+            # there is no pending step to align against, and a counter that
+            # silently restarts at 1 walks into the previous incarnation's
+            # ledger slots — where a *different* command is recorded, which
+            # reads as a mismatch and destroys a recoverable run.
+            self._align_env(ctx, env_seq)
+            if ctx.pending is not None:
+                self._align_env(ctx, int(ctx.pending.get("first_seq") or env_seq + 1) - 1)
+            else:
+                self._reconcile(ctx, env_seq)
             ctx.resumed_from_step = ctx.step
             logger.info("resume: %s/%s continuing from step %s (%d calls, %d messages)",
                         ctx.run_key, ctx.name, ctx.step, self.n_calls, len(self.messages))
@@ -168,12 +252,12 @@ class ResumableAgent(DefaultAgent):
                 return
             if self.messages[-1].get("role") == "assistant":
                 # Half an iteration: the model answered but its commands have no
-                # observations yet, so `execute()` was interrupted. Persisting
-                # this would resume into a conversation whose last turn is an
-                # unanswered assistant message, and the next query would stack a
-                # second assistant turn on top of it. Leave the previous
-                # boundary as the record — reconcile() is what then decides
-                # whether that command had already started.
+                # observations yet, so `execute()` was interrupted. Writing a
+                # *boundary* record here would be wrong — it would claim a step
+                # completed — and it is also unnecessary: `step()` already
+                # persisted this exact state as a `pending` record before the
+                # first command was issued (W2.5). Returning leaves that record
+                # in place, which is what the resume path reads.
                 #
                 # Reachable in production whenever a BaseException escapes
                 # step(): SystemExit from a SIGTERM handler, KeyboardInterrupt,
@@ -219,6 +303,11 @@ class ResumableAgent(DefaultAgent):
             return None
         return rec
 
+    def _align_env(self, ctx: ResumeCtx, seq: int) -> None:
+        align = getattr(ctx.env, "align", None)
+        if align is not None:
+            align(seq)
+
     def _restore(self, ctx: ResumeCtx, rec: dict) -> None:
         self.messages = list(rec.get("messages") or [])
         self.n_calls = int(rec.get("n_calls") or 0)
@@ -226,9 +315,17 @@ class ResumableAgent(DefaultAgent):
         self._start_time = time.time() - float(rec.get("elapsed_s") or 0.0)
         self.extra_template_vars |= dict(rec.get("extra_template_vars") or {})
         ctx.step = int(rec.get("step") or 0)
-        ctx.message_count = len(self.messages)
         ctx.resume_count = int(rec.get("resume_count") or 0) + 1
         ctx.replayed_commands = int(rec.get("replayed_command_count") or 0)
+        # W2.5: the interrupted step's assistant message comes back as part of
+        # the conversation, and `step()` will execute its commands instead of
+        # asking the model again. `n_calls`/`cost` above already include that
+        # call — it happened, and it was paid for.
+        pending = rec.get("pending") or None
+        ctx.pending = pending
+        if pending is not None and pending.get("message"):
+            self.messages.append(pending["message"])
+        ctx.message_count = len(self.messages)
 
     def _reconcile(self, ctx: ResumeCtx, env_seq: int) -> None:
         """Decide what the container says about the un-checkpointed command."""

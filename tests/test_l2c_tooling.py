@@ -115,7 +115,8 @@ def test_index_events_splits_the_stream():
 
 
 def test_effective_kills_excludes_one_that_landed_after_the_loop():
-    """A kill arriving after mini released its records did not test resume.
+    """Pre-W2.5 event files: a kill arriving after mini released its records did
+    not test resume.
 
     Scoring it as "resume failed" would make the arm's verdict depend on where
     the dice landed; scoring it silently as a pass would hide a real failure.
@@ -127,6 +128,81 @@ def test_effective_kills_excludes_one_that_landed_after_the_loop():
         "b3": {"instance": "i3"},                      # older event file: conservative
     }
     assert set(vl.effective_kills(kills)) == {"b1", "b3"}
+
+
+def test_every_w25_window_is_expected_to_recover():
+    """W2.5 keeps the finished record as the node-output memo, so a post-loop
+    kill is recoverable too — the old "records already released, nothing to
+    resume" exemption would now silently excuse a broken memo."""
+    kills = {
+        "b1": {"instance": "i1", "window": "in_command"},
+        "b2": {"instance": "i2", "window": "at_boundary"},
+        "b3": {"instance": "i3", "window": "post_loop", "record_after_kill": "present"},
+    }
+    assert set(vl.effective_kills(kills)) == {"b1", "b2", "b3"}
+    assert vl.kills_by_window(kills) == {
+        "in_command": ["i1"], "at_boundary": ["i2"], "post_loop": ["i3"]}
+
+
+def test_replayed_commands_is_a_regression_sentinel():
+    """W2 measured 6 on L2c and 24 on L3 and called it the price of
+    at-least-once. Under the ledger any non-zero value means a run fell back to
+    the marker path."""
+    chaos = {"i1": {"step_replayed_command_count": 0},
+             "i2": {"step_replayed_command_count": 2},
+             "i3": {}}
+    assert vl.replayed_commands(chaos) == [("i2", 2)]
+
+
+def test_a_post_loop_kill_must_not_cost_extra_llm_calls():
+    """The memo's whole claim. Without this check a re-run of the loop passes
+    the patch comparison — it usually lands in the same place, at ten times the
+    price."""
+    kills = {"b1": {"instance": "i1", "window": "post_loop"},
+             "b2": {"instance": "i2", "window": "post_loop"},
+             "b3": {"instance": "i3", "window": "in_command"}}
+    ctrl = {"i1": {"llm_call_count": 13}, "i2": {"llm_call_count": 9},
+            "i3": {"llm_call_count": 7}}
+    chaos = {"i1": {"llm_call_count": 13}, "i2": {"llm_call_count": 22},
+             "i3": {"llm_call_count": 8}}
+    assert vl.post_loop_call_drift(kills, ctrl, chaos) == [("i2", "9 -> 22")]
+
+
+def test_the_exactly_once_checks_are_dropped_in_marker_mode():
+    """Marker mode exists to be compared against; asserting exactly-once there
+    would fail the arm by design."""
+    clean = vl.compare_arms({"i1": {"outcome": "fixed"}}, {"i1": {"outcome": "fixed"}}, set())
+    names = [n for n, _, _ in vl.build_checks(clean, [], [], [], [], [], "",
+                                              replayed=[("i1", 2)], ledger=False)]
+    assert not any("exactly-once" in n for n in names)
+
+    ledger = vl.build_checks(clean, [], [], [], [], [], "", replayed=[("i1", 2)],
+                             post_loop_drift=[], ledger=True)
+    verdicts = dict((n, v) for n, v, _ in ledger)
+    assert verdicts["no command replayed (exactly-once)"] == vl.BAD
+    assert verdicts["a post-loop kill costs no extra LLM calls (the memo fired)"] == vl.OK
+
+
+def test_a_post_loop_kill_does_not_demand_an_attach_line():
+    """After the loop there is no container to attach to — `fix()` released it,
+    and recovery is the memo replaying a recorded submission. Demanding the line
+    fails a run for doing exactly what it was designed to do (seen live: L2c-w3
+    flagged astropy-13033 for it)."""
+    kills = {"b1": {"instance": "i1", "container_id": "c1", "window": "post_loop"},
+             "b2": {"instance": "i2", "container_id": "c2", "window": "in_command"}}
+    bad = vl.attach_mismatches(kills, attach={})
+    assert [b[1] for b in bad] == ["i2"], "only the in-loop kill needs an attach line"
+
+
+def test_the_ver99_harness_pins_the_node_checkpointer_off():
+    """A shared sqlite keyed by bug_id, 15+ concurrent workers: measured
+    "database is locked" losing two runs. The subprocess spawner does not pin it
+    (docker/ecs/k8s do), so the harness must — invariant #4's reasoning."""
+    script = (_INFRA / "ver99_stack_up.sh").read_text()
+    assert "export BF_CHECKPOINT_BACKEND" in script
+    assert script.index("export BF_CHECKPOINT_BACKEND") < script.index("orchestrator.orchestrator")
+    # and printed back, or "set but invisible" is indistinguishable from "unset"
+    assert "BF_CHECKPOINT_BACKEND" in script.split("orchestrator environment")[1]
 
 
 def test_a_missed_kill_does_not_demand_an_attach_line():
@@ -438,6 +514,86 @@ def test_chaos_targets_only_the_judgeable_subset():
     assert ck.decide_doom({"roll": 0.9, "target": 3}, "i1", rate=0.5, only=None) is False
 
 
+def test_kill_windows_are_read_from_the_record_not_probed_after_the_kill():
+    """`record_after_kill` stopped discriminating once records outlived the loop
+    (W2.5's memo): it reads "present" in every window. The state before the kill
+    is both cheaper and unambiguous."""
+    assert ck.window_of({"status": "running", "pending": {"first_seq": 4}}) == "in_command"
+    assert ck.window_of({"status": "running"}) == "at_boundary"
+    assert ck.window_of({"status": "running", "pending": None}) == "at_boundary"
+    assert ck.window_of({"status": "done"}) == "post_loop"
+    assert ck.window_of(None) is None
+
+
+def test_should_fire_waits_for_the_requested_window():
+    in_cmd = {"step": 6, "pending": {"first_seq": 9}, "status": "running"}
+    boundary = {"step": 6, "status": "running"}
+    done = {"step": 6, "status": "done"}
+
+    assert ck.should_fire(in_cmd, 6, "in_command")
+    assert not ck.should_fire(boundary, 6, "in_command")
+    assert ck.should_fire(boundary, 6, "at_boundary")
+    assert not ck.should_fire(in_cmd, 6, "at_boundary")
+    # post_loop ignores the step target: a finished loop is deep enough by
+    # definition, and a short instance would otherwise never be eligible.
+    assert ck.should_fire({"step": 1, "status": "done"}, 99, "post_loop")
+    assert not ck.should_fire(done, 6, "at_boundary")
+    # window=None keeps W2's step-count-only behaviour for the marker arm.
+    assert ck.should_fire(in_cmd, 6, None)
+
+
+def test_a_plan_draws_a_window_and_stays_deterministic_for_a_seed():
+    import random
+    a = [ck.plan_for(random.Random(11), 0.34, 2, 6) for _ in range(3)]
+    b = [ck.plan_for(random.Random(11), 0.34, 2, 6) for _ in range(3)]
+    assert a == b
+    assert all(p["window"] in ck.WINDOWS for p in a)
+    assert all(p["kills"] == 0 for p in a)
+    only_post = ck.plan_for(random.Random(1), 0.34, 2, 6, ("post_loop",))
+    assert only_post["window"] == "post_loop"
+
+
+def test_key_sequence_comparison_strict_vs_collapsed():
+    """The two criteria, side by side.
+
+    W2 re-sends the interrupted step's question, so the chaos arm has one
+    consecutive duplicate per resume and only matches after collapsing. W2.5
+    asks nothing again, so it must match without any collapsing at all.
+    """
+    ctrl = {"i1": ["k1", "k2", "k3"], "i2": ["k1", "k2"]}
+    w2_chaos = {"i1": ["k1", "k2", "k2", "k3"], "i2": ["k1", "k2"]}
+    w25_chaos = {"i1": ["k1", "k2", "k3"], "i2": ["k1", "k2"]}
+
+    collapsed = ch.compare_key_sequences(ctrl, w2_chaos, strict=False)
+    assert collapsed["differ"] == [] and collapsed["same"] == ["i1", "i2"]
+    assert [r["dups"] for r in collapsed["rows"]] == [1, 0]
+
+    strict = ch.compare_key_sequences(ctrl, w2_chaos, strict=True)
+    assert strict["differ"] == ["i1"], "a duplicate is a failure under exactly-once"
+
+    assert ch.compare_key_sequences(ctrl, w25_chaos, strict=True)["differ"] == []
+
+
+def test_key_sequence_absence_is_never_a_pass():
+    out = ch.compare_key_sequences({"i1": ["k1"]}, {}, strict=True)
+    assert out == {"rows": [{"instance": "i1", "verdict": "ABSENT", "dups": None}],
+                   "same": [], "differ": [], "absent": ["i1"]}
+
+
+def test_key_sequences_are_windowed_and_carry_the_key():
+    rows = ch.parse_log(_GW_LOG)
+    start = rows[0][0]
+    seqs = ch.key_sequences(rows, start, start + 5)
+    assert seqs == {"astropy__astropy-14096": ["c663"],
+                    "django__django-11095": ["e13e", "7cb5"]}
+    assert ch.key_sequences(rows, start + 3600, start + 7200) == {}
+
+
+def test_collapse_counts_what_it_removed():
+    assert ch.collapse(["a", "a", "b", "b", "b", "a"]) == (["a", "b", "a"], 3)
+    assert ch.collapse([]) == ([], 0)
+
+
 def test_subset_bias_line_reports_both_distributions():
     judgeable = {"i1": {"llm_call_count": 8}, "i2": {"llm_call_count": 12}}
     everything = dict(judgeable, i3={"llm_call_count": 115})
@@ -482,6 +638,70 @@ def test_cache_restore_sources_credentials_and_verifies_the_gateway_came_back():
     assert "LLM_ENV_FILE" in restore, "restore must source the backend credentials"
     assert "exit 1" in restore and "did NOT come back" in restore, \
         "a gateway that fails to restart must be fatal, not printed"
+
+
+def test_rotated_logs_are_read_too():
+    """Rotation preserves evidence; the readers have to consume all of it.
+
+    Seen live: bringing the stack up between two arms rotated llmgw.log, and the
+    key-sequence comparison reported every instance ABSENT — not a false pass,
+    but not an answer either.
+    """
+    ch_src = (_INFRA / "cache_hitrate.py").read_text()
+    assert 'glob("llmgw*.log")' in ch_src
+    vl_src = (_INFRA / "verify_l2c.py").read_text()
+    assert 'glob("orch*.log")' in vl_src
+    assert "parse_attach_file(path)" in vl_src, "must still stream, never read_text"
+
+
+def test_the_runner_passes_the_w25_chaos_knobs_through():
+    """A knob the driver accepts but the runner never passes is a knob that does
+    not exist — and its absence looks exactly like "the window never came up"."""
+    runner = (_INFRA / "run_l2c.sh").read_text()
+    assert "--windows" in runner and "$KILL_WINDOWS" in runner
+    assert "--second-kill-rate" in runner and "$SECOND_KILL_RATE" in runner
+    assert "--marker-mode" in runner, "the A/B arm needs verify_l2c told about it"
+
+    import argparse
+    ap = argparse.ArgumentParser()
+    # the flags the runner passes must be the flags the tools actually have
+    src = (_INFRA / "chaos_kill.py").read_text()
+    for flag in ("--windows", "--second-kill-rate", "--only-instances"):
+        assert f'"{flag}"' in src, f"{flag} is not an argument of chaos_kill.py"
+    assert '"--marker-mode"' in (_INFRA / "verify_l2c.py").read_text()
+
+
+def test_the_ledger_switch_is_exported_before_the_orchestrator_starts():
+    """The spawner hands each worker `os.environ.copy()`, so a resume switch set
+    after the orchestrator starts reaches no worker at all — and the run looks
+    like the feature simply did not work. Same ordering trap as MINI_IMPL and
+    BF_STEP_CHECKPOINT, which cost a real arm each on ls4900.
+    """
+    script = (_INFRA / "ver99_stack_up.sh").read_text()
+    assert "export BF_STEP_LEDGER" in script
+    assert script.index("export BF_STEP_LEDGER") < script.index("orchestrator.orchestrator"), \
+        "BF_STEP_LEDGER must be exported BEFORE the orchestrator is launched"
+    # and it must be visible in the printed verification, or nobody checks it
+    assert "BF_STEP_LEDGER" in script.split("orchestrator environment")[1]
+
+
+def test_bringing_the_stack_up_rotates_logs_instead_of_truncating_them():
+    """The three logs are the only record of what a sweep asked the model and
+    which container each worker re-attached to, and the verdict tooling reads
+    them by time window.
+
+    Real incident (2026-08-01): a routine restart redirected `>` over
+    llmgw.log and destroyed a completed L3 run's evidence — 6.8 MB / 21877
+    cache-lookup lines covering three arms, unrecoverable, because no process
+    held the file open. Derived artefacts survived; the raw logs did not.
+    """
+    script = (_INFRA / "ver99_stack_up.sh").read_text()
+    rotate = script.split("Rotate, never truncate")[1].split("done")[0]
+    for log in ("llmgw.log", "gw.log", "orch.log"):
+        assert log in rotate, f"{log} is not rotated before the stack starts"
+    assert "mv " in rotate, "rotation must move the old file aside, not delete it"
+    # and it must happen before anything opens them for writing
+    assert script.index("Rotate, never truncate") < script.index("> \"$LOG_DIR/llmgw.log\"")
 
 
 @pytest.mark.parametrize("script", ["run_l2c.sh", "ver99_stack_up.sh",

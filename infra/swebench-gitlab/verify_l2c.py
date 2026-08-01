@@ -142,20 +142,73 @@ def load_events(path: Path) -> list[dict]:
 
 
 def effective_kills(kills: dict[str, dict]) -> dict[str, dict]:
-    """Kills that actually landed inside the ReAct loop.
+    """Kills a resume is expected to answer for.
 
-    A kill can arrive after mini has finished its loop and released its records
-    (the loop is the small part of a ver99 run; git-apply and the CI wait are
-    the rest). The replacement worker then has nothing to resume from and
-    correctly starts over — cheap, because the LLM calls replay from cache. That
-    is not a resume failure, and scoring it as one would make the arm's verdict
-    depend on where the dice landed. `record_after_kill` measures it directly:
-    the record was re-checked a moment after the SIGKILL.
+    Under W2 a kill arriving after mini's loop had finished found the records
+    already released, so the replacement had nothing to resume from — a
+    legitimate outcome that must not be scored as a resume failure.
+    `record_after_kill` measured it directly.
 
-    Older event files have no such field; those kills are counted as effective,
-    which is the conservative reading (it can only produce a FAIL to look at).
+    W2.5 changes what that means: the finished record is deliberately kept as
+    the node-output memo, so a post-loop kill IS expected to recover (replaying
+    the same patch for zero LLM calls). Events carrying a `window` field come
+    from the W2.5 driver, which classifies the kill from the record itself, and
+    all three of its windows are recoverable. Older event files keep the old
+    rule.
+
+    A record that vanished right after a kill is still reported: nothing should
+    be deleting records at that moment, in either version.
     """
-    return {k: e for k, e in kills.items() if e.get("record_after_kill", "present") != "gone"}
+    out = {}
+    for k, e in kills.items():
+        if e.get("window"):
+            out[k] = e                          # W2.5: every window must recover
+        elif e.get("record_after_kill", "present") != "gone":
+            out[k] = e
+    return out
+
+
+def kills_by_window(kills: dict[str, dict]) -> dict[str, list[str]]:
+    """window -> instances killed in it. `unknown` for pre-W2.5 event files."""
+    by: dict[str, list[str]] = {}
+    for e in kills.values():
+        by.setdefault(e.get("window") or "unknown", []).append(
+            e.get("instance") or e.get("run_key") or "?")
+    return {w: sorted(v) for w, v in sorted(by.items())}
+
+
+def post_loop_call_drift(kills: dict[str, dict], ctrl: dict[str, dict],
+                         chaos: dict[str, dict]) -> list[tuple]:
+    """A kill after the loop must cost ZERO extra LLM calls.
+
+    That is the whole claim of the finished-run memo: the trajectory is replayed
+    from the record, not recomputed. Any drift here means the memo did not fire
+    and the loop ran again — which the patch check would happily call identical,
+    because a re-run usually lands in the same place at ten times the price.
+    """
+    bad = []
+    for e in kills.values():
+        if e.get("window") != "post_loop":
+            continue
+        iid = e.get("instance")
+        a, b = ctrl.get(iid), chaos.get(iid)
+        if not a or not b:
+            continue
+        if a.get("llm_call_count") != b.get("llm_call_count"):
+            bad.append((iid, f"{a.get('llm_call_count')} -> {b.get('llm_call_count')}"))
+    return bad
+
+
+def replayed_commands(chaos: dict[str, dict]) -> list[tuple]:
+    """Commands re-issued because completion was unknowable — W2.5 expects none.
+
+    W2 measured 6 on L2c and 24 on L3 and called that the price of
+    at-least-once. The ledger removes the ambiguity rather than counting it, so
+    this is now a regression sentinel: any non-zero value means a run fell back
+    to the marker path.
+    """
+    return [(i, r["step_replayed_command_count"]) for i, r in sorted(chaos.items())
+            if r.get("step_replayed_command_count")]
 
 
 def index_events(events: list[dict]) -> dict:
@@ -292,9 +345,18 @@ def compare_arms(ctrl: dict[str, dict], chaos: dict[str, dict],
 
 
 def attach_mismatches(kills: dict[str, dict], attach: dict[str, list[str]]) -> list[tuple]:
-    """A resumed run must re-attach to the container it was killed on."""
+    """A resumed run must re-attach to the container it was killed on.
+
+    Except after the loop: a `post_loop` kill is answered by the finished-run
+    memo, which replays the recorded submission and never touches a container —
+    by then `fix()` has already released it. Demanding an attach line there
+    fails a run for doing exactly what it was designed to do. What that window
+    must satisfy instead is `post_loop_call_drift`.
+    """
     bad = []
     for key, k in kills.items():
+        if k.get("window") == "post_loop":
+            continue
         got = attach.get(key, [])
         if not got:
             bad.append((key, k.get("instance"), "no 'resume: attached' line"))
@@ -327,7 +389,9 @@ def isolation_breaks(envs: dict[str, dict], records: list[dict]) -> list[tuple]:
 
 
 def build_checks(cmp_result: dict, mismatch: list, crosstalk: list, iso_bad: list,
-                 unpurged: list, leftover_dirs: list, leftover_containers: str) -> list[tuple]:
+                 unpurged: list, leftover_dirs: list, leftover_containers: str,
+                 replayed: list | None = None, post_loop_drift: list | None = None,
+                 ledger: bool = True) -> list[tuple]:
     def v(bad):
         return OK if not bad else BAD
 
@@ -340,6 +404,16 @@ def build_checks(cmp_result: dict, mismatch: list, crosstalk: list, iso_bad: lis
         patch_verdict, patch_detail = SKIP, na
     else:
         patch_verdict, patch_detail = OK, []
+    extra = []
+    if ledger:
+        # Only meaningful under BF_STEP_LEDGER=ledger. In marker mode
+        # at-least-once is the designed behaviour, and asserting zero would fail
+        # the arm that exists to be compared against.
+        extra = [
+            ("no command replayed (exactly-once)", v(replayed or []), replayed or []),
+            ("a post-loop kill costs no extra LLM calls (the memo fired)",
+             v(post_loop_drift or []), post_loop_drift or []),
+        ]
     return [
         ("patch identical to the control arm", patch_verdict, patch_detail),
         ("outcome/resolved identical", v(cmp_result["meta_bad"]), cmp_result["meta_bad"]),
@@ -351,7 +425,7 @@ def build_checks(cmp_result: dict, mismatch: list, crosstalk: list, iso_bad: lis
         ("all observed runs purged", v(unpurged), unpurged),
         ("checkpoint dir empty at end", v(leftover_dirs), leftover_dirs),
         ("no leaked mini containers", v(leftover_containers), leftover_containers),
-    ]
+    ] + extra
 
 
 # ── report ───────────────────────────────────────────────────────────────────
@@ -385,11 +459,17 @@ def main() -> None:
                          "the host that ran the sweep, and that host is the one "
                          "under load; with this, the fetch survives its death and "
                          "the verdicts can be finished anywhere the journal is.")
+    ap.add_argument("--marker-mode", action="store_true",
+                    help="the chaos arm ran with BF_STEP_LEDGER=marker (W2's "
+                         "at-least-once semantics). Drops the two exactly-once "
+                         "assertions, which that mode is not expected to satisfy — "
+                         "it exists to be compared against, not to pass them.")
     args = ap.parse_args()
 
     w2 = Path(os.path.expanduser(args.w2_dir))
     journal = Path(os.path.expanduser(args.journal_dir))
-    orch_log = Path(os.path.expanduser(args.orch_log or (w2 / "logs" / "orch.log")))
+    orch_logs = ([Path(os.path.expanduser(args.orch_log))] if args.orch_log
+                 else sorted((w2 / "logs").glob("orch*.log")))
     cp_dir = Path(os.path.expanduser(args.checkpoint_dir))
 
     ctrl_arm = json.loads((w2 / "arms" / f"{args.control}.json").read_text())
@@ -421,7 +501,13 @@ def main() -> None:
     missed = {k: e for k, e in ev["kills"].items() if k not in eff}
     killed_iids = {k.get("instance") for k in eff.values() if k.get("instance")}
     cmp_result = compare_arms(ctrl, chaos, killed_iids, patch_of=patch_of)
-    attach = parse_attach_file(orch_log)
+    # The stack rotates its logs on bring-up, so a chaos arm's attach lines can
+    # sit in a rotated sibling. Streamed one file at a time — never loaded:
+    # orch.log inherits every worker's stdout and reached 12.2 GB at L3 scale.
+    attach = {}
+    for path in orch_logs:
+        for key, cids in parse_attach_file(path).items():
+            attach.setdefault(key, []).extend(cids)
     mismatch = attach_mismatches(eff, attach)
     crosstalk = container_crosstalk(attach)
     iso_bad = isolation_breaks(ev["envs"], list(ctrl.values()) + list(chaos.values()))
@@ -444,6 +530,13 @@ def main() -> None:
             print(f"  soft (whole population, noisy) {arm_name}: resolved {res}/{len(recs)}")
     print(f"observed runs={len(ev['observed'])} killed={len(ev['kills'])} "
           f"(effective={len(eff)}, missed the loop={len(missed)}) purged={len(ev['purged'])}")
+    for window, iids in kills_by_window(ev["kills"]).items():
+        print(f"  · window {window:12} {len(iids)} kill(s): {', '.join(iids[:6])}"
+              + (" …" if len(iids) > 6 else ""))
+    twice = sorted(e.get("instance") or k for k, e in ev["kills"].items()
+                   if (e.get("kill_number") or 1) >= 2)
+    if twice:
+        print(f"  · killed a SECOND time (resume interrupted): {', '.join(twice)}")
     for key, e in missed.items():
         print(f"  · kill on {e.get('instance')} landed after the loop had finished "
               f"(step={e.get('step')}, records already released) — resume not exercised")
@@ -462,7 +555,10 @@ def main() -> None:
     print()
     print("=" * 78)
     checks = build_checks(cmp_result, mismatch, crosstalk, iso_bad, unpurged,
-                          leftover_dirs, leftover_containers)
+                          leftover_dirs, leftover_containers,
+                          replayed=replayed_commands(chaos),
+                          post_loop_drift=post_loop_call_drift(eff, ctrl, chaos),
+                          ledger=not args.marker_mode)
     for name, verdict, detail in checks:
         print(f"[{verdict}] {name}")
         if verdict in (BAD, SKIP) and detail:
@@ -471,7 +567,9 @@ def main() -> None:
     saved = sum((k.get("step") or 0) for k in ev["kills"].values())
     replayed = sum((chaos[i].get("step_replayed_command_count") or 0) for i in chaos)
     print(f"LLM steps saved by resume (completed steps at kill time): {saved}")
-    print(f"sum step_replayed_command_count (§7.2's previously unmeasurable quantity): {replayed}")
+    print(f"sum step_replayed_command_count: {replayed}"
+          + ("  (W2.5 expects 0; W2 measured 6 on L2c / 24 on L3)"
+             if not args.marker_mode else "  (marker mode: at-least-once by design)"))
     print(f"generated {time.strftime('%Y-%m-%d %H:%M:%S')}")
     raise SystemExit(1 if any(v == BAD for _, v, _ in checks) else 0)
 

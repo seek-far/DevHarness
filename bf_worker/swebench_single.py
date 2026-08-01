@@ -220,7 +220,15 @@ def main() -> None:
                          agent_config={"llm_model": model_name, "workflow_mode": args.workflow_mode})
 
     t0 = time.monotonic()
-    fix_output = agent.fix(bug_input)
+    try:
+        fix_output = agent.fix(bug_input)
+    finally:
+        # One instance = one run here, and grading below needs no container, so
+        # the records have nothing left to protect. Same reasoning as the batch
+        # path: the key is the instance id, which repeats across invocations, so
+        # a record left behind would be replayed into the NEXT run of the same
+        # instance. A process killed from outside skips this — that is resume.
+        agent.finish_run()
     elapsed = time.monotonic() - t0
     logger.info("fix outcome=%s iterations=%d elapsed=%.1fs",
                 fix_output.outcome, fix_output.iterations, elapsed)

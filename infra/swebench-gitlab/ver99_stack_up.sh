@@ -8,7 +8,7 @@
 #   * REDIS_URL must be exported BEFORE the webhook gateway starts — there is no
 #     settings/gateway_*.env, so GatewaySettings otherwise defaults to db0 while
 #     the orchestrator reads db15 and every webhook vanishes.
-#   * MINI_IMPL / BF_STEP_CHECKPOINT must be exported BEFORE the orchestrator
+#   * MINI_IMPL / BF_STEP_CHECKPOINT / BF_STEP_LEDGER must be exported BEFORE the orchestrator
 #     starts — the subprocess spawner hands workers `os.environ.copy()`, so
 #     exporting them afterwards silently disables resume.
 #
@@ -33,6 +33,20 @@ REDIS_CONTAINER="${REDIS_CONTAINER:-m1-redis}"
 RESUME="${RESUME:-0}"
 
 mkdir -p "$LOG_DIR"
+
+# Rotate, never truncate. The three logs below are the ONLY record of what a
+# sweep asked the model and which container each worker re-attached to, and the
+# verdict tooling reads them by time window. Bringing the stack up used to
+# redirect over them with `>`, which silently destroyed a completed L3 run's
+# evidence the next time anyone restarted anything — measured: 6.8 MB / 21877
+# cache-lookup lines covering three arms, gone, unrecoverable (no process held
+# the file open). Keeping the previous run beside the new one costs disk, which
+# is the cheaper of the two mistakes.
+for _log in llmgw.log gw.log orch.log; do
+  if [ -s "$LOG_DIR/$_log" ]; then
+    mv "$LOG_DIR/$_log" "$LOG_DIR/${_log%.log}.$(date +%Y%m%d_%H%M%S).log"
+  fi
+done
 cd "$REPO"
 # shellcheck disable=SC1090
 [ -f "$LLM_ENV_FILE" ] && . "$LLM_ENV_FILE"
@@ -67,7 +81,20 @@ export BF_CI_WAIT_TIMEOUT="${BF_CI_WAIT_TIMEOUT:-1200}"
 if [ "$RESUME" = "1" ]; then
   export MINI_IMPL=vendored          # BF_STEP_CHECKPOINT=file raises without it
   export BF_STEP_CHECKPOINT=file
+  # W2.5. `ledger` (the default) is exactly-once; `marker` is W2's
+  # at-least-once semantics, kept as the A/B arm. Exported here for the same
+  # reason as the two above: the spawner hands each worker os.environ.copy(),
+  # so anything set after the orchestrator starts never reaches a worker.
+  export BF_STEP_LEDGER="${STEP_LEDGER:-ledger}"
 fi
+# The node-boundary checkpointer is a SHARED sqlite file keyed by bug_id, and a
+# ver99 sweep runs 15 workers at once — more when chaos restarts them. Measured
+# on ls4900: 45 workers in one arm, two of them lost to "database is locked"
+# before their first LLM call. The subprocess spawner (unlike the docker / ecs /
+# k8s ones) does not pin this, so the harness does — same rule, same reason as
+# project invariant #4. Nothing is lost: intra-loop resume is what ver99 needs,
+# and BF_STEP_CHECKPOINT provides it.
+export BF_CHECKPOINT_BACKEND="${BF_CHECKPOINT_BACKEND:-none}"
 setsid nohup "$PY" -m orchestrator.orchestrator \
     > "$LOG_DIR/orch.log" 2>&1 < /dev/null &
 sleep 5
@@ -82,4 +109,4 @@ curl -s -o /dev/null -w "gateway /docs: %{http_code}\n" \
 grep -i "cache enabled" "$LOG_DIR/llmgw.log" | tail -1
 echo "=== orchestrator environment (resume switches must show when RESUME=1) ==="
 tr '\0' '\n' < "/proc/$(pgrep -f '[o]rchestrator.orchestrator' | head -1)/environ" \
-  | grep -E '^(MINI_IMPL|BF_STEP_CHECKPOINT|BF_AGENT_CONFIG|LLM_API_BASE_URL|REDIS_URL)='
+  | grep -E '^(MINI_IMPL|BF_STEP_CHECKPOINT|BF_STEP_LEDGER|BF_CHECKPOINT_BACKEND|BF_AGENT_CONFIG|LLM_API_BASE_URL|REDIS_URL)='

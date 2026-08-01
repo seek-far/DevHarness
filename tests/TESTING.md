@@ -51,14 +51,25 @@ Notable pinned contracts (don't break silently):
 BF_TEST_DOCKER=1 uv run pytest tests/test_mini_resume_docker.py -v
 ```
 
-Covers the W2 intra-loop checkpoint against **real containers**: re-attach after
-the owning process is gone, a dead container purging the agent records with it,
-the in-container step marker, and — the load-bearing one — a real `kill -9` of a
-child process *while a command is running*, then a second process that
-re-attaches, notices the ambiguous half-step, replays that command and finishes.
-Only that shape can demonstrate the premise the whole feature rests on: mini's
-container cleanup hangs off `__del__`, so SIGKILL leaves the container alive. An
-in-process exception would run `__del__` and prove nothing.
+Covers the W2/W2.5 intra-loop checkpoint against **real containers**: re-attach
+after the owning process is gone, a dead container purging the *unfinished*
+agent records with it, the in-container step marker, and — the load-bearing one
+— a real `kill -9` of a child process *while a 60-second command is running*,
+then a second process that re-attaches, **waits for that command and harvests
+its output**. Its assertions are what W2 structurally cannot pass: the command
+appends to `/RAN`, so `wc -l` proves it executed **exactly once** across both
+workers, and the resumed worker makes only the LLM calls that are genuinely new
+(the interrupted step is not re-asked). Only that shape can demonstrate the
+premise the whole feature rests on: mini's container cleanup hangs off
+`__del__`, so SIGKILL leaves the container alive. An in-process exception would
+run `__del__` and prove nothing.
+
+The dockerless half of W2.5 lives in `tests/test_command_ledger.py` (part of the
+default suite): the container-side scripts run against a **real shell** —
+including killing the waiter to prove the command survives its client — the
+eight-row reconciliation matrix runs against an in-memory container, and the
+agent side (half-step record, resume without re-querying, the finished-run memo,
+idempotence across two crashes) runs against a file-backed ledger.
 
 Requires a local image with bash (`BF_TEST_DOCKER_IMAGE`, default
 `redis:latest`) — it is **never pulled**, since one of the hosts these run on is
@@ -153,6 +164,28 @@ ARMS=C SNAPSHOT_ARM=A CACHE_ISOLATION=1 \
   ONLY_INSTANCES=~/.sdlcma/w2/clean.txt \
   infra/swebench-gitlab/run_l2c.sh                     # chaos + verdicts on that set only
 ```
+
+W2.5 (the command ledger) adds three knobs and one sharper criterion:
+
+```bash
+# chaos across all three kill windows, and interrupt some resumes as well
+KILL_WINDOWS=in_command,at_boundary,post_loop SECOND_KILL_RATE=0.3 \
+  ARMS=C infra/swebench-gitlab/run_l2c.sh
+
+# the A/B arm: same chaos, W2's at-least-once semantics
+STEP_LEDGER=marker ARMS=C infra/swebench-gitlab/run_l2c.sh
+
+# the strongest available criterion: same questions, same order, no repeats
+infra/swebench-gitlab/cache_hitrate.py --arms A C --key-sequence --strict \
+  --only-instances ~/.sdlcma/w2/clean.txt
+```
+
+`post_loop` is the window worth insisting on: a step-count trigger almost never
+lands there, and it is the only one that exercises the finished-run memo (a kill
+during git-apply / CI wait must replay the same patch for **zero** LLM calls).
+`--strict` is what separates the two designs — W2 re-asks the interrupted step's
+question, so its key sequence only matches after collapsing consecutive
+duplicates; W2.5 must match with no collapsing at all.
 
 `CACHE_ISOLATION=1` matters more than it looks: the gateway records on miss, so
 without it the second arm hits on what the first one sampled and stops being a

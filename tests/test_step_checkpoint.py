@@ -217,3 +217,37 @@ def test_bad_ttl_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("BF_STEP_CHECKPOINT_TTL_S", "soon")
     with pytest.raises(StepCheckpointError, match="TTL"):
         build_step_checkpoint_store()
+
+
+def test_the_writability_probe_is_not_shared_state(tmp_path, monkeypatch):
+    """Concurrent workers must not fight over one probe file.
+
+    Real incident (2026-08-01, L2c-w3 chaos arm): every worker probed the same
+    `.writable` path, so two of them interleaved as write/write/unlink/unlink and
+    the second unlink raised FileNotFoundError — which this function's OSError
+    handler turns into a fatal startup error. Two runs died before their first
+    LLM call. A probe that only proves a directory is writable has no business
+    being a rendezvous point.
+    """
+    import threading
+
+    monkeypatch.setenv("BF_STEP_CHECKPOINT", "file")
+    monkeypatch.setenv("BF_STEP_CHECKPOINT_DIR", str(tmp_path / "cp"))
+    errors: list[BaseException] = []
+
+    def build():
+        try:
+            for _ in range(25):
+                build_step_checkpoint_store()
+        except BaseException as exc:      # noqa: BLE001 — the point is to see it
+            errors.append(exc)
+
+    threads = [threading.Thread(target=build) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent construction raised: {errors[:2]}"
+    leftovers = list((tmp_path / "cp").glob(".writable*"))
+    assert leftovers == [], f"probe files were left behind: {leftovers}"

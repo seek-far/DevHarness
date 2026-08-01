@@ -153,6 +153,14 @@ def run_one(
             outcome="error", bug_id=iid, error=str(exc),
             final_state={"swebench_instance_id": iid, "model_patch": ""},
         )
+    finally:
+        # This instance is over — including when it failed. Batch keys the run
+        # on `instance_id`, which repeats across sweeps by construction
+        # (invariant #4's twin), so a record left behind here would be picked up
+        # by a LATER sweep of the same instance and quietly replayed into it.
+        # A batch process killed from outside skips this and keeps its records,
+        # which is the resume case and the one we want.
+        agent.finish_run()
     elapsed = time.monotonic() - t0
 
     fs = dict(fix.final_state or {})

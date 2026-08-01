@@ -44,6 +44,19 @@ CHAOS_ARM="${CHAOS_ARM:-C}"
 #                      Without it the second arm hits on what the first one
 #                      sampled and the arms are no longer comparable.
 #   ONLY_INSTANCES=f   restrict chaos to the judgeable subset (see cache_hitrate.py)
+# W2.5 knobs:
+#   KILL_WINDOWS=…     which windows chaos may fire in, comma-separated:
+#                      in_command,at_boundary,post_loop. Drawn evenly, because a
+#                      step-count trigger alone almost never lands post-loop —
+#                      and that window is where the finished-run memo lives.
+#   SECOND_KILL_RATE=r fraction of already-resumed runs to kill AGAIN. The only
+#                      way to exercise "the resume itself was interrupted".
+#   STEP_LEDGER=marker run the chaos arm with W2's at-least-once semantics, as
+#                      the A/B arm; verify_l2c then drops the two exactly-once
+#                      assertions instead of failing them by design.
+KILL_WINDOWS="${KILL_WINDOWS:-in_command,at_boundary,post_loop}"
+SECOND_KILL_RATE="${SECOND_KILL_RATE:-0.0}"
+STEP_LEDGER="${STEP_LEDGER:-ledger}"
 CACHE_ISOLATION="${CACHE_ISOLATION:-0}"
 CACHE_SNAPSHOT="${CACHE_SNAPSHOT:-$W2_DIR/arm_cache_snapshot.db}"
 ONLY_INSTANCES="${ONLY_INSTANCES:-}"
@@ -80,6 +93,7 @@ run_arm() {
   setsid nohup "$PY" "$REPO/infra/swebench-gitlab/chaos_kill.py" $kill_flag $only_flag \
       --events "$W2_DIR/events_$arm.jsonl" --stop-file "$W2_DIR/chaos.stop" \
       --rate "$KILL_RATE" --min-step "$MIN_STEP" --max-step "$MAX_STEP" \
+      --windows "$KILL_WINDOWS" --second-kill-rate "$SECOND_KILL_RATE" \
       > "$W2_DIR/logs/chaos_$arm.log" 2>&1 < /dev/null &
   sleep 2
 
@@ -139,8 +153,10 @@ if [ -f "$W2_DIR/arms/$CONTROL_ARM.json" ] && [ -f "$W2_DIR/arms/$CHAOS_ARM.json
   if [ -n "$ONLY_INSTANCES" ] && [ -f "$ONLY_INSTANCES" ]; then
     subset_flag="--clean-subset $ONLY_INSTANCES"
   fi
+  ledger_flag=""
+  [ "$STEP_LEDGER" = "marker" ] && ledger_flag="--marker-mode"
   # shellcheck disable=SC2086
   "$PY" "$REPO/infra/swebench-gitlab/verify_l2c.py" \
-      --control "$CONTROL_ARM" --chaos "$CHAOS_ARM" --w2-dir "$W2_DIR" $subset_flag \
+      --control "$CONTROL_ARM" --chaos "$CHAOS_ARM" --w2-dir "$W2_DIR" $subset_flag $ledger_flag \
       | tee "$W2_DIR/logs/verify_${CONTROL_ARM}_vs_${CHAOS_ARM}.txt"
 fi

@@ -38,6 +38,7 @@ from agents.base import BugInput
 from agent_config import load_agent_spec, make_agent, maybe_reexec_for_agent_ref
 from providers.gitlab_provider import GitLabProvider
 from services.llm_model_check import check_or_abort as _check_llm_model
+from services.step_checkpoint import purge_run_records
 
 from settings import worker_cfg as cfg
 
@@ -96,6 +97,19 @@ class BugFixWorker:
 
         try:
             await asyncio.get_event_loop().run_in_executor(None, self._run_graph)
+            # The graph reached an end node, so this bug is done in this
+            # process — fixed, no_fix, error or R10 alike. Only now may the
+            # intra-loop records go (W2.5): keeping them until here is what
+            # lets a worker killed AFTER mini's loop — during git apply, push
+            # or the CI wait, which is tens of minutes in ver99 — replay the
+            # finished loop instead of re-spending its whole trajectory.
+            #
+            # Deliberately NOT in the `finally`: an exception or a cancellation
+            # means the run did NOT finish, and that is exactly when the next
+            # incarnation will want these records. The invariant the memo rests
+            # on is "a record exists ⇒ the previous process did not finish
+            # normally", and this placement is what maintains it.
+            purge_run_records(self.bug_id)
         finally:
             hb_task.cancel()
             try:

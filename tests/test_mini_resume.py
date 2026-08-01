@@ -186,6 +186,7 @@ class _Attempt:
     env: object = None
     raised: BaseException | None = None
     agents: list = field(default_factory=list)
+    agent: object = None        # the MiniSweAgent itself, for finish_run()
 
     @property
     def messages(self) -> list:
@@ -207,7 +208,7 @@ def _run(tmp_path, *, bug_id="BUG-1", die_before_query=None, die_at_command=None
         model=model, env=env, workflow_mode=mode,
         mini_config={"agent": dict(_AGENT_CFG)},
     )
-    attempt = _Attempt(model=model, env=env)
+    attempt = _Attempt(model=model, env=env, agent=agent)
 
     # fix() does not hand back the mini agents it builds, and the assertions
     # here are about their conversations, so intercept the single construction
@@ -295,18 +296,39 @@ def test_telemetry_absent_when_the_feature_is_off(tmp_path, monkeypatch):
     assert "step_resume_count" not in attempt.result.final_state
 
 
-def test_records_are_purged_when_the_run_completes(tmp_path, store):
+def test_records_outlive_fix_and_die_with_finish_run(tmp_path, store):
+    """W2.5: the loop finishing and the RUN finishing are different events.
+
+    ver99 keeps working for tens of minutes after the loop (git apply, push, CI
+    wait). A worker killed in that window used to re-run the whole trajectory;
+    the retained record is what lets it replay the result for nothing. So
+    `fix()` must NOT clean up — only the owner of the whole run may.
+    """
     attempt = _run(tmp_path, bug_id="BUG-1")
     assert attempt.result.outcome == "fixed"
-    assert store.load("BUG-1", "agent-0") is None, "a finished run must leave no record"
+
+    rec = store.load("BUG-1", "agent-0")
+    assert rec is not None, "fix() must leave the finished record for replay"
+    assert rec["status"] == "done"
+
+    attempt.agent.finish_run()
+    assert store.load("BUG-1", "agent-0") is None
     assert store.load("BUG-1", "env") is None
 
 
-def test_records_are_purged_even_when_the_run_errors(tmp_path, store):
-    """"Finished in this process" — however it finished — means clean up."""
+def test_finish_run_cleans_up_after_an_error_too(tmp_path, store):
+    """"The run is over" — however it ended — means clean up."""
     attempt = _run(tmp_path, bug_id="BUG-1", scripts={"": [("boom", "exit 1")] * 3})
     # Nothing submits and the script runs out, so mini reports an error.
     assert attempt.result.outcome == "error"
+    attempt.agent.finish_run()
+    assert store.load("BUG-1", "agent-0") is None
+
+
+def test_finish_run_is_idempotent_and_safe_without_records(tmp_path, store):
+    attempt = _run(tmp_path, bug_id="BUG-1")
+    attempt.agent.finish_run()
+    attempt.agent.finish_run()      # runs in a finally; must never raise
     assert store.load("BUG-1", "agent-0") is None
 
 

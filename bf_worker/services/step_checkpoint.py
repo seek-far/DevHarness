@@ -89,6 +89,15 @@ class StepCheckpointStore(ABC):
     @abstractmethod
     def purge_run(self, run_key: str) -> None: ...
 
+    @abstractmethod
+    def names(self, run_key: str) -> list[str]:
+        """Document names present for this run, unordered.
+
+        Needed to answer "does this run still have unfinished work?" without
+        knowing how many agents it has (the staged modes have several). The
+        caller loads each one it cares about.
+        """
+
 
 class NoopStore(StepCheckpointStore):
     """The default. Keeps every call site free of `if store is not None`."""
@@ -103,6 +112,9 @@ class NoopStore(StepCheckpointStore):
 
     def purge_run(self, run_key: str) -> None:
         return None
+
+    def names(self, run_key: str) -> list[str]:
+        return []
 
 
 class FileStore(StepCheckpointStore):
@@ -184,6 +196,13 @@ class FileStore(StepCheckpointStore):
     def purge_run(self, run_key: str) -> None:
         shutil.rmtree(self._dir(run_key), ignore_errors=True)
 
+    def names(self, run_key: str) -> list[str]:
+        try:
+            # `.json.tmp` files are mid-write states, not documents.
+            return sorted(p.stem for p in self._dir(run_key).glob("*.json"))
+        except OSError:
+            return []
+
 
 def _default_dir() -> Path:
     override = os.environ.get("BF_STEP_CHECKPOINT_DIR")
@@ -216,9 +235,17 @@ def build_step_checkpoint_store(backend: str | None = None) -> StepCheckpointSto
         root = _default_dir()
         try:
             root.mkdir(parents=True, exist_ok=True)
-            probe = root / ".writable"
+            # Unique per probe, and forgiving on removal. A shared ".writable"
+            # is shared *state*: with 15 instances in flight — and more when
+            # chaos restarts workers — two of them interleave as write/write/
+            # unlink/unlink, and the second unlink raises FileNotFoundError,
+            # which this OSError handler turns into a fatal startup error. Two
+            # runs died that way on ls4900 before the first LLM call. A probe
+            # that only proves the directory is writable has no business being
+            # a rendezvous point.
+            probe = root / f".writable.{os.getpid()}.{os.urandom(4).hex()}"
             probe.write_text("", encoding="utf-8")
-            probe.unlink()
+            probe.unlink(missing_ok=True)
         except OSError as exc:
             # Startup-strict: refusing here beats discovering half way through a
             # 100-instance sweep that nothing was ever saved.
@@ -239,3 +266,32 @@ def build_step_checkpoint_store(backend: str | None = None) -> StepCheckpointSto
     raise StepCheckpointError(
         f"unknown BF_STEP_CHECKPOINT={backend!r} (expected one of: none, file)"
     )
+
+
+def purge_run_records(run_key: str) -> None:
+    """Drop a run's records once the run has finished in-process (W2.5).
+
+    Module-level rather than a method on the agent, because the caller that
+    knows a run is *over* usually no longer holds the agent: in ver99 the
+    `MiniSweAgent` is built inside the graph node and discarded when `fix()`
+    returns, so `agent.finish_run()` is unreachable from the worker's exit
+    path. The run key is all that is needed.
+
+    Deliberately total: it runs in `finally` blocks, where raising would
+    replace the real reason the process is exiting.
+
+    Keeping records until here is what lets a worker that dies AFTER the mini
+    loop (git apply / push / CI wait — tens of minutes in ver99) replay the
+    finished loop for free instead of re-spending 15-40 LLM calls. The
+    invariant that makes that safe is "a record exists ⇒ the previous process
+    did not finish normally", which is exactly what calling this on every
+    normal exit maintains.
+    """
+    if not run_key:
+        return
+    try:
+        store = build_step_checkpoint_store()
+        if store.enabled:
+            store.purge_run(run_key)
+    except Exception:
+        logger.warning("failed to purge step checkpoint records for %s", run_key, exc_info=True)

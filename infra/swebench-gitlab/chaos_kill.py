@@ -6,14 +6,27 @@ sub-directory per in-flight run. For every run it sees appear it:
 
   * records the run's identity (container_id + image, i.e. which SWE-bench
     instance it is) as soon as `env.json` lands;
-  * for a random ~`--rate` subset, waits until the loop reaches a random step
-    and then `kill -9`s that worker — the HealthMonitor restarts it and the
-    replacement is expected to re-attach to the still-running eval container;
-  * **snapshots the evidence BEFORE killing** — container_id, step, env_seq and
-    the in-container step marker. A successful resume purges the whole record
-    directory when the run finishes, so anything not captured here is gone by
-    the time you come to assert on it. This is the difference between L2c and
-    the single-instance L2, where you could read the record by hand afterwards;
+  * for a random ~`--rate` subset, waits until the run reaches a randomly drawn
+    **window** and then `kill -9`s that worker — the HealthMonitor restarts it
+    and the replacement is expected to re-attach to the still-running eval
+    container. The three windows are drawn evenly because they exercise
+    different code, and a step-count trigger alone would almost never land in
+    the third:
+
+        in_command   a command is in flight (a `pending` record exists)
+        at_boundary  between iterations (no pending; W2's only window)
+        post_loop    mini has finished; the run is in git-apply / CI wait, and
+                     recovery is the finished-run memo rather than the container
+
+  * optionally kills a run a SECOND time (`--second-kill-rate`), which is the
+    only way to exercise resume-being-interrupted. Bounded by the worker's own
+    `MAX_WORKER_RESTARTS = 3`, so at most two chaos kills per run;
+  * **snapshots the evidence BEFORE killing** — container_id, step, env_seq,
+    the pending step's `first_seq`, and the in-container step marker. The whole
+    record directory is deleted when the run finishes, so anything not captured
+    here is gone by the time you come to assert on it. This is the difference
+    between L2c and the single-instance L2, where you could read the record by
+    hand afterwards;
   * notes when each run's directory disappears (= the purge/release path ran);
   * samples the checkpoint dir's disk usage and the live mini-container count.
 
@@ -62,10 +75,31 @@ def kill_pattern(run_key: str) -> str:
     return f"bf_worker.py --bug-id {run_key}"
 
 
-def plan_for(rng: random.Random, rate: float, min_step: int, max_step: int) -> dict:
+WINDOWS = ("in_command", "at_boundary", "post_loop")
+
+
+def plan_for(rng: random.Random, rate: float, min_step: int, max_step: int,
+             windows: tuple[str, ...] = WINDOWS) -> dict:
     """Draw a run's fate. `doomed` stays None until the instance is known."""
     return {"doomed": None, "roll": rng.random(), "target": rng.randint(min_step, max_step),
-            "killed": False, "env_logged": False, "purged": False}
+            "window": rng.choice(list(windows)), "second_roll": rng.random(),
+            "kills": 0, "killed": False, "env_logged": False, "purged": False,
+            "rearmed": False}
+
+
+def window_of(agent_doc: dict | None) -> str | None:
+    """Which window the run is in RIGHT NOW, read from its own record.
+
+    This replaces W2's "did the record survive the kill?" probe, which stopped
+    discriminating once records began outliving the loop (W2.5's memo): a
+    post-loop kill now leaves the record in place just as an in-loop one does.
+    Reading the state before the kill is both cheaper and unambiguous.
+    """
+    if not agent_doc:
+        return None
+    if agent_doc.get("status") == "done":
+        return "post_loop"
+    return "in_command" if agent_doc.get("pending") else "at_boundary"
 
 
 def decide_doom(plan: dict, instance: str | None, rate: float,
@@ -84,14 +118,26 @@ def decide_doom(plan: dict, instance: str | None, rate: float,
     return plan["roll"] < rate
 
 
-def should_fire(agent_doc: dict | None, target: int) -> bool:
-    """True once the loop has completed `target` steps."""
+def should_fire(agent_doc: dict | None, target: int, window: str | None = None) -> bool:
+    """True once the run is deep enough AND sitting in the requested window.
+
+    `window=None` keeps W2's behaviour (step count only), which is what the
+    marker-mode arm wants.
+    """
     if not agent_doc:
         return False
     try:
-        return int(agent_doc.get("step", 0)) >= target
+        deep_enough = int(agent_doc.get("step", 0)) >= target
     except (TypeError, ValueError):
         return False
+    if window is None:
+        return deep_enough
+    here = window_of(agent_doc)
+    if window == "post_loop":
+        # Not gated on step depth: a finished loop is by definition deep enough,
+        # and a short instance would otherwise never be eligible.
+        return here == "post_loop"
+    return deep_enough and here == window
 
 
 def read_json(p: Path):
@@ -122,6 +168,10 @@ def emit(fh, kind: str, **fields) -> None:
 def watch(args) -> None:
     rng = random.Random(args.seed)
     rate = 0.0 if args.no_kill else args.rate
+    windows = tuple(w for w in args.windows.split(",") if w) if args.windows else WINDOWS
+    unknown = set(windows) - set(WINDOWS)
+    if unknown:
+        raise SystemExit(f"unknown --windows value(s): {sorted(unknown)}; pick from {WINDOWS}")
     only = None
     if args.only_instances:
         only = {l.strip() for l in Path(os.path.expanduser(args.only_instances)).read_text()
@@ -138,12 +188,13 @@ def watch(args) -> None:
 
     with open(os.path.expanduser(args.events), "a") as fh:
         emit(fh, "start", dir=str(root), rate=args.rate, no_kill=args.no_kill,
-             min_step=args.min_step, max_step=args.max_step, seed=args.seed)
+             min_step=args.min_step, max_step=args.max_step, seed=args.seed,
+             windows=list(windows), second_kill_rate=args.second_kill_rate)
         while time.time() < deadline and not stop.exists():
             live = {p.name for p in root.iterdir() if p.is_dir()}
 
             for key in sorted(live - set(seen)):
-                plan = plan_for(rng, rate, args.min_step, args.max_step)
+                plan = plan_for(rng, rate, args.min_step, args.max_step, windows)
                 seen[key] = plan
                 emit(fh, "observe", run_key=key, target_step=plan["target"])
 
@@ -169,25 +220,45 @@ def watch(args) -> None:
                              marker_enabled=env.get("marker_enabled"),
                              doomed=plan["doomed"], target_step=plan["target"])
 
-                if not plan["doomed"] or plan["killed"]:
+                if not plan["doomed"]:
                     continue
                 agent = read_json(d / "agent-0.json")
-                if not should_fire(agent, plan["target"]):
+
+                if plan["killed"]:
+                    # Re-arm for a second kill only once the run has demonstrably
+                    # come back (its own record says so). Killing again before
+                    # that would just be racing the restart.
+                    if (plan["kills"] >= 2 or plan["rearmed"]
+                            or plan["second_roll"] >= args.second_kill_rate
+                            or not agent or not agent.get("resume_count")):
+                        continue
+                    plan["rearmed"] = True
+                    plan["killed"] = False
+                    plan["window"] = rng.choice(list(windows))
+                    plan["target"] = int(agent.get("step", 0)) + 1
+                    emit(fh, "rearm", run_key=key, window=plan["window"],
+                         target_step=plan["target"], resume_count=agent.get("resume_count"))
+                    continue
+
+                if not should_fire(agent, plan["target"], plan["window"]):
                     continue
 
                 # ---- snapshot the evidence BEFORE the kill ------------------
                 cid = plan.get("container_id")
                 marker = docker("exec", cid, "cat", args.marker_path) if cid else None
                 running = docker("inspect", "-f", "{{.State.Running}}", cid) if cid else None
+                pending = (agent or {}).get("pending") or {}
+                here = window_of(agent)
                 pkill_ok = subprocess.run(
                     ["pkill", "-9", "-f", kill_pattern(key)]).returncode == 0
                 plan["killed"] = True
+                plan["kills"] += 1
 
-                # Did this kill actually land INSIDE the loop? If the agent had
-                # already finished, it released its records before dying and the
-                # replacement has nothing to resume from — a legitimate outcome
-                # that must not be scored as "resume failed". Measured, not
-                # guessed: look again a moment later.
+                # `record_after_kill` no longer separates in-loop from post-loop
+                # kills — W2.5 keeps the record alive for the whole run, so it
+                # reads "present" either way. `window` is the field that carries
+                # that meaning now; the probe is kept because "gone" still means
+                # something went wrong (nothing should delete a record here).
                 time.sleep(args.post_kill_probe)
                 record_after = "present" if (d / "agent-0.json").exists() else "gone"
                 running_after = docker("inspect", "-f", "{{.State.Running}}", cid) if cid else None
@@ -195,6 +266,9 @@ def watch(args) -> None:
                      container_id=cid, step=int((agent or {}).get("step", 0)),
                      env_seq=(agent or {}).get("env_seq"), n_calls=(agent or {}).get("n_calls"),
                      marker=marker, container_running_before=running,
+                     window=here, requested_window=plan["window"],
+                     first_seq=pending.get("first_seq"), status=(agent or {}).get("status"),
+                     kill_number=plan["kills"], resume_count=(agent or {}).get("resume_count"),
                      record_after_kill=record_after, container_running_after=running_after,
                      pkill_ok=pkill_ok, target_step=plan["target"])
 
@@ -208,7 +282,8 @@ def watch(args) -> None:
             time.sleep(args.poll_interval)
 
         emit(fh, "stop", observed=len(seen),
-             killed=sorted(k for k, v in seen.items() if v["killed"]))
+             killed=sorted(k for k, v in seen.items() if v["kills"]),
+             killed_twice=sorted(k for k, v in seen.items() if v["kills"] >= 2))
 
 
 def main() -> None:
@@ -227,6 +302,12 @@ def main() -> None:
     ap.add_argument("--post-kill-probe", type=float, default=1.5,
                     help="seconds to wait before re-checking whether the record survived")
     ap.add_argument("--sample-interval", type=float, default=30.0)
+    ap.add_argument("--windows", default=",".join(WINDOWS),
+                    help="comma-separated kill windows to draw from "
+                         "(in_command,at_boundary,post_loop)")
+    ap.add_argument("--second-kill-rate", type=float, default=0.0,
+                    help="fraction of already-resumed runs to kill a second time "
+                         "(bounded by the worker's MAX_WORKER_RESTARTS=3)")
     ap.add_argument("--no-kill", action="store_true", help="observe only (control arm)")
     ap.add_argument("--only-instances", default="",
                     help="file of instance ids chaos may touch (the judgeable subset)")

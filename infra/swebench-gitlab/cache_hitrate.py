@@ -11,8 +11,23 @@ The gateway logs one line per lookup, tagged with the instance:
 
     phase_marker phase=cache_lookup mode=cache result=hit key=… bug_id=<instance_id>
 
+Hit rate is a **known-imperfect** criterion for comparability (measured on L3 it
+admitted 4 instances that hit 100% while walking a different recorded branch,
+and excluded 6 whose only misses were in the recording arm). The sharper one is
+**key-sequence identity**, which `--key-sequence` computes: the questions asked,
+in order.
+
+    strict     the chaos arm's key sequence equals the control's, exactly.
+               This is W2.5's criterion: exactly-once means the resume re-asks
+               nothing, so not even a duplicate may appear.
+    collapsed  equal after collapsing consecutive duplicates, with the collapse
+               count == step_resume_count. That is W2's criterion — at-least-once
+               re-sends the interrupted step's question, so one duplicate per
+               resume is expected.
+
 usage:
     cache_hitrate.py --arms A A2 C [--clean-subset clean.txt]
+    cache_hitrate.py --arms A C --key-sequence [--strict]
 """
 
 from __future__ import annotations
@@ -27,11 +42,15 @@ from pathlib import Path
 
 _LINE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ .*?"
-    r"phase=cache_lookup .*?result=(?P<result>\w+).*?bug_id=(?P<iid>\S+)")
+    r"phase=cache_lookup .*?result=(?P<result>\w+).*?key=(?P<key>\S+).*?bug_id=(?P<iid>\S+)")
 
 
-def parse_log(text: str) -> list[tuple[float, str, str]]:
-    """[(epoch, result, instance_id)] for every cache lookup in the log."""
+def parse_log(text: str) -> list[tuple[float, str, str, str]]:
+    """[(epoch, result, instance_id, key)] for every cache lookup in the log.
+
+    `key` is appended last so positional readers of the first three fields keep
+    working.
+    """
     out = []
     for line in text.splitlines():
         m = _LINE.match(line)
@@ -41,14 +60,14 @@ def parse_log(text: str) -> list[tuple[float, str, str]]:
             ts = dt.datetime.strptime(m.group("ts"), "%Y-%m-%d %H:%M:%S").timestamp()
         except ValueError:
             continue
-        out.append((ts, m.group("result"), m.group("iid")))
+        out.append((ts, m.group("result"), m.group("iid"), m.group("key")))
     return out
 
 
 def per_instance(lookups, start: float, end: float) -> dict[str, dict]:
     """instance -> {hit, miss, total, rate} inside one arm's window."""
     acc: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
-    for ts, result, iid in lookups:
+    for ts, result, iid, *_ in lookups:
         # The log has second resolution; widen by a second on each side rather
         # than silently dropping the first/last call of an arm.
         if start - 1 <= ts <= end + 1:
@@ -73,19 +92,85 @@ def clean_subset(per_arm: dict[str, dict[str, dict]]) -> list[str]:
                   if all(per_arm[a][i]["total"] and per_arm[a][i]["miss"] == 0 for a in arms))
 
 
+def key_sequences(lookups, start: float, end: float) -> dict[str, list[str]]:
+    """instance -> the cache keys it looked up, in order, inside one window."""
+    seqs: dict[str, list[str]] = collections.defaultdict(list)
+    for ts, _result, iid, key in lookups:
+        if start - 1 <= ts <= end + 1:
+            seqs[iid].append(key)
+    return dict(seqs)
+
+
+def collapse(seq: list[str]) -> tuple[list[str], int]:
+    """Drop consecutive duplicates. Returns (collapsed, how many were dropped).
+
+    A resumed step under W2 re-sends the same question, so its key appears twice
+    in a row. Collapsing is therefore exactly the transformation that turns an
+    at-least-once trajectory back into the control's — and the count it removes
+    is the number of resumes it is explaining.
+    """
+    out: list[str] = []
+    for k in seq:
+        if not out or out[-1] != k:
+            out.append(k)
+    return out, len(seq) - len(out)
+
+
+def compare_key_sequences(ctrl: dict[str, list[str]], other: dict[str, list[str]],
+                          *, strict: bool, only: set[str] | None = None) -> dict:
+    """Per-instance verdict on "same questions, same order".
+
+    Instances missing from either arm are `absent`, never `same`: a comparison
+    that could not be made must not read as a passing one.
+    """
+    rows, same, differ, absent = [], [], [], []
+    keys = set(ctrl) | set(other)
+    if only is not None:
+        keys &= only
+    for iid in sorted(keys):
+        a, b = ctrl.get(iid), other.get(iid)
+        if not a or not b:
+            absent.append(iid)
+            rows.append({"instance": iid, "verdict": "ABSENT", "dups": None})
+            continue
+        # `dups` is always the chaos arm's own consecutive-duplicate count: the
+        # questions it asked twice in a row. Under W2 that is one per resume;
+        # under W2.5 it must be zero, which is what --strict then enforces.
+        collapsed_b, dups = collapse(b)
+        ok = (a == b) if strict else (collapse(a)[0] == collapsed_b)
+        (same if ok else differ).append(iid)
+        rows.append({"instance": iid, "verdict": "SAME" if ok else "DIFFER",
+                     "dups": dups, "len": f"{len(a)}/{len(b)}"})
+    return {"rows": rows, "same": same, "differ": differ, "absent": absent}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--arms", nargs="+", required=True)
     ap.add_argument("--w2-dir", default="~/.sdlcma/w2")
-    ap.add_argument("--log", default="")
+    ap.add_argument("--log", default="", nargs="*",
+                    help="gateway log(s). Default: llmgw.log AND its rotated "
+                         "siblings — the stack rotates on bring-up, so one arm's "
+                         "lines routinely live in a different file than the next's")
     ap.add_argument("--clean-subset", default="", help="write the judgeable instance list here")
     ap.add_argument("--per-instance", action="store_true", help="print every instance, not just misses")
+    ap.add_argument("--key-sequence", action="store_true",
+                    help="compare every arm's key sequence against the FIRST arm")
+    ap.add_argument("--strict", action="store_true",
+                    help="with --key-sequence: no duplicate collapsing (W2.5's criterion)")
+    ap.add_argument("--only-instances", default="",
+                    help="restrict --key-sequence to these instance ids (the judgeable subset)")
     args = ap.parse_args()
 
     w2 = Path(os.path.expanduser(args.w2_dir))
-    log = Path(os.path.expanduser(args.log or (w2 / "logs" / "llmgw.log")))
-    lookups = parse_log(log.read_text(errors="ignore"))
-    print(f"{len(lookups)} cache lookups in {log}")
+    logs = ([Path(os.path.expanduser(x)) for x in args.log] if args.log
+            else sorted((w2 / "logs").glob("llmgw*.log")))
+    lookups = []
+    for log in logs:
+        lookups.extend(parse_log(log.read_text(errors="ignore")))
+    # Rotation means the files are not in chronological order by name alone.
+    lookups.sort(key=lambda r: r[0])
+    print(f"{len(lookups)} cache lookups in {len(logs)} log file(s)")
 
     per_arm = {}
     for arm in args.arms:
@@ -104,6 +189,32 @@ def main() -> None:
             for iid in sorted(stats):
                 s = stats[iid]
                 print(f"  · {iid:45} hit={s['hit']:>4} miss={s['miss']:>4}")
+
+    if args.key_sequence:
+        only = None
+        if args.only_instances:
+            only = {l.strip() for l in
+                    Path(os.path.expanduser(args.only_instances)).read_text().splitlines()
+                    if l.strip()}
+        windows = {arm: json.loads((w2 / "arms" / f"{arm}.json").read_text())
+                   for arm in args.arms}
+        seqs = {arm: key_sequences(lookups, windows[arm]["start"], windows[arm]["end"])
+                for arm in args.arms}
+        base = args.arms[0]
+        mode = "strict (no collapsing)" if args.strict else "collapsed (consecutive dups dropped)"
+        for arm in args.arms[1:]:
+            out = compare_key_sequences(seqs[base], seqs[arm], strict=args.strict, only=only)
+            print(f"\nkey sequence {arm} vs {base} — {mode}: "
+                  f"{len(out['same'])} same, {len(out['differ'])} differ, "
+                  f"{len(out['absent'])} not comparable")
+            for row in out["rows"]:
+                if row["verdict"] != "SAME":
+                    print(f"    {row['instance']:45} {row['verdict']} "
+                          f"len={row.get('len')} dups={row['dups']}")
+            dups = [r["dups"] for r in out["rows"] if r["verdict"] == "SAME" and r["dups"]]
+            print(f"    duplicates absorbed: total={sum(dups)} across {len(dups)} instance(s)"
+                  + ("  ← must be 0 under W2.5's exactly-once" if args.strict else
+                     "  ← compare against Σ step_resume_count"))
 
     clean = clean_subset(per_arm)
     union = set().union(*(set(s) for s in per_arm.values())) if per_arm else set()

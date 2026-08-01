@@ -518,14 +518,25 @@ class MiniSweAgent(Agent):
             # SURVIVE. (A `finally` here would delete them on the way out, i.e.
             # exactly when they are about to be needed.)
             raise
-        # Returning normally — fixed, no_fix or error — means the run finished
-        # in this process, so nothing will ever want the container back. The
+        # Returning normally — fixed, no_fix or error — means the loop finished
+        # in this process, so nothing will ever want the CONTAINER back. The
         # only path that keeps it is dying from outside, which never reaches
-        # here. Injected environments are the caller's to dispose of; the
-        # records are ours either way.
+        # here. Injected environments are the caller's to dispose of.
         if owns_env:
             self._release_env(env)
-        self._purge_resume_records()
+        # The RECORDS deliberately outlive this method (W2.5 §4.4). ver99 keeps
+        # working for tens of minutes after the loop — git apply, push, CI wait
+        # — and a worker killed in that window used to re-run the whole
+        # trajectory. The finished record lets it replay the result for nothing
+        # instead. `model_patch` is the agent's own submission, taken from the
+        # conversation rather than from the container, so releasing the
+        # container above costs the replay nothing.
+        #
+        # Whoever owns the whole run is responsible for calling `finish_run()`
+        # (or `purge_run_records`) when it ends — that is what keeps "a record
+        # exists ⇒ the previous process did not finish normally" true, and that
+        # invariant is the only thing standing between this memo and a stale
+        # result being replayed into a fresh run.
         return result
 
     # ── resume plumbing (W2) ─────────────────────────────────────────────────
@@ -557,13 +568,18 @@ class MiniSweAgent(Agent):
             task=task,
         )
 
-    def _purge_resume_records(self) -> None:
-        """Drop this run's checkpoint once it has finished in-process.
+    def finish_run(self) -> None:
+        """The whole run is over — drop its records (W2.5).
 
-        Without it a later run under the same key could find a stale record.
-        The fingerprint and container-liveness checks would both reject it, but
-        deleting on completion is the cheap first gate, and it keeps the
-        checkpoint directory from accumulating finished runs.
+        Separate from `fix()` because the loop finishing and the *run*
+        finishing are different events: in ver99 everything after the loop
+        (apply / push / CI) is still part of the run, and a crash there is
+        precisely what the retained record is for.
+
+        Callers that no longer hold the agent — ver99's worker builds its
+        `MiniSweAgent` inside a graph node and drops it when `fix()` returns —
+        use `services.step_checkpoint.purge_run_records(bug_id)` instead. This
+        method is the convenience form for callers that do.
         """
         if self._store is None or not self._run_key:
             return

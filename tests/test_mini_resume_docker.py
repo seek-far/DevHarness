@@ -167,6 +167,63 @@ def test_a_container_from_a_different_run_is_not_reused(store, tmp_path, reaper)
     assert _exec(env2.container_id, "test -e /from_run_1").returncode != 0
 
 
+# ── I2b: the timeout path, against a real container ──────────────────────────
+
+def test_a_timeout_reproduces_upstreams_observation_and_kills_nothing(store, tmp_path, reaper):
+    """The branch most likely to change what the model sees — and the one that
+    never fired in production.
+
+    Measured across a 100-instance L3 run: zero timeouts, so this path had only
+    unit coverage while being exactly the place where an observation can drift
+    (upstream embeds the docker exec argv in the exception text, and ours is a
+    different argv). Three things have to hold, and only a real container can
+    show them: the partial output reaches the model, the shape matches what
+    `subprocess.run(timeout=)` produces, and the command inside the container
+    **keeps running** — upstream only ever kills the client, and killing the
+    process instead would leave /testbed in a state upstream never reaches.
+    """
+    env = _make_env(store, tmp_path, key="TO-1")
+    reaper.append(env.container_id)
+    assert env.ledger_enabled, "the ledger is what this test is about"
+
+    out = env.execute({"command": "echo partial; sleep 30; touch /FINISHED"}, timeout=2)
+
+    assert out["returncode"] == -1
+    assert "timed out after" in out["exception_info"]
+    assert out["extra"]["exception_type"] == "TimeoutExpired"
+    assert out["output"] == "partial\n", "the model must still see what was printed"
+
+    # Nothing was killed: the command is still running, and finishes on its own.
+    assert _exec(env.container_id, "test -e /FINISHED").returncode != 0
+    time.sleep(32)
+    assert _exec(env.container_id, "test -e /FINISHED").returncode == 0, \
+        "the container-side process must survive a client-side timeout"
+
+    # And the ledger now holds its result, so a resumed run harvests it rather
+    # than running it again.
+    d = f"{env._ledger_root}/{env.seq}"
+    assert _exec(env.container_id, f"cat {d}/rc").stdout.strip() == "0"
+
+
+def test_a_timed_out_command_is_harvested_not_rerun_after_resume(store, tmp_path, reaper):
+    """The pay-off: the same command, re-entered later, comes back from the
+    ledger with its real exit code instead of being issued a second time."""
+    env = _make_env(store, tmp_path, key="TO-2")
+    reaper.append(env.container_id)
+    env.execute({"command": "echo one; sleep 6; echo two >> /RAN"}, timeout=1)
+    time.sleep(8)
+
+    env2 = _make_env(store, tmp_path, key="TO-2")      # the replacement worker
+    assert env2.attached and env2.container_id == env.container_id
+    env2.align(0)                                       # resume: same slot again
+    out = env2.execute({"command": "echo one; sleep 6; echo two >> /RAN"})
+
+    assert out["returncode"] == 0
+    assert out["output"] == "one\n"
+    assert _exec(env.container_id, "wc -l < /RAN").stdout.strip() == "1", \
+        "harvested, not re-executed"
+
+
 # ── I3: self-test degradation ────────────────────────────────────────────────
 
 def test_unwritable_marker_path_degrades_detection_only(store, tmp_path, reaper, monkeypatch):
@@ -200,7 +257,7 @@ from minisweagent.models.test_models import DeterministicModel, make_output
 SCRIPT = [
     ("one", "echo one"),
     ("two", "echo two"),
-    ("the long one", "sleep 60; touch /DID_RUN"),
+    ("the long one", "sleep 60; echo ran >> /RAN"),
     ("four", "echo four"),
     ("submit", "printf 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\ndiff --git a/x b/x\n'"),
 ]
@@ -209,7 +266,10 @@ SCRIPT = [
 class CacheLike(DeterministicModel):
     """Answer as a function of the conversation, the way a replay cache does."""
 
+    calls = 0
+
     def query(self, messages, **kwargs):
+        CacheLike.calls += 1
         turn = sum(1 for m in messages if m.get("role") == "assistant")
         thought, command = SCRIPT[turn]
         self.config.outputs = [make_output(thought, [{{"command": command}}])]
@@ -229,6 +289,9 @@ out = agent.fix(BugInput(bug_id="E2E-1", provider=None, metadata={{"swebench_ins
     "instance_id": "e2e__e2e-1", "image_name": {image!r}, "problem_statement": "fix it",
 }}}}))
 print("OUTCOME", out.outcome, out.iterations, flush=True)
+print("QUERIES", CacheLike.calls, flush=True)
+print("REPLAYED", (out.final_state or {{}}).get("step_replayed_command_count"), flush=True)
+print("RESUMES", (out.final_state or {{}}).get("step_resume_count"), flush=True)
 '''
 
 
@@ -254,7 +317,18 @@ def _wait_for_marker(store, target: int, timeout: float = 120.0):
     pytest.fail(f"marker never reached {target}")
 
 
-def test_sigkill_mid_command_is_detected_and_the_command_is_replayed(store, tmp_path, reaper):
+def test_sigkill_mid_command_waits_for_it_instead_of_running_it_again(store, tmp_path, reaper):
+    """L1e-w3-a: the case W2 structurally cannot pass.
+
+    A `kill -9` lands in the middle of a 60-second command. W2 could only say
+    "something may have run" and re-issue the whole step — two executions and a
+    second LLM call. With the ledger the replacement worker finds the command
+    still running, waits for it, and harvests the output it produced, having
+    asked the model nothing.
+
+    `/RAN` is appended to rather than touched precisely so that "ran twice" is
+    a countable fact rather than an invisible one.
+    """
     proc = subprocess.Popen([sys.executable, str(_driver(tmp_path))],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -270,25 +344,30 @@ def test_sigkill_mid_command_is_detected_and_the_command_is_replayed(store, tmp_
     # The premise of the entire feature: cleanup hangs off __del__, which
     # SIGKILL never reaches, so the container outlives the worker.
     assert _running(container_id), "the eval container must survive the worker"
-    assert _exec(container_id, "test -e /DID_RUN").returncode != 0, \
+    assert _exec(container_id, "test -e /RAN").returncode != 0, \
         "the long command should still have been in flight"
 
     rec = json.loads((store.root / "E2E-1" / "agent-0.json").read_text())
     assert rec["status"] == "running"
     assert (rec["step"], rec["env_seq"]) == (2, 2)
-    assert rec["messages"][-1]["role"] != "assistant", "no half iteration may be recorded"
+    assert rec["messages"][-1]["role"] != "assistant", "the prefix stops at the boundary"
+    pending = rec["pending"]
+    assert pending["message"]["role"] == "assistant", "the half-step is recorded separately"
+    assert pending["first_seq"] == 3
 
-    # Second worker, same store: attach, notice the ambiguity, finish the job.
+    # Second worker, same store: attach, wait out the command it inherited,
+    # harvest its output, finish the job.
     out = subprocess.run([sys.executable, str(_driver(tmp_path))],
                          capture_output=True, text=True, timeout=600)
     assert "OUTCOME fixed" in out.stdout, out.stderr[-3000:]
 
-    assert _exec(container_id, "test -e /DID_RUN").returncode == 0, \
-        "command #3 should have been re-issued and completed this time"
-    # 5 calls total, of which the resumed worker only had to make 3.
+    assert _exec(container_id, "wc -l < /RAN").stdout.strip() == "1", \
+        "the long command must have executed EXACTLY once across both workers"
     assert "OUTCOME fixed 5" in out.stdout
-    assert "may already have executed" in out.stderr, \
-        "the half-step must be reported, not silently absorbed"
+    assert "QUERIES 2" in out.stdout, \
+        "the interrupted step must not be re-asked — only steps 4 and 5 are new"
+    assert "REPLAYED 0" in out.stdout, "nothing was replayed"
+    assert "RESUMES 1" in out.stdout
 
 
 def test_reconcile_discriminates_against_a_real_container_marker(store, tmp_path, reaper):
