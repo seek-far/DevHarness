@@ -73,6 +73,12 @@ spec:
       # URLs, never via service-link vars, so disabling them is safe and removes
       # the whole class of name-collision footguns.
       enableServiceLinks: false
+      {{- /* The response cache is a sqlite file on a node-local PVC -- pin it
+           or the replay-equivalence baseline can migrate nodes. docs/k3s.md */}}
+      {{- with .Values.llmGateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.extraHostAliases }}
       hostAliases:
         {{- toYaml . | nindent 8 }}

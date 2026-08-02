@@ -92,6 +92,10 @@ redis:
   image: redis:7-alpine
   replicas: 1
   pvcSize: 1Gi
+  # Pod placement. EMPTY BY DEFAULT → the template renders no `nodeSelector`
+  # key at all, so single-node kind is byte-identical to before. Multi-node
+  # (k3s) overlays pin this; see docs/k3s.md and values-k3s-ls4900.yaml.
+  nodeSelector: {}
   # storageClassName: ""   # empty → kind default StorageClass `standard`
   resources:
     requests:
@@ -112,6 +116,16 @@ gateway:
   replicas: 1
   service:
     port: 8000
+    # ClusterIP keeps the kind path unchanged (webhook enters via
+    # ingress-nginx + the cluster's extraPortMappings). k3s has neither, so
+    # its overlay sets NodePort + a fixed port. Empty nodePort → the field is
+    # not rendered → ClusterIP Services stay byte-identical.
+    type: ClusterIP
+    nodePort: ""
+  # Pod placement. EMPTY BY DEFAULT → the template renders no `nodeSelector`
+  # key at all, so single-node kind is byte-identical to before. Multi-node
+  # (k3s) overlays pin this; see docs/k3s.md and values-k3s-ls4900.yaml.
+  nodeSelector: {}
   resources:
     requests:
       cpu: 50m
@@ -191,6 +205,10 @@ orchestrator:
     tag: latest
   replicas: 1
   pvcSize: 5Gi
+  # Pod placement. EMPTY BY DEFAULT → the template renders no `nodeSelector`
+  # key at all, so single-node kind is byte-identical to before. Multi-node
+  # (k3s) overlays pin this; see docs/k3s.md and values-k3s-ls4900.yaml.
+  nodeSelector: {}
   resources:
     requests:
       cpu: 100m
@@ -221,6 +239,10 @@ llmGateway:
     port: 9000
   # Cache db lives on this PVC; gateway is single-replica so RWO is fine.
   pvcSize: 2Gi
+  # Pod placement. EMPTY BY DEFAULT → the template renders no `nodeSelector`
+  # key at all, so single-node kind is byte-identical to before. Multi-node
+  # (k3s) overlays pin this; see docs/k3s.md and values-k3s-ls4900.yaml.
+  nodeSelector: {}
   resources:
     requests:
       cpu: 50m
@@ -295,6 +317,10 @@ runrecordExporter:
   replicas: 1
   service:
     port: 9103
+  # Pod placement. EMPTY BY DEFAULT → the template renders no `nodeSelector`
+  # key at all, so single-node kind is byte-identical to before. Multi-node
+  # (k3s) overlays pin this; see docs/k3s.md and values-k3s-ls4900.yaml.
+  nodeSelector: {}
   resources:
     requests:
       cpu: 25m

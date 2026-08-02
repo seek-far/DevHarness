@@ -24,7 +24,11 @@ ENV_FILE="${ENV_FILE:-settings/worker_gitlab_saas.env}"
 NAMESPACE="${NAMESPACE:-sdlcma}"
 TIMEOUT="${TIMEOUT:-600}"
 
-GITLAB_API="https://gitlab.com/api/v4"
+# Overridable so the self-hosted paths (infra/k3s/) can reuse this script
+# rather than fork it — the acceptance criteria live in here, and a forked
+# copy is a forked criterion. Default unchanged → the kind/gitlab.com path is
+# byte-identical.
+GITLAB_API="${GITLAB_API:-https://gitlab.com/api/v4}"
 PROJ_ENC="${PROJECT_PATH//\//%2F}"
 
 START_TS=$(date +%s)

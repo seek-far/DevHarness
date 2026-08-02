@@ -39,6 +39,15 @@ spec:
       labels:
         app: redis
     spec:
+      {{- /* Multi-node caveat: the default StorageClass on k3s is `local-path`,
+           which is NODE-LOCAL and binds on first schedule. Without pinning,
+           redis can land anywhere and then stays there forever -- on a
+           cross-continent cluster that silently moves the coordination hot
+           path across an ocean. See docs/k3s.md. */}}
+      {{- with .Values.redis.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: redis
           image: {{ .Values.redis.image }}

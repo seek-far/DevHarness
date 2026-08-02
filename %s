@@ -1,0 +1,9 @@
+  File "<string>", line 3
+    for m in json.load(open(/tmp/mr.json)):
+                            ^
+SyntaxError: invalid syntax
+=== RunRecord 关键字段 ===
+  File "<string>", line 3
+    d=json.load(open(/var/sdlcma/journal/20260802T150406Z_2026_08_02-15_03_22_9_f7c7_langgraph_deepseek-deepseek-v4-pro/record.json))
+                     ^
+SyntaxError: invalid syntax

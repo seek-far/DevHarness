@@ -314,3 +314,151 @@ def test_eval_indexed_job_when_enabled():
     pod = job["spec"]["template"]["spec"]
     assert pod["restartPolicy"] == "Never"
     assert pod["automountServiceAccountToken"] is False
+
+
+# ── W3: multi-node scheduling knobs (nodeSelector + NodePort) ───────────────
+# These exist for the cross-continent k3s cluster (infra/k3s/, docs/k3s.md).
+# The whole point is that they are ADDITIVE: unset, the chart must render
+# exactly what it rendered before they existed.
+
+K3S_VALUES = CHART / "values-k3s-ls4900.yaml"
+
+# Every component the k3s overlay pins. redis / llm-gateway / runrecord-
+# exporter own node-local state (local-path PVC, sqlite cache, hostPath
+# journal); gateway / orchestrator are pinned so the whole control path stays
+# on one side of the ocean.
+_PINNED = ["gateway", "orchestrator", "redis", "llm-gateway", "runrecord-exporter"]
+
+
+def test_default_render_has_no_scheduling_fields(docs):
+    """Default values must render NO nodeSelector and NO nodePort.
+
+    This is the machine-checkable form of the additive guarantee: the
+    single-node kind path (infra/k8s/) must be byte-identical to what it was
+    before the k3s work. A `{{- with }}` guard that accidentally becomes
+    unconditional (e.g. someone gives the value a non-empty default) would
+    silently change every existing deployment's pod spec.
+    """
+    for dep in _by_kind(docs, "Deployment"):
+        pod = dep["spec"]["template"]["spec"]
+        assert "nodeSelector" not in pod, (
+            f"{dep['metadata']['name']} rendered a nodeSelector under default "
+            "values — the k3s knobs must stay opt-in"
+        )
+    svc = _named(docs, "Service", "gateway")
+    assert svc["spec"]["type"] == "ClusterIP"
+    for port in svc["spec"]["ports"]:
+        assert "nodePort" not in port, (
+            "gateway Service rendered a nodePort under default values"
+        )
+
+
+def test_k3s_overlay_pins_every_stateful_component():
+    """The k3s overlay must pin all five, by hostname.
+
+    Missing any one is a silent multi-node hazard rather than an error:
+    local-path PVCs bind to whichever node schedules first and then stay
+    there forever, so an unpinned redis can migrate the coordination hot
+    path across an ocean and nothing reports it.
+    """
+    out = _template_or_skip("-f", str(K3S_VALUES))
+    deps = {d["metadata"]["name"]: d
+            for d in yaml.safe_load_all(out)
+            if d and d.get("kind") == "Deployment"}
+    for name in _PINNED:
+        assert name in deps, f"{name} not rendered by the k3s overlay"
+        sel = deps[name]["spec"]["template"]["spec"].get("nodeSelector")
+        assert sel == {"kubernetes.io/hostname": "ls4900"}, (
+            f"{name} is not pinned to ls4900 (got {sel!r})"
+        )
+
+
+def test_k3s_overlay_exposes_gateway_via_nodeport():
+    """k3s has no kind extraPortMappings and traefik/servicelb are disabled
+    (:80 belongs to the co-tenant GitLab), so the webhook enters via a fixed
+    NodePort. 30800 is inside the default 30000-32767 range — 18080 would
+    require widening --service-node-port-range on the server."""
+    out = _template_or_skip("-f", str(K3S_VALUES))
+    svc = next(d for d in yaml.safe_load_all(out)
+               if d and d.get("kind") == "Service"
+               and d["metadata"]["name"] == "gateway")
+    assert svc["spec"]["type"] == "NodePort"
+    assert svc["spec"]["ports"][0]["nodePort"] == 30800
+
+
+def test_k3s_overlay_has_no_ingress_and_no_cloudflared():
+    """Both webhook paths from the kind overlay must be OFF here.
+
+    An Ingress with no controller to reconcile it is worse than no Ingress:
+    it reads as "configured" while silently routing nothing.
+    """
+    out = _template_or_skip("-f", str(K3S_VALUES))
+    kinds = [d.get("kind") for d in yaml.safe_load_all(out) if d]
+    assert "Ingress" not in kinds
+    names = [d["metadata"]["name"] for d in yaml.safe_load_all(out)
+             if d and d.get("kind") == "Deployment"]
+    assert "cloudflared" not in names
+
+
+def test_k3s_overlay_sets_worker_pip_index():
+    """apply_change_and_test builds a CLEAN venv, so the fixture repo's
+    requirements.txt (pytest) is pip-installed at run time. ls4900 is on a CN
+    network and gitlab-runner's own PIP_INDEX_URL does NOT reach the worker,
+    so the worker ConfigMap has to carry a mirror or every ver0 run dies in
+    `pip install`. ver99 skips local pytest, which is why this path had never
+    been exercised there."""
+    out = _template_or_skip("-f", str(K3S_VALUES))
+    cm = next(d for d in yaml.safe_load_all(out)
+              if d and d.get("kind") == "ConfigMap"
+              and d["metadata"]["name"] == "worker-config")
+    assert cm["data"].get("PIP_INDEX_URL"), (
+        "worker-config must carry PIP_INDEX_URL on the CN host"
+    )
+
+
+def test_k3s_overlay_keeps_spawner_decoupled_from_env():
+    """Project invariant #1: never invent a new ENV for a spawner. The k3s
+    overlay reuses ENV=local_multi_process (ls4900's own GitLab) and carries
+    the spawner choice in WORKER_SPAWNER."""
+    out = _template_or_skip("-f", str(K3S_VALUES))
+    cm = next(d for d in yaml.safe_load_all(out)
+              if d and d.get("kind") == "ConfigMap"
+              and d["metadata"]["name"] == "orchestrator-config")
+    assert cm["data"]["ENV"] == "local_multi_process"
+    assert cm["data"]["WORKER_SPAWNER"] == "k8s"
+
+
+def test_k3s_overlay_gateway_backend_uses_the_injected_key_name():
+    """The gateway backend must read the key name the chart actually injects.
+
+    The chart plumbs exactly one credential into the llm-gateway pod:
+    LLM_API_KEY, from sdlcma-secrets (which setup.sh fills from the worker env
+    file). A backend declaring any other api_key_env gets an unset variable;
+    a backend pointing at a DIFFERENT PROVIDER than the key belongs to gets a
+    401 from that provider.
+
+    Both happened on the first A7 run: the chart default is qwen3-on-Dashscope
+    while ls4900's key is DeepSeek's, so the gateway presented a DeepSeek key
+    to Aliyun and the run died in react_loop with
+    401 "Incorrect API key" — after fetch_trace and parse_trace had already
+    succeeded, which is what makes it look like a code bug rather than a
+    config mismatch.
+    """
+    out = _template_or_skip("-f", str(K3S_VALUES))
+    cm = next(d for d in yaml.safe_load_all(out)
+              if d and d.get("kind") == "ConfigMap"
+              and d["metadata"]["name"] == "llm-gateway-config")
+    cfg = yaml.safe_load(cm["data"]["config.yaml"])
+    backends = cfg["backends"]
+    assert backends, "no gateway backend configured"
+    for b in backends:
+        assert b["api_key_env"] == "LLM_API_KEY", (
+            f"backend {b['name']} reads {b['api_key_env']}, but the chart only "
+            "injects LLM_API_KEY into the gateway pod"
+        )
+    # The overlay is host-specific (it is named for the host), so it may and
+    # should pin the provider that host's key belongs to.
+    assert any("deepseek" in b["base_url"] for b in backends), (
+        "ls4900's LLM_API_KEY is a DeepSeek credential — pointing the backend "
+        "anywhere else reproduces the 401"
+    )

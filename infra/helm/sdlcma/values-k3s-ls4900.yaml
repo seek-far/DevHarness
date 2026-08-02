@@ -1,0 +1,146 @@
+# Overlay: SDLCMA on the cross-continent k3s cluster.
+#
+#   ls4900 (CN)  = k3s server + control-plane + every stateful component
+#   minus  (DE)  = k3s agent, NoSchedule-tainted by infra/k3s/setup.sh
+#
+# Target GitLab is ls4900's own self-hosted instance on :80, so ENV stays
+# `local_multi_process` and WORKER_SPAWNER=k8s carries the spawner choice
+# (project invariant #1: never invent a new ENV name for a spawner).
+#
+# Companion to infra/k3s/. Design: /mnt/d/PL/sdlcma/W3-k3s-cluster-design.md
+# Runbook + the cross-continent gotchas: docs/k3s.md
+#
+# Prereqs (out-of-band, never templated):
+#   kubectl -n sdlcma create secret generic sdlcma-secrets \
+#     --from-literal=GITLAB_PRIVATE_TOKEN=... --from-literal=LLM_API_KEY=...
+#   (infra/k3s/setup.sh creates this from the worker env file)
+
+# ── webhook ingress: NodePort, not ingress-nginx ─────────────────────────────
+# k3s has no kind-style extraPortMappings, and traefik/servicelb are disabled
+# (:80 belongs to the co-tenant GitLab). Standing up a second ingress-nginx
+# just to renumber a port would also re-import the CN @sha256-digest problem
+# (see project_k8s_ingress_nginx_cn_proxy), so the gateway Service is a plain
+# NodePort. GitLab runs on the same host and posts to the node's tailnet IP.
+gateway:
+  service:
+    type: NodePort
+    # 30800 is inside the default 30000-32767 NodePort range; 18080 would need
+    # --service-node-port-range widened on the server.
+    nodePort: 30800
+  nodeSelector:
+    kubernetes.io/hostname: ls4900
+
+# No ingress controller exists on this cluster. Leaving the chart's Ingress
+# on would render a resource nothing reconciles — a config that LOOKS wired
+# and silently is not.
+ingress:
+  enabled: false
+
+# GitLab and the cluster share a host; no tunnel needed.
+cloudflared:
+  enabled: false
+
+# ── pin every stateful component to ls4900 ───────────────────────────────────
+# The default StorageClass is `local-path` (NODE-LOCAL, WaitForFirstConsumer).
+# A PVC binds to whichever node schedules it first and then pins that pod
+# there permanently — implicitly, with no declaration anywhere. Unpinned,
+# redis could land on the cross-continent WSL2 node and put the coordination
+# hot path across an ocean. Same reasoning for the llm-gateway sqlite cache
+# and the hostPath journal the exporter reads.
+redis:
+  nodeSelector:
+    kubernetes.io/hostname: ls4900
+orchestrator:
+  nodeSelector:
+    kubernetes.io/hostname: ls4900
+
+# ── LLM gateway + journal + exporter ─────────────────────────────────────────
+llmGateway:
+  enabled: true
+  nodeSelector:
+    kubernetes.io/hostname: ls4900
+  # MUST match the credential this host actually holds. `setup.sh` copies
+  # LLM_API_KEY out of the worker env file into sdlcma-secrets, and the chart
+  # injects that one value into the gateway pod — so the backend here has to
+  # be the provider that key belongs to.
+  #
+  # Real failure, first A7 run on ls4900: the chart's default backend is
+  # qwen3 on Dashscope, this host's key is DeepSeek's, and the gateway
+  # dutifully presented a DeepSeek key to Aliyun →
+  #   401 "Incorrect API key" (help.aliyun.com/zh/model-studio)
+  # after fetch_trace and parse_trace had already succeeded, so the run died
+  # 3s into react_loop with outcome=error, iterations=0.
+  #
+  # Mirrors configs/llm_gateway/deepseek_cached.yaml (the config the host's
+  # own ver99 stack runs) with ONE deliberate difference: api_key_env is
+  # LLM_API_KEY, not DEEPSEEK_API_KEY, because LLM_API_KEY is the only key
+  # the chart plumbs into this pod.
+  config:
+    backends:
+      - name: deepseek_v4_pro
+        base_url: https://api.deepseek.com/v1
+        model: deepseek-v4-pro
+        api_key_env: LLM_API_KEY
+        request_timeout: 120
+    inference_policy:
+      type: ordered
+      order: [deepseek_v4_pro]
+    cache:
+      mode: cache
+      # On the PVC, which is pinned to this node by the nodeSelector above.
+      # Never /tmp — a recorded cache is an expensive artifact and a reboot
+      # took one out before.
+      db_path: /var/lib/sdlcma/llm_cache.db
+      replay_with_latency: false
+      log_every_n: 20
+      normalize_content: true
+journal:
+  persistence:
+    enabled: true
+runrecordExporter:
+  enabled: true
+  nodeSelector:
+    kubernetes.io/hostname: ls4900
+
+# ── observability ────────────────────────────────────────────────────────────
+# OFF for the first bring-up on purpose: kube-prometheus-stack (Operator +
+# Grafana + kube-state-metrics) is the heaviest single piece here, and
+# installing it in the same step as the app makes "which one failed?"
+# undecidable. Flip to true in a second `helm upgrade` once the end-to-end
+# smoke passes. metrics-server is built into k3s and unrelated to this switch.
+monitoring:
+  enabled: false
+
+# ── ConfigMap overrides ──────────────────────────────────────────────────────
+configMaps:
+  gateway:
+    ENV: local_multi_process
+  orchestrator:
+    ENV: local_multi_process
+    # Invariant #1: decouple spawner from env. Without this the by-env mapping
+    # would pick `process` for local_multi_process, which is wrong here.
+    WORKER_SPAWNER: k8s
+  worker:
+    ENV: local_multi_process
+    # ls4900's own GitLab. Pods can't resolve the name, so setup.sh injects
+    # extraHostAliases from `tailscale ip -4` at deploy time.
+    GITLAB_API: http://ls4900/api/v4
+    GITLAB_USERNAME: root
+    # HTTP+token push, no SSH (same model as gitlab_saas). Helm 3 drops
+    # null-valued keys on merge, so this removes values.yaml's default.
+    GITLAB_SSH_PORT: null
+    # apply_change_and_test builds a CLEAN venv (not --system-site-packages),
+    # so the image's own pytest is invisible and the fixture repo's
+    # requirements.txt has to be installed at run time. ls4900 is on a CN
+    # network and pypi.org is unreliable there; gitlab-runner has its own
+    # PIP_INDEX_URL but that env does NOT reach the worker.
+    #
+    # This path had never been exercised on ls4900 before W3: the ver99
+    # workflow skips local pytest entirely (GitLab CI in the eval image is
+    # the oracle), so the gap only surfaced once ver0 became the acceptance
+    # load. See docs/k3s.md.
+    PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Injected by infra/k3s/setup.sh via --set (the tailnet IP is per-machine and
+# only known at deploy time, so the chart never bakes it in).
+extraHostAliases: []

@@ -980,7 +980,7 @@ The gateway records the chosen backend in `RunRecord.llm_backend_name` (additive
 
 ## Deployment Methods for GitLab Running Mode
 
-In GitLab mode, DevHarness can be deployed in seven ways, controlled by `settings/.env` and (for spawners that diverge from the historical by-env default) the additive `WORKER_SPAWNER` setting:
+In GitLab mode, DevHarness can be deployed in eight ways, controlled by `settings/.env` and (for spawners that diverge from the historical by-env default) the additive `WORKER_SPAWNER` setting:
 
 ### Mode 1: Local Multi-Process (`ENV=local_multi_process`)
 
@@ -1343,6 +1343,52 @@ For the two-host SWE-bench validation procedure and failure-recovery checks,
 see [`docs/distr-pull-test-runbook.md`](docs/distr-pull-test-runbook.md).
 Design details are in [`docs/distr-pull-design.md`](docs/distr-pull-design.md).
 
+### Mode 8: Kubernetes / k3s — multi-node, cross-continent (`ENV=local_multi_process` + `WORKER_SPAWNER=k8s`)
+
+The multi-node sibling of Mode 6, and the only deployment that spans
+physical machines: a **k3s** cluster with the server on one host and an
+agent on another **continent**, joined over Tailscale. kind cannot do this
+— its "multi-node" is several containers on one machine — so this is where
+claims about distribution actually get tested.
+
+Same Helm chart as Mode 6, different overlay
+(`infra/helm/sdlcma/values-k3s-ls4900.yaml`) and a separate harness. Per
+project invariant #1 it reuses an existing `ENV` (here
+`local_multi_process`, matching the self-hosted GitLab on the server host)
+and carries the spawner choice in `WORKER_SPAWNER=k8s`.
+
+```bash
+bash infra/k3s/setup.sh              # build → containerd import → helm → report
+bash infra/k3s/gitlab-smoke.sh       # failing pipeline → auto/bf/* MR
+bash infra/k3s/crossnode-check.sh    # prove a worker runs on the far node
+bash infra/k3s/teardown.sh           # uninstalls the release; cluster untouched
+bash infra/k3s/regression.sh --crossnode
+```
+
+Practical differences from Mode 6:
+
+- **No `kind load`.** Every node runs its own containerd, so images are
+  published with `docker save | k3s ctr -n k8s.io images import`
+  (`infra/k3s/load-image.sh`). Omitting `-n k8s.io` leaves `ctr images ls`
+  listing the image while kubelet still reports `ImagePullBackOff`.
+- **Webhook via NodePort `:30800`**, not ingress-nginx: k3s has no kind
+  `extraPortMappings`, and traefik/servicelb are disabled because `:80`
+  belongs to a co-tenant GitLab on the same host.
+- **Stateful components are pinned** with new, default-empty
+  `<component>.nodeSelector` chart fields. The default StorageClass is
+  node-local `local-path`, so an unpinned redis can bind to the far node
+  and stay there permanently.
+- **The remote node is `NoSchedule`-tainted by default.** It is meant to
+  run workers, and `crossnode-check.sh` demonstrates that it can; making it
+  the default needs worker Jobs to carry `resources`, a `nodeSelector` and
+  an `unreachable` toleration first.
+- **MTU is the trap that `Ready` does not catch:** without
+  `--flannel-iface tailscale0`, cross-node pod traffic black-holes on large
+  packets while pings and small responses pass.
+
+Full design + the cross-continent gotchas in
+[`docs/k3s.md`](docs/k3s.md); operator runbook in `infra/k3s/README.md`.
+
 ### GitLab Webhook Setup
 
 In your GitLab project → Settings → Webhooks:
@@ -1356,6 +1402,7 @@ In your GitLab project → Settings → Webhooks:
 | AWS ECS | `https://<assigned>.trycloudflare.com/webhook` (cloudflared sidecar inside the ECS services task; URL changes every service task replacement) |
 | Kubernetes / kind | `https://<assigned>.trycloudflare.com/webhook` (cloudflared Deployment; new URL on each pod restart — use a named tunnel for stability) |
 | Kubernetes / kind (ingress) | `http://<host-or-tailnet-ip-or-hostname>:18080/webhook` (when GitLab can route to the agent host directly — ingress-nginx + kind `:18080→:80` port mapping; CN networks use the `m.daocloud.io` proxy that `infra/k8s/setup.sh` rewrites in) |
+| Kubernetes / k3s (multi-node) | `http://<node-tailnet-ip>:30800/webhook` (gateway Service as NodePort; k3s has no kind `extraPortMappings` and traefik/servicelb are disabled because `:80` is a co-tenant GitLab's) |
 | Distributed Pull Workers | Same URL as the central gateway host; `distr-pull` only changes how workers are dispatched after the webhook enters Redis |
 
 Trigger: **Pipeline events**
@@ -1389,6 +1436,7 @@ and resource/admission scenarios.
 | `infra/public-host/regression.sh` | Mode 4 — `gitlab_saas` on public-IP host (cloudflared) | gitlab.com |
 | `infra/aws-ecs/regression.sh` | Mode 5 — AWS ECS (`gitlab_saas` + `WORKER_SPAWNER=ecs`) | gitlab.com |
 | `infra/k8s/regression.sh` | Mode 6 — Kubernetes / kind (`gitlab_saas` + `WORKER_SPAWNER=k8s`) | gitlab.com |
+| `infra/k3s/regression.sh` | Mode 8 — Kubernetes / k3s, multi-node (`local_multi_process` + `WORKER_SPAWNER=k8s`) | self-hosted GitLab on the server node |
 
 Common flags: `--timeout N`, `--no-update`, `--no-teardown`, `--keep-env`.
 Full contract + per-script knobs in [`tests/TESTING.md`](tests/TESTING.md)

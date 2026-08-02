@@ -32,6 +32,13 @@ spec:
       labels:
         app: runrecord-exporter
     spec:
+      {{- /* Reads the journal off a hostPath, so it only sees RunRecords
+           written on ITS node. Multi-node: pin it to the same node the
+           workers write on, or the metrics silently undercount. docs/k3s.md */}}
+      {{- with .Values.runrecordExporter.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.extraHostAliases }}
       hostAliases:
         {{- toYaml . | nindent 8 }}

@@ -37,6 +37,8 @@ infra/
 │       ├── gateway.yaml            # Gateway Deployment + Service (envFrom configmap, /healthz)
 │       ├── rbac.yaml               # 1a.3: orchestrator SA + namespaced Role/RoleBinding
 │       └── orchestrator.yaml       # Orchestrator Deployment + PVC + serviceAccountName
+├── k3s/                            # W3: multi-node k3s harness (cross-continent;
+│                                   #     setup/teardown/load-image/crossnode-check/regression)
 ├── helm/sdlcma/                    # 1a.4: Helm chart — drop-in for the raw manifests
 │   ├── Chart.yaml                  # version 0.1.0 / appVersion 1a.4
 │   ├── values.yaml                 # all knobs; defaults reproduce raw manifests 1:1

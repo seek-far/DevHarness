@@ -31,6 +31,10 @@ spec:
         prometheus.io/path: {{ .Values.observability.scrapePath | quote }}
         {{- end }}
     spec:
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.extraHostAliases }}
       hostAliases:
         {{- toYaml . | nindent 8 }}
@@ -69,10 +73,17 @@ metadata:
     app: gateway
     {{- include "sdlcma.labels" . | nindent 4 }}
 spec:
-  type: ClusterIP
+  {{- /* ClusterIP by default (kind reaches the webhook via ingress-nginx +
+       extraPortMappings). k3s has no extraPortMappings and its traefik is
+       disabled -- :80 belongs to a co-tenant GitLab -- so that path sets
+       type=NodePort and pins a port. See docs/k3s.md. */}}
+  type: {{ .Values.gateway.service.type }}
   selector:
     app: gateway
   ports:
     - port: {{ .Values.gateway.service.port }}
       targetPort: {{ .Values.gateway.service.port }}
       name: http
+      {{- with .Values.gateway.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
