@@ -186,6 +186,62 @@ print('!{} {}  {}'.format(new[0]['iid'], new[0]['source_branch'], new[0]['web_ur
   sleep 15
 done
 
+# ── W4 observations ────────────────────────────────────────────────────────
+# Not pass/fail — three things that are invisible from the cluster's own view
+# and that someone will otherwise misread. Printed after the run either way.
+echo
+say "W4 observations"
+
+# (1) Orphaned evaluation containers. When a ver99 worker is evicted or its
+# soft node affinity falls back to the other node, mini's sibling container
+# outlives it until its own `sleep` window (2h) expires. That is BY DESIGN —
+# it is what makes resume possible — but on ls4900 at 15-way concurrency it
+# can be tens of GB of disk held for two hours. No janitor: a wrong guess
+# would kill a run that is mid-recovery. Make it visible instead.
+ORPHANS=$(docker ps --filter name=minisweagent- --format '{{.ID}} {{.RunningFor}} {{.Image}}' 2>/dev/null)
+if [ -n "$ORPHANS" ]; then
+  say "  eval containers alive on THIS host ($(echo "$ORPHANS" | wc -l)):"
+  echo "$ORPHANS" | sed 's/^/      /'
+  say "  (expected while runs are in flight; older than ~2h means a leak)"
+else
+  say "  ✓ no mini evaluation containers on this host"
+fi
+
+# (2) Image identity across nodes. A tag proves nothing here: images are
+# side-loaded with `k3s ctr images import` and pulled IfNotPresent, so two
+# nodes can hold different content under one name and nothing reports it.
+# Compare what each node's kubelet actually has, and read the provenance
+# label rather than trusting the tag.
+WORKER_IMG=$(kc -n "$NAMESPACE" get cm orchestrator-config \
+             -o jsonpath='{.data.WORKER_IMAGE}' 2>/dev/null)
+if [ -n "$WORKER_IMG" ]; then
+  say "  worker image: $WORKER_IMG"
+  for n in "$SERVER_NODE" "$REMOTE_NODE"; do
+    if kc get node "$n" -o jsonpath='{.status.images[*].names}' 2>/dev/null \
+         | tr ' ' '\n' | grep -qxF "$WORKER_IMG"; then
+      say "    ✓ present on $n"
+    else
+      say "    ✗ MISSING on $n → a worker scheduled there ImagePullBackOffs,"
+      say "      and that failure is silent (Job never fails; warmup timeout)"
+      say "      fix: bash infra/k3s/load-image.sh --node $n $WORKER_IMG"
+    fi
+  done
+  MINI_COMMIT=$(docker image inspect "$WORKER_IMG" \
+                --format '{{index .Config.Labels "io.sdlcma.mini-commit"}}' 2>/dev/null)
+  [ -n "$MINI_COMMIT" ] && [ "$MINI_COMMIT" != "<no value>" ] \
+    && say "    mini-commit=$MINI_COMMIT (cross-check bf_worker/agents/vendor/mini/UPSTREAM.md)"
+fi
+
+# (3) Where the RunRecord landed. The journal is a node-local hostPath and the
+# runrecord-exporter is pinned to the server node, so a run on the remote node
+# is INVISIBLE to Prometheus/Grafana — `sdlcma_runs_total` is structurally low
+# rather than wrong. Fixing that is W5/W6 work; until then, read the directory.
+if [ "$WORKER_NODE" = "$REMOTE_NODE" ]; then
+  say "  ⚠ this run's RunRecord is on $REMOTE_NODE, NOT in the exporter's view."
+  say "    Do not use Grafana to judge cross-node runs. Read it directly:"
+  say "      ssh $REMOTE_NODE 'ls -t /var/sdlcma/journal | head'"
+fi
+
 # ── verdict ────────────────────────────────────────────────────────────────
 echo
 if [ "$RESULT" = PASS ] && [ "$WORKER_NODE" = "$REMOTE_NODE" ]; then

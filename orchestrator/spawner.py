@@ -278,6 +278,101 @@ def _k8s_job_name(bug_id: str, restart_count: int = 0) -> str:
     return name[:63].rstrip("-")
 
 
+# A label VALUE is a laxer alphabet than a DNS-1123 label (object name):
+# underscores and dots are legal, case is preserved, only the first/last
+# character must be alphanumeric. Verified against a live 1.36 apiserver that
+# real bug_ids go in verbatim — `2026_08_03-11_22_33_4_ab12`,
+# `astropy__astropy-12907`, `BUG-LOCAL-1` were all accepted (W4 design, L0).
+_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$")
+
+
+def _k8s_label_value(value: str) -> str:
+    """Make `value` usable as a label value, changing it as little as possible.
+
+    Deliberately NOT `_k8s_job_name`: that one has to satisfy DNS-1123, which
+    would mangle every underscore in a bug_id for no reason here.
+
+    The result is for humans and selectors only. The authoritative bug_id is
+    the container's BUG_ID env var — never reverse a sanitised label back into
+    an identity.
+    """
+    value = (value or "")[:63]
+    if _LABEL_VALUE_RE.match(value):
+        return value
+    cleaned = re.sub(r"[^-A-Za-z0-9_.]", "-", value).strip("-._")[:63]
+    return cleaned or "unknown"
+
+
+# k8s resource quantity, e.g. "3", "500m", "4Gi", "1.5". Validated at startup
+# rather than at spawn time: a typo here makes EVERY create_namespaced_job()
+# fail with a 422, i.e. every bug silently dropped, with the errors buried in
+# normal log traffic.
+_QUANTITY_RE = re.compile(r"^\d+(\.\d+)?(m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$")
+
+_RESUME_AFFINITY_MODES = ("preferred", "required", "off")
+
+
+def _parse_json_setting(raw: str, expected: type, what: str):
+    """Parse one of the JSON-string settings, tolerating garbage.
+
+    Matches the pre-existing k8s_host_aliases stance: log and continue with
+    the empty value. Fatal-on-typo is reserved for the resource quantities,
+    where a mistake breaks every spawn rather than one optional feature.
+    """
+    import json
+    if not (raw or "").strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("[K8sSpawner] %s is not valid JSON (%s); ignoring it", what, e)
+        return None
+    if not isinstance(parsed, expected):
+        logger.error("[K8sSpawner] %s must be a JSON %s, got %s; ignoring it",
+                     what, expected.__name__, type(parsed).__name__)
+        return None
+    return parsed or None
+
+
+_TOLERATION_FIELDS = ("key", "operator", "value", "effect", "toleration_seconds")
+
+
+def _toleration(raw: dict):
+    """Build a V1Toleration from an operator-supplied dict.
+
+    Accepts the K8S WIRE SHAPE (`tolerationSeconds`) as well as the python
+    client's snake_case, because everything an operator can copy — the k8s
+    docs, `kubectl get -o yaml`, our own Helm values — is camelCase, while
+    V1Toleration(**t) only takes snake_case. Without this every spawn would
+    die with a TypeError on a config that looks exactly right.
+
+    Unknown keys are dropped with a warning rather than raised: one typo in an
+    optional field should not stop every worker from being spawned.
+    """
+    from kubernetes import client
+    kwargs = {}
+    for key, value in (raw or {}).items():
+        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower()
+        if snake in _TOLERATION_FIELDS:
+            kwargs[snake] = value
+        else:
+            logger.warning("[K8sSpawner] toleration field %r is not a k8s "
+                           "toleration key — ignoring it", key)
+    return client.V1Toleration(**kwargs)
+
+
+def _worker_resume_enabled() -> bool:
+    """Is intra-loop resume (W2/W2.5) on for the workers this orchestrator spawns?
+
+    Read from the orchestrator's OWN environment because that is exactly what
+    _build_job forwards to the worker. Gating the restart node affinity on it
+    keeps the affinity block out of the Job spec for every deployment that
+    isn't resumable — which is what makes "empty config, byte-identical spec"
+    hold without a separate switch.
+    """
+    return (os.getenv("BF_STEP_CHECKPOINT") or "none").strip().lower() != "none"
+
+
 # ── ECS mode ─────────────────────────────────────────────────────
 
 class EcsTaskProxy:
@@ -514,16 +609,61 @@ class K8sJobProxy:
     plus reload_status() (HealthMonitor refreshes via it, same as Docker).
     """
 
-    def __init__(self, batch_api, job_name: str, namespace: str):
+    # A Job whose pod never gets scheduled would otherwise cost one pod LIST
+    # per HealthMonitor tick, forever. 20 attempts is minutes of grace and then
+    # it stops asking.
+    _MAX_NODE_LOOKUPS = 20
+
+    def __init__(self, batch_api, job_name: str, namespace: str, core_api=None):
         self._batch = batch_api
         self._job_name = job_name
         self._namespace = namespace
         self._returncode = None
+        # Which node the pod landed on (W4/D7). Cached on first sighting so a
+        # restart can steer the replacement back there even after the Job and
+        # its pod are gone — the W2.5 evaluation container and step-checkpoint
+        # records are node-local, so resume only works on the original node.
+        self._core = core_api
+        self._node_name = None
+        self._node_lookups = 0
 
     @property
     def pid(self):
         """The Job name doubles as a human-readable pseudo-pid."""
         return self._job_name
+
+    @property
+    def node_name(self) -> str:
+        return self._node_name or ""
+
+    def lookup_node(self) -> str:
+        """Read (once) which node this Job's pod is on. Never raises.
+
+        Called from reload_status(), which the HealthMonitor runs every tick —
+        so a transient API error or a missing RBAC verb must degrade to "we
+        don't know the node" and nothing else. Getting this wrong would break
+        exit-code detection, which is far more important than the affinity
+        hint it feeds.
+        """
+        if self._core is None or self._node_name or self._node_lookups >= self._MAX_NODE_LOOKUPS:
+            return self.node_name
+        self._node_lookups += 1
+        try:
+            pods = self._core.list_namespaced_pod(
+                namespace=self._namespace,
+                label_selector=f"job-name={self._job_name}",
+            ).items
+        except Exception as e:
+            logger.debug("[K8sSpawner] node lookup job=%s: %s", self._job_name, e)
+            return ""
+        for p in pods:
+            node = getattr(getattr(p, "spec", None), "node_name", None)
+            if node:
+                self._node_name = node
+                logger.info("[K8sSpawner] job=%s scheduled on node=%s",
+                            self._job_name, node)
+                break
+        return self.node_name
 
     @property
     def returncode(self):
@@ -564,7 +704,11 @@ class K8sJobProxy:
             self._returncode = 0
         elif status.failed:
             self._returncode = 1
-        # else still active → leave returncode None
+        else:
+            # Still running → this is the window in which the pod exists and
+            # its nodeName is readable. Cache it now; after a restart deletes
+            # the Job the pod is gone and the answer is unrecoverable.
+            self.lookup_node()
 
     async def wait(self):
         """Poll Job status until it reaches a terminal state."""
@@ -591,7 +735,14 @@ class K8sJobSpawner:
                  worker_config_map: str, secret_name: str,
                  job_ttl_seconds: int,
                  host_aliases: list | None = None,
-                 journal_host_path: str = ""):
+                 journal_host_path: str = "",
+                 cpu_request: str = "", mem_request: str = "",
+                 cpu_limit: str = "", mem_limit: str = "",
+                 ephemeral_storage_request: str = "",
+                 docker_sock: str = "",
+                 step_checkpoint_host_path: str = "",
+                 node_selector: str = "", tolerations: str = "",
+                 resume_affinity: str = "preferred"):
         self._registry = registry
         self._redis_url = redis_url
         self._worker_image = worker_image
@@ -606,6 +757,41 @@ class K8sJobSpawner:
         self._host_aliases = host_aliases or []
         self._journal_host_path = journal_host_path
 
+        # ── W4 worker Job shaping. Every one of these is default-empty and
+        # conditionally rendered, so an unconfigured deployment still produces
+        # the pre-W4 Job spec (labels aside — see _build_job).
+        self._requests = self._quantities({
+            "cpu": cpu_request,
+            "memory": mem_request,
+            "ephemeral-storage": ephemeral_storage_request,
+        }, "request")
+        self._limits = self._quantities({
+            "cpu": cpu_limit,
+            "memory": mem_limit,
+        }, "limit")
+        if self._limits and not self._requests:
+            # Legal (k8s defaults requests to limits) but almost always a typo,
+            # and it silently makes the pod Guaranteed-ish with a request the
+            # operator never chose.
+            logger.warning("[K8sSpawner] worker limits set without requests — k8s will "
+                           "derive requests from limits; set them explicitly instead")
+        self._docker_sock = docker_sock
+        self._step_checkpoint_host_path = step_checkpoint_host_path
+        self._node_selector = _parse_json_setting(
+            node_selector, dict, "K8S_WORKER_NODE_SELECTOR")
+        self._tolerations = _parse_json_setting(
+            tolerations, list, "K8S_WORKER_TOLERATIONS")
+        mode = (resume_affinity or "preferred").strip().lower()
+        if mode not in _RESUME_AFFINITY_MODES:
+            # Fatal on purpose: a typo here degrades silently to "no affinity",
+            # which turns W2.5's exactly-once into a full re-run on every
+            # restart with nothing in the logs to say so.
+            raise ValueError(
+                f"K8S_WORKER_RESUME_AFFINITY={resume_affinity!r} is not valid "
+                f"(expected one of {'|'.join(_RESUME_AFFINITY_MODES)})"
+            )
+        self._resume_affinity = mode
+
         from kubernetes import client, config
         from kubernetes.config.config_exception import ConfigException
         try:
@@ -615,6 +801,28 @@ class K8sJobSpawner:
             config.load_kube_config()        # dev: orchestrator run outside k8s
             logger.info("[K8sSpawner] using local kubeconfig")
         self._batch = client.BatchV1Api()
+        # Pods are read only to answer "which node did this Job land on"
+        # (restart affinity). The existing Role already grants pods get/list.
+        self._core = client.CoreV1Api()
+
+    @staticmethod
+    def _quantities(values: dict, kind: str) -> dict | None:
+        """Validate + collect the non-empty resource quantities.
+
+        Raises at construction rather than at spawn time — see _QUANTITY_RE.
+        """
+        out = {}
+        for key, raw in values.items():
+            raw = (raw or "").strip()
+            if not raw:
+                continue
+            if not _QUANTITY_RE.match(raw):
+                raise ValueError(
+                    f"worker {key} {kind} {raw!r} is not a valid k8s quantity "
+                    f"(e.g. '3', '500m', '4Gi')"
+                )
+            out[key] = raw
+        return out or None
 
     async def spawn(self, bug_id: str, project_id: str, project_web_url: str, job_id: str,
                     source_branch: str = "") -> WorkerEntry:
@@ -634,21 +842,40 @@ class K8sJobSpawner:
         old = self._registry.get(bug_id)
         restart_count = (old.restart_count + 1) if old else 1
 
+        # ORDER MATTERS: read the node BEFORE terminating. terminate() deletes
+        # the Job with Background propagation, so its pod disappears
+        # asynchronously and with it the only record of where this bug was
+        # running. W2.5's resume needs that node (the evaluation container and
+        # the step-checkpoint records are both node-local).
+        node_hint = ""
+        if old and old.process is not None:
+            try:
+                node_hint = old.process.lookup_node()
+            except AttributeError:
+                pass    # non-k8s proxy in a test fixture
+            except Exception as e:
+                logger.debug("[K8sSpawner] node hint for bug_id=%s: %s", bug_id, e)
+
         if old and old.process:
             try:
                 old.process.terminate()
             except Exception as e:
                 logger.warning("[K8sSpawner] terminate bug_id=%s: %s", bug_id, e)
 
+        if node_hint:
+            logger.info("[K8sSpawner] bug_id=%s restarting with node preference %s",
+                        bug_id, node_hint)
         entry = await self._start_job(bug_id, project_id, project_web_url, job_id,
                                       source_branch=source_branch,
-                                      restart_count=restart_count)
+                                      restart_count=restart_count,
+                                      node_hint=node_hint)
         self._registry.register(entry)
         logger.info("[K8sSpawner] restarted bug_id=%s restart_count=%d", bug_id, restart_count)
         return entry
 
     def _build_job(self, job_name: str, bug_id: str, project_id: str,
-                   project_web_url: str, job_id: str, source_branch: str = ""):
+                   project_web_url: str, job_id: str, source_branch: str = "",
+                   node_hint: str = ""):
         from kubernetes import client
 
         env = [
@@ -669,7 +896,18 @@ class K8sJobSpawner:
         # (same "empty means unchanged" convention as journal_host_path).
         # MINI_IMPL / BF_STEP_CHECKPOINT select the vendored mini loop and its
         # intra-loop resume (plan item W2).
-        for var in ("MINI_IMPL", "BF_STEP_CHECKPOINT", "BF_AGENT_CONFIG"):
+        # BF_STEP_LEDGER selects W2.5's exactly-once command ledger (and is the
+        # A/B control arm); BF_MINI_CONTAINER_TIMEOUT is the ONLY way ver99 can
+        # size the resume window (it has no --config overlay to layer);
+        # BF_MAX_COST_USD is the only cap that bounds spend rather than work.
+        # NOT forwarded: BF_STEP_CHECKPOINT_DIR — that one is owned by the
+        # hostPath mount below. Forwarding the orchestrator's own value would
+        # hand the worker a path that does not exist in its pod, and the step
+        # store is startup-strict, so EVERY worker would die before its first
+        # LLM call.
+        for var in ("MINI_IMPL", "BF_STEP_CHECKPOINT", "BF_STEP_LEDGER",
+                    "BF_MINI_CONTAINER_TIMEOUT", "BF_MAX_COST_USD",
+                    "BF_AGENT_CONFIG"):
             if os.getenv(var):
                 env.append(client.V1EnvVar(name=var, value=os.environ[var]))
         # Surface the journal mount to the worker code path. The worker reads
@@ -695,6 +933,50 @@ class K8sJobSpawner:
                     type="DirectoryOrCreate",
                 ),
             ))
+        # W2.5's intra-loop step checkpoint (plan item W4). Same pattern as the
+        # journal mount, and node-local for the same reason the resume itself
+        # is: the evaluation container these records point at lives on this
+        # node's dockerd, so "record readable" and "container attachable" are
+        # true together or not at all. Without this the records land in the
+        # Pod's own $HOME and W2.5 does nothing on k8s.
+        if self._step_checkpoint_host_path:
+            env.append(client.V1EnvVar(name="BF_STEP_CHECKPOINT_DIR",
+                                       value=self._step_checkpoint_host_path))
+            volume_mounts.append(client.V1VolumeMount(
+                name="step-checkpoint",
+                mount_path=self._step_checkpoint_host_path,
+            ))
+            volumes.append(client.V1Volume(
+                name="step-checkpoint",
+                host_path=client.V1HostPathVolumeSource(
+                    path=self._step_checkpoint_host_path,
+                    type="DirectoryOrCreate",
+                ),
+            ))
+        # Host docker socket, so mini can drive the node's dockerd to run its
+        # sibling evaluation container (ver99 in a pod).
+        #
+        # ⚠️ This works ONLY because the worker container runs as root: the
+        #    socket is root:docker 0660 and the docker GID differs per node
+        #    (ls4900=137, minus=980, both measured), so no single
+        #    supplementalGroups value can be correct on both. Adding a
+        #    runAsNonRoot / runAsUser securityContext here would break ver99
+        #    with a permission-denied buried in mini's stderr. Pinned by a test.
+        if self._docker_sock:
+            volume_mounts.append(client.V1VolumeMount(
+                name="docker-sock",
+                mount_path=self._docker_sock,
+            ))
+            volumes.append(client.V1Volume(
+                name="docker-sock",
+                host_path=client.V1HostPathVolumeSource(
+                    path=self._docker_sock,
+                    # `Socket` rather than `File`: mistyping the path then fails
+                    # at mount time with a clear reason instead of handing the
+                    # container an empty file.
+                    type="Socket",
+                ),
+            ))
 
         container = client.V1Container(
             name="bf-worker",
@@ -711,6 +993,14 @@ class K8sJobSpawner:
             # Empty list → kubernetes client serializes to None → byte-identical
             # to the pre-2026-05-30 Job spec when no journal mount is set.
             volume_mounts=volume_mounts or None,
+            # Both None when unset → no `resources` key at all → BestEffort QoS,
+            # exactly as before W4. When set, note what the request MEANS for a
+            # ver99 worker: it books node budget on behalf of mini's sibling
+            # evaluation container, which the scheduler cannot see. See
+            # settings/orchestrator_settings.py and docs/k3s.md.
+            resources=client.V1ResourceRequirements(
+                requests=self._requests, limits=self._limits,
+            ) if (self._requests or self._limits) else None,
         )
         # Translate the operator-supplied dicts into V1HostAlias objects. Each
         # item is {"ip": str, "hostnames": [str]}; same shape as the K8s API.
@@ -718,7 +1008,20 @@ class K8sJobSpawner:
             client.V1HostAlias(ip=a["ip"], hostnames=a["hostnames"])
             for a in self._host_aliases
         ] or None
+        tolerations = [
+            _toleration(t) for t in (self._tolerations or []) if isinstance(t, dict)
+        ] or None
         pod_spec = client.V1PodSpec(
+            # `Never` + backoffLimit=0 below are NOT conservative defaults —
+            # together they are the declaration that the orchestrator's
+            # HealthMonitor is the SINGLE owner of restart policy. Handing any
+            # of it back to the Job controller creates two owners: during a
+            # kubelet CrashLoopBackOff (10s→20s→40s…) the heartbeat key expires
+            # at 60s, the monitor spawns a replacement Job, and the backed-off
+            # pod then starts too — two workers on one bug_id, which for ver99
+            # means two processes `docker exec`-ing into the SAME evaluation
+            # container and sharing one /.sdlcma ledger. That silently breaks
+            # W2.5's exactly-once. Pinned by tests; see docs/architecture.md.
             restart_policy="Never",
             # The worker talks only to Redis / GitLab / the LLM — never the
             # k8s API. Don't mount the (default) SA token: removes a useless
@@ -728,31 +1031,90 @@ class K8sJobSpawner:
             containers=[container],
             host_aliases=host_aliases,
             volumes=volumes or None,
+            # All three default to None → pod spec identical to pre-W4.
+            node_selector=self._node_selector or None,
+            tolerations=tolerations,
+            affinity=self._resume_affinity_spec(node_hint),
         )
+        labels = self._labels(job_name, bug_id)
         template = client.V1PodTemplateSpec(
-            metadata=client.V1ObjectMeta(labels={"app": "bf-worker", "bug-id": job_name}),
+            metadata=client.V1ObjectMeta(labels=labels),
             spec=pod_spec,
         )
         return client.V1Job(
             metadata=client.V1ObjectMeta(
                 name=job_name,
                 namespace=self._namespace,
-                labels={"app": "bf-worker", "bug-id": job_name},
+                labels=labels,
             ),
             spec=client.V1JobSpec(
+                # See the restart_policy comment above: this is half of the
+                # single-owner contract, not a tunable.
                 backoff_limit=0,                              # orchestrator owns retries
                 ttl_seconds_after_finished=self._job_ttl_seconds,
                 template=template,
             ),
         )
 
+    @staticmethod
+    def _labels(job_name: str, bug_id: str) -> dict:
+        """Labels for the Job and its pod template.
+
+        `bug-id` carries the actual bug_id. Until W4 it carried the JOB NAME —
+        a name that meant something else than it said, which nothing in the
+        repo selected on (every script uses `app=bf-worker`) but which would
+        have become load-bearing the moment we started querying by label.
+        `job-name` is the query key for "the pod of THIS Job" (including the
+        -rN restart suffix); we set it ourselves rather than relying on the
+        controller-injected `batch.kubernetes.io/job-name`, whose name has
+        changed across k8s versions while this chart serves both 1.35 and 1.36.
+        """
+        return {
+            "app": "bf-worker",
+            "job-name": job_name,
+            "bug-id": _k8s_label_value(bug_id),
+        }
+
+    def _resume_affinity_spec(self, node_hint: str):
+        """Soft-steer a RESTARTED worker back to the node it died on.
+
+        Only rendered when all three hold — otherwise the pod spec is
+        unchanged from pre-W4:
+          * resume is actually enabled for these workers (else there is
+            nothing on that node worth going back for),
+          * we know where the previous attempt ran (a cold spawn does not),
+          * the operator has not turned it off.
+
+        `preferred`, not `required`, is the whole point: if the node is gone
+        the pod still schedules somewhere and cold-starts — FileStore.load()
+        simply finds no record there, which is correct behaviour, just more
+        expensive. A required affinity would leave the pod Pending forever, and
+        since backoffLimit=0 means the Job never fails, MAX_WORKER_RESTARTS
+        would never fire either: the bug would vanish without a trace.
+        """
+        if not node_hint or self._resume_affinity == "off" or not _worker_resume_enabled():
+            return None
+        from kubernetes import client
+        term = client.V1NodeSelectorTerm(
+            match_expressions=[client.V1NodeSelectorRequirement(
+                key="kubernetes.io/hostname", operator="In", values=[node_hint])],
+        )
+        if self._resume_affinity == "required":
+            return client.V1Affinity(node_affinity=client.V1NodeAffinity(
+                required_during_scheduling_ignored_during_execution=
+                    client.V1NodeSelector(node_selector_terms=[term])))
+        return client.V1Affinity(node_affinity=client.V1NodeAffinity(
+            preferred_during_scheduling_ignored_during_execution=[
+                client.V1PreferredSchedulingTerm(weight=100, preference=term)]))
+
     async def _start_job(self, bug_id: str, project_id: str, project_web_url: str,
-                          job_id: str, source_branch: str = "", restart_count: int = 0) -> WorkerEntry:
+                          job_id: str, source_branch: str = "", restart_count: int = 0,
+                          node_hint: str = "") -> WorkerEntry:
         from kubernetes.client.rest import ApiException
 
         job_name = _k8s_job_name(bug_id, restart_count)
         job = self._build_job(job_name, bug_id, project_id, project_web_url, job_id,
-                              source_branch=source_branch)
+                              source_branch=source_branch, node_hint=node_hint)
 
         loop = asyncio.get_event_loop()
         try:
@@ -770,7 +1132,7 @@ class K8sJobSpawner:
             else:
                 raise
 
-        proxy = K8sJobProxy(self._batch, job_name, self._namespace)
+        proxy = K8sJobProxy(self._batch, job_name, self._namespace, self._core)
         logger.info("[K8sSpawner] started bug_id=%s job=%s", bug_id, job_name)
 
         now = time.time()

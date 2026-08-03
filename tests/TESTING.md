@@ -587,6 +587,127 @@ retrying.
 
 ---
 
+## 5c. ver99 on k3s ("W4") — real cluster, staged
+
+Acceptance for running the SWE-bench workload as k8s Jobs. Ordered so the
+cheapest thing that could invalidate the design runs first. Cluster and hosts:
+`docs/k3s.md`; design record `/mnt/d/PL/sdlcma/W4-worker-job-design.md`.
+
+### L0 — API pre-flight (before writing any code) ✅ passed 2026-08-03
+
+The python `kubernetes` client is pinned `<33` (33+ silently breaks in-cluster
+bearer auth) while the k3s server is 1.36 — four minors apart. W4 also adds a
+new API surface (`list_namespaced_pod` for the restart node hint).
+
+Run it **inside the orchestrator pod**, so it uses the real in-cluster token —
+that is the exact path that broke before:
+
+```bash
+ssh ls@ls4900 'bash -lc "kubectl -n sdlcma exec -i deploy/orchestrator -- python - < /tmp/l0.py"'
+```
+
+The probe should check, in order: client + server version; the two calls the
+spawner already makes; `list_namespaced_pod` + `.spec.node_name`; and — the
+part worth copying — a **server-side dry run** of a W4-shaped Job:
+
+```python
+batch.create_namespaced_job(namespace=NS, body=job, dry_run="All")
+```
+
+That validates the new fields (`resources`, tolerations with
+`tolerationSeconds`, node affinity, three hostPath volumes including
+`type: Socket`, the new labels) against the real apiserver with **zero side
+effects and zero scheduling**. Use it for any future Job-spec change: it turns
+"will this serialize and be accepted" into a question you answer before
+writing the code, not during an acceptance run.
+
+Result 2026-08-03: client 32.0.1 × server v1.36.2+k3s1, everything PASS,
+`read_namespaced_job` after the dry run returned 404 (nothing persisted). If
+the cluster has no Jobs at the time, `read_namespaced_job_status` can only be
+SKIPped — create one throwaway Job (`image=dh-bf-worker:latest`,
+`command=["/bin/true"]`) rather than reporting a pass you did not get.
+
+### L1 — ver0 unaffected
+
+```bash
+bash infra/k3s/setup.sh          # no --ver99
+bash infra/k3s/gitlab-smoke.sh
+kubectl -n sdlcma get job -o yaml | grep -c resources   # expect 0
+```
+
+### L2 — ver99 in a pod, single node (the core acceptance)
+
+```bash
+bash infra/k3s/build-swebench-image.sh          # prints the immutable tag
+# paste that tag into values-k3s-ver99.yaml, then:
+bash infra/k3s/load-image.sh --node local dh-bf-worker-swebench:<sha>
+bash infra/k3s/setup.sh --ver99
+# push an instance/<id> branch (infra/swebench-gitlab/setup_instance.py)
+```
+
+Check every line — "the MR appeared" is not sufficient:
+
+| # | what | how |
+|---|---|---|
+| a | worker pod Running on the expected node | `kubectl -n sdlcma get pod -l app=bf-worker -o wide` |
+| b | Job carries `resources` | `kubectl -n sdlcma get job -o jsonpath='{..resources}'` |
+| c | eval container started on the HOST dockerd | `docker ps --filter name=minisweagent-` |
+| d | ledger inside it | `docker exec <cid> ls /.sdlcma` |
+| e | checkpoint on the hostPath | `ls /var/sdlcma/step_checkpoints/<bug_id>/` |
+| f | patch reached GitLab | branch compare `instance/<id>...auto/bf/*` |
+| g | RunRecord sane | `cat /var/sdlcma/journal/*/record.json` |
+| h | CI green ⇒ resolved | the MR's pipeline |
+| i | stale completion key does not misfire | run the SAME instance twice (on ver99 `bug_id == instance_id`, and `worker:completed:{bug_id}` has a 24 h TTL); the second run must complete normally |
+| j | the new labels work | `kubectl -n sdlcma get pod -l bug-id=<real bug_id>` |
+
+Diagnose failures in the order b → logs → c: the three silent failure points
+are the wrong image, `BF_STEP_CHECKPOINT` set on the worker instead of the
+orchestrator, and the image missing from that node's containerd.
+`kubectl exec <pod> -- docker version` is the shortest socket check.
+
+### L3 — resume across a pod kill
+
+```bash
+CID=$(docker ps --filter name=minisweagent- -q | head -1)   # record BEFORE
+kubectl -n sdlcma delete pod -l app=bf-worker --force --grace-period=0
+docker ps --filter id=$CID          # must still be alive — this is the premise
+```
+
+Expect: new pod on the SAME node, Job suffixed `-r1`, the log's attach line
+naming `$CID` (and no second `minisweagent-*` container),
+`step_resume_count >= 1`, **`step_replayed_command_count == 0`**, and a patch
+identical to an uninterrupted control run. If the patch cannot be fetched,
+report SKIP — never PASS.
+
+- **L3b (the reason `preferred` was chosen):** `kubectl cordon <node>` first,
+  then kill. The pod must land on the OTHER node and cold-start, not sit
+  Pending. Uncordon afterwards.
+- **L3c (negative control):** set `resumeAffinity: required` and repeat L3b.
+  The pod should stay Pending forever *and the Job never fail* — that is the
+  failure mode `preferred` avoids, worth seeing once rather than assuming.
+
+⚠️ Do **not** restart the orchestrator during L2/L3. Registry rehydration is
+W5, so a restart orphans in-flight workers and you are no longer testing W4.
+
+### L4 — cross-node
+
+Ship the image to the remote node first (`load-image.sh --node <n> <tag>`),
+pin workers there via `K8S_WORKER_NODE_SELECTOR`, repeat L2. Then also check:
+the placement is real and not luck (remove the nodeSelector, submit 4
+instances, expect both nodes used); zero heartbeat-driven restarts; the
+RunRecord landed on the remote node's journal; and — for the one loose
+number in the design — that 3 concurrent workers on the small node do not OOM
+the host (`ssh <n> free -g`, `dmesg | grep -i oom`).
+
+### L5 — confirm the observability blind spot (not a fix)
+
+Cross-node runs write their RunRecord on that node, while the exporter is
+pinned to the server node. Verify the exporter's count equals the SERVER-side
+journal only, and record the number. The point is to stop anyone reading
+Grafana as if it covered both nodes; the fix is W5/W6.
+
+---
+
 ## What "tested" means here
 
 - §1–§2 are deterministic and gate every change.

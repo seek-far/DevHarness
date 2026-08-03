@@ -63,9 +63,41 @@ LOCAL_VALUES_FILE="${LOCAL_VALUES_FILE:-infra/helm/sdlcma/values.local-k3s.yaml}
 ENV_FILE="${ENV_FILE:-settings/worker_local_multi_process.env}"
 SERVER_NODE="${SERVER_NODE:-ls4900}"
 REMOTE_NODE="${REMOTE_NODE:-minus}"
-CROSS_TAINT="${CROSS_TAINT:-sdlcma.io/cross-continent=true:NoSchedule}"
+CROSS_TAINT="${CROSS_TAINT-sdlcma.io/cross-continent=true:NoSchedule}"
+# The key alone, needed to REMOVE the taint (`key-`) when CROSS_TAINT is empty.
+# Kept separate so "" can mean "converge to absent" rather than "unset".
+CROSS_TAINT_KEY="${CROSS_TAINT_KEY:-sdlcma.io/cross-continent}"
 LOAD_REMOTE="${LOAD_REMOTE:-0}"
 IMAGES=(dh-gateway dh-orchestrator dh-bf-worker dh-llm-gateway)
+
+# ── --ver99: run the SWE-bench workload on this cluster (plan item W4) ──────
+# Three coupled changes; doing any subset leaves a config that looks enabled
+# and is not:
+#   1. layer values-k3s-ver99.yaml  (worker image + docker.sock + resources)
+#   2. drop the cross-continent taint so worker Jobs can use both nodes
+#   3. pre-flight the swebench image, whose absence would otherwise surface as
+#      a silent ImagePullBackOff
+VER99=0
+SKIP_IMAGES=0
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ver99) VER99=1; shift ;;
+    # Config-only re-run: skip build+import entirely. The import step cannot
+    # vouch for a moving tag without sudo (see load-image.sh), so on a
+    # password-gated host EVERY re-run would otherwise cost a ~2 GB
+    # save/import plus a human — even when only a ConfigMap value changed.
+    # This flag is the operator ASSERTING the images are unchanged; it is not
+    # a check, which is why it has to be typed rather than inferred.
+    --skip-images) SKIP_IMAGES=1; shift ;;
+    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+VER99_VALUES_FILE="${VER99_VALUES_FILE:-infra/helm/sdlcma/values-k3s-ver99.yaml}"
+if [ "$VER99" = 1 ]; then
+  CROSS_TAINT=""
+fi
 
 START_TS=$(date +%s)
 say()   { printf '[t+%4ds] %s\n' $(($(date +%s) - START_TS)) "$*"; }
@@ -95,6 +127,34 @@ fi
 export KUBECONFIG="$K3S_KUBECONFIG"
 kc() { kubectl --context "$KCTX" "$@"; }
 say "  ✓ $K3S_KUBECONFIG (context=$KCTX)"
+
+# ── 0b: ver99 pre-flight ───────────────────────────────────────────────────
+# Resolve and validate the worker image ONCE, up front. It has to happen before
+# the image-import step (which checks whether the remote node has it) and
+# before helm — deriving it lazily at the helm step left the import step
+# referencing an unset variable, which `set -u` turns into a hard stop after
+# the run has already changed the cluster's taint.
+WORKER_IMAGE_TAG=""
+if [ "$VER99" = 1 ]; then
+  [ -f "$VER99_VALUES_FILE" ] || abort "--ver99 needs $VER99_VALUES_FILE"
+  WORKER_IMAGE_TAG=$(grep -oE 'dh-bf-worker-swebench:[A-Za-z0-9._-]+' "$VER99_VALUES_FILE" | head -1)
+  case "$WORKER_IMAGE_TAG" in
+    *REPLACE_ME|"")
+      abort "$VER99_VALUES_FILE still has the placeholder WORKER_IMAGE.
+   Build the image and paste the tag it prints:
+     bash infra/k3s/build-swebench-image.sh" ;;
+    *:latest)
+      # Not pedantry: imagePullPolicy is IfNotPresent and images are
+      # side-loaded (no registry to re-pull from), so a moving tag lets two
+      # nodes hold different content under one name with nothing to reveal it.
+      abort "$VER99_VALUES_FILE references a :latest tag. Use the immutable
+   tag from build-swebench-image.sh." ;;
+  esac
+  docker image inspect "$WORKER_IMAGE_TAG" >/dev/null 2>&1 \
+    || abort "$WORKER_IMAGE_TAG is not in the local docker daemon.
+   Build it:  bash infra/k3s/build-swebench-image.sh"
+  say "0b: ver99 mode — worker image $WORKER_IMAGE_TAG"
+fi
 
 # ── 1: deps + creds ────────────────────────────────────────────────────────
 say "1: deps + creds"
@@ -157,26 +217,50 @@ else
   say "    $SERVER_NODE). The cross-node check will not work until it returns."
 fi
 
-# ── 3: taint the cross-continent node ──────────────────────────────────────
-# Worker Jobs carry no resources and no nodeSelector until plan item W4, so
-# without this the scheduler treats a 15.6 GB WSL2 guest on another continent
-# as an equally good home for them — by coin flip, on every webhook. The
-# taint is a DECLARED default, greppable and reversible; relying on "that
-# node happens to lack the image" instead would produce ImagePullBackOff,
-# which fails silently (Job neither succeeds nor fails → returncode stays
-# None → warmup timeout → marked failed, with nothing naming the cause).
+# ── 3: cross-continent taint — converge to the mode we were asked for ──────
+# W3 (default): the taint is ON. Worker Jobs then carried no resources and no
+# nodeSelector, so without it the scheduler treated a 15.6 GB WSL2 guest on
+# another continent as an equally good home for them — by coin flip, on every
+# webhook. The taint was a DECLARED default, greppable and reversible;
+# relying on "that node happens to lack the image" instead produces
+# ImagePullBackOff, which fails silently (Job neither succeeds nor fails →
+# returncode stays None → warmup timeout → marked failed, cause unnamed).
 #
-# W4 removes this taint deliberately, together with the machinery that makes
-# cross-continent scheduling safe (resources + nodeSelector + toleration).
-say "3: taint $REMOTE_NODE ($CROSS_TAINT)"
-if kc get node "$REMOTE_NODE" >/dev/null 2>&1; then
-  kc taint node "$REMOTE_NODE" "$CROSS_TAINT" --overwrite >/dev/null \
-    && say "  ✓ tainted (remove with: kubectl taint node $REMOTE_NODE ${CROSS_TAINT%%=*}-)"
+# W4 (--ver99, or CROSS_TAINT=""): the taint comes OFF. That was always the
+# plan — it was a time-boxed stopgap, and leaving it would turn a temporary
+# measure into a permanent ban on the thing W4 exists to enable. What replaces
+# it is per-Job `resources` + `nodeSelector`, and — for the stateful side —
+# `nodeSelector` on every component that owns a PVC, pinned by a chart test.
+#
+# CONVERGES IN BOTH DIRECTIONS on purpose: going W3→W4 and back must be a
+# re-run of this script, not a hand-edited cluster.
+if [ -n "$CROSS_TAINT" ]; then
+  say "3: taint $REMOTE_NODE ($CROSS_TAINT)"
+  if kc get node "$REMOTE_NODE" >/dev/null 2>&1; then
+    kc taint node "$REMOTE_NODE" "$CROSS_TAINT" --overwrite >/dev/null \
+      && say "  ✓ tainted (remove with: kubectl taint node $REMOTE_NODE ${CROSS_TAINT%%=*}-)"
+  else
+    say "  ⚠ $REMOTE_NODE not in the cluster, skipping"
+  fi
 else
-  say "  ⚠ $REMOTE_NODE not in the cluster, skipping"
+  say "3: cross-continent taint OFF (worker Jobs may schedule on $REMOTE_NODE)"
+  if kc get node "$REMOTE_NODE" >/dev/null 2>&1; then
+    # `key-` removes it if present and is a no-op if not, so this is safe to
+    # re-run. The default taint key is derived from the default value of
+    # CROSS_TAINT, since CROSS_TAINT itself is empty here.
+    kc taint node "$REMOTE_NODE" "${CROSS_TAINT_KEY}-" >/dev/null 2>&1
+    say "  ✓ $REMOTE_NODE carries no ${CROSS_TAINT_KEY} taint"
+    say "    NOTE: a NoSchedule taint never evicts running pods — to put the"
+    say "    stopgap back, re-run without --ver99 AND delete in-flight Jobs."
+  else
+    say "  ⚠ $REMOTE_NODE not in the cluster, skipping"
+  fi
 fi
 
 # ── 4: build images ────────────────────────────────────────────────────────
+if [ "$SKIP_IMAGES" = 1 ]; then
+  say "4-5: --skip-images — not building, not importing (operator asserts unchanged)"
+else
 say "4: build images"
 for img in "${IMAGES[@]}"; do
   case "$img" in
@@ -212,6 +296,27 @@ LOAD_RC=${PIPESTATUS[0]}
 [ "$LOAD_RC" -eq 10 ] && exit 10
 [ "$LOAD_RC" -eq 0 ] || abort "image import failed (rc=$LOAD_RC)"
 
+# With --ver99 the taint is gone, so worker Jobs can land on the remote node —
+# and if the image never got imported there, the pod sits in ImagePullBackOff
+# and the failure is SILENT (the Job neither succeeds nor fails, so the
+# orchestrator only sees a warmup timeout). Check rather than ship: a ~1.5 GB
+# cross-ocean transfer on every idempotent re-run is not acceptable, and
+# `node.status.images` answers the question with no ssh at all.
+if [ "$VER99" = 1 ] && kc get node "$REMOTE_NODE" >/dev/null 2>&1; then
+  # `names[*]`, and match the registry-qualified form: containerd normalises
+  # `dh-bf-worker-swebench:<sha>` to `docker.io/library/dh-bf-worker-swebench:<sha>`
+  # on import, so an exact compare against the bare name never hits.
+  if kc get node "$REMOTE_NODE" -o jsonpath='{.status.images[*].names[*]}' 2>/dev/null \
+       | tr ' ' '\n' | grep -qE "(^|/)${WORKER_IMAGE_TAG}\$"; then
+    say "  ✓ $WORKER_IMAGE_TAG present on $REMOTE_NODE"
+  else
+    say "  ⚠ $WORKER_IMAGE_TAG is NOT on $REMOTE_NODE — workers scheduled there"
+    say "    will ImagePullBackOff (silently). Ship it once:"
+    say "      bash infra/k3s/load-image.sh --node $REMOTE_NODE $WORKER_IMAGE_TAG"
+  fi
+fi
+fi   # end of --skip-images guard
+
 # ── 6: namespace + secret ──────────────────────────────────────────────────
 say "6: namespace + sdlcma-secrets"
 kc create namespace "$NAMESPACE" --dry-run=client -o yaml | kc apply -f - >/dev/null
@@ -230,6 +335,10 @@ TS_IP="$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]')"
 [ -n "$TS_IP" ] || abort "tailscale ip -4 returned nothing — the overlay needs it for hostAliases"
 say "  $SERVER_NODE → $TS_IP"
 HELM_VALUES_ARGS=(-f "$VALUES_FILE")
+if [ "$VER99" = 1 ]; then
+  say "  layering $VER99_VALUES_FILE (worker image $WORKER_IMAGE_TAG)"
+  HELM_VALUES_ARGS+=(-f "$VER99_VALUES_FILE")
+fi
 [ -f "$LOCAL_VALUES_FILE" ] && { say "  layering $LOCAL_VALUES_FILE"; HELM_VALUES_ARGS+=(-f "$LOCAL_VALUES_FILE"); }
 # Only needed when monitoring.enabled=true (kube-prometheus-stack is a
 # conditional dependency). Harmless otherwise, and doing it unconditionally

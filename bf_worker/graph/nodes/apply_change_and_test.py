@@ -126,6 +126,7 @@ def _apply_model_patch_ver99(state: BugFixState, repo_path: Path) -> dict:
         tf.write(patch)
         patch_file = tf.name
 
+    attempts: list[str] = []
     last = ""
     try:
         for cmd in (
@@ -133,7 +134,21 @@ def _apply_model_patch_ver99(state: BugFixState, repo_path: Path) -> dict:
             ["git", "apply", patch_file],
             ["patch", "-p1", "-i", patch_file],
         ):
-            proc = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True)
+            try:
+                proc = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True)
+            except FileNotFoundError:
+                # The BINARY is missing, not the patch. This is a fallback
+                # ladder: an unavailable rung must be skipped, not fatal.
+                # Letting it raise costs far more than the rung itself — the
+                # exception escapes the loop and destroys the stderr of every
+                # attempt that DID run, so the operator is told "No such file
+                # or directory: 'patch'" while the real question (why git apply
+                # refused the diff) is unanswerable. Observed on the first
+                # ver99-in-a-pod run: the slim worker image has no `patch`.
+                logger.warning("[ver99] %s unavailable in this image — skipping this fallback",
+                               cmd[0])
+                attempts.append(f"$ {' '.join(cmd[:2])} → executable not found")
+                continue
             if proc.returncode == 0:
                 logger.info("[ver99] model_patch applied via '%s'; local test skipped (CI is oracle)",
                             " ".join(cmd[:2]))
@@ -144,7 +159,12 @@ def _apply_model_patch_ver99(state: BugFixState, repo_path: Path) -> dict:
                                    f"local pytest skipped — GitLab CI is the test oracle.",
                 }
             last = (proc.stderr or proc.stdout or "").strip()
-        logger.warning("[ver99] model_patch did not apply to clone: %s", last[-400:])
+            # Keep EVERY attempt's output. "git apply --3way failed" and
+            # "git apply failed" usually fail for different reasons, and only
+            # the last one used to survive into the error message.
+            attempts.append(f"$ {' '.join(cmd[:2])} (rc={proc.returncode})\n{last}")
+        last = "\n".join(attempts)[-1600:]
+        logger.warning("[ver99] model_patch did not apply to clone:\n%s", last[-800:])
         return {
             "test_passed": False,
             "apply_error": f"git apply of model_patch failed: {last[-800:]}",

@@ -83,6 +83,23 @@ class Orchestrator:
                 job_ttl_seconds=self._cfg.k8s_job_ttl_seconds,
                 host_aliases=host_aliases,
                 journal_host_path=getattr(self._cfg, "k8s_journal_host_path", "") or "",
+                # W4 worker Job shaping. getattr keeps older Settings objects
+                # (and the test fixtures built on them) constructible; every
+                # field is default-empty, so an unset one leaves the Job spec
+                # exactly as it was.
+                cpu_request=getattr(self._cfg, "k8s_worker_cpu_request", "") or "",
+                mem_request=getattr(self._cfg, "k8s_worker_mem_request", "") or "",
+                cpu_limit=getattr(self._cfg, "k8s_worker_cpu_limit", "") or "",
+                mem_limit=getattr(self._cfg, "k8s_worker_mem_limit", "") or "",
+                ephemeral_storage_request=getattr(
+                    self._cfg, "k8s_worker_ephemeral_storage_request", "") or "",
+                docker_sock=getattr(self._cfg, "k8s_worker_docker_sock", "") or "",
+                step_checkpoint_host_path=getattr(
+                    self._cfg, "k8s_worker_step_checkpoint_host_path", "") or "",
+                node_selector=getattr(self._cfg, "k8s_worker_node_selector", "") or "",
+                tolerations=getattr(self._cfg, "k8s_worker_tolerations", "") or "",
+                resume_affinity=getattr(
+                    self._cfg, "k8s_worker_resume_affinity", "preferred") or "preferred",
             )
         elif spawner_kind == "ecs":
             self._spawner = EcsWorkerSpawner(

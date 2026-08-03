@@ -78,6 +78,22 @@ abort() { echo "ABORT: $1" >&2; exit "${2:-4}"; }
 
 command -v docker >/dev/null || abort "docker not found"
 
+# The ver99 worker image (W4) is optional and carries an IMMUTABLE tag, so it
+# cannot be a hardcoded default. Pick up whatever swebench tags exist locally
+# and append them to BOTH default lists — a ver99 deployment needs the image on
+# every node that may run a worker, and forgetting it surfaces as a silent
+# ImagePullBackOff. Deployments without ver99 have no such image and see no
+# change at all.
+_swebench_tags() {
+  docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+    | grep -E '^dh-bf-worker-swebench:' | grep -v ':latest$' | sort -u
+}
+while IFS= read -r img; do
+  [ -n "$img" ] || continue
+  DEFAULT_LOCAL+=("$img")
+  DEFAULT_REMOTE+=("$img")
+done < <(_swebench_tags)
+
 # Resolve the list for one target: explicit argument wins, else the per-target
 # default. Validated here rather than up front, since the two targets can have
 # different lists in a single `--node all` run.
@@ -96,6 +112,71 @@ _require_present() {
 
 RC=0
 
+# Are all of these already visible to the local node's kubelet?
+#
+# Asked through the k8s API (`node.status.images`) rather than
+# `k3s ctr images ls`, because the latter needs sudo — and the entire point is
+# to answer this WITHOUT sudo. Without it, a host whose sudo is password-gated
+# can never complete setup.sh non-interactively: the import step returns 10
+# every time, even right after the operator imported the images by hand.
+#
+# Conservative on every uncertainty (no kubectl, no kubeconfig, node not found,
+# stale status): return 1 = "not sure, do the import". kubelet also caps
+# status.images (default 50), so a false negative is possible; a false negative
+# only costs a redundant import, while a false positive would silently skip a
+# needed one.
+_already_on_local_node() {
+  # A moving tag can never be verified this way. `dh-orchestrator:latest`
+  # keeps its name across a rebuild, so "present" would be true while the node
+  # still holds the previous build — and the run would come up with the OLD
+  # code under the NEW config, which is the worst outcome available: it looks
+  # deployed. That is not hypothetical; it happened on the first ver99 bring-up
+  # (the orchestrator ran pre-W4 code while every K8S_WORKER_* var was set).
+  # So: only an immutable tag may be skipped. This is the same argument as D14.
+  local img
+  for img in "$@"; do
+    case "$img" in
+      # `:latest` — obviously moving.
+      # `*-dirty` — moving too, and less obviously so: the suffix means the
+      #   working tree had uncommitted changes, so the tag names "some
+      #   uncommitted state of <sha>", and the next rebuild reuses it with
+      #   different content. Rebuilding a -dirty tag is precisely what happens
+      #   while iterating on a fix, which is when a stale skip hurts most.
+      *:latest|*-dirty) return 1 ;;
+    esac
+  done
+  command -v kubectl >/dev/null 2>&1 || return 1
+  # Pin the DEDICATED kubeconfig + an explicit context, never global kubectl
+  # state: this host's ~/.kube/config was overwritten by k3s once already, and
+  # sharing it between the kind and k3s harnesses is what turned
+  # infra/k8s/teardown.sh into a silent no-op. Missing file ⇒ fail closed.
+  local kubeconfig="${K3S_KUBECONFIG:-$HOME/.kube/k3s.yaml}"
+  [ -r "$kubeconfig" ] || return 1
+  local node names
+  node="${SERVER_NODE:-$(hostname 2>/dev/null)}"
+  [ -n "$node" ] || return 1
+  # `names[*]` (not `names`) — the former flattens to one name per token; the
+  # latter emits a JSON array per image, brackets and quotes included, which
+  # no plain string compare will ever match.
+  names=$(KUBECONFIG="$kubeconfig" kubectl --context "${KCTX:-default}" \
+            get node "$node" -o jsonpath='{.status.images[*].names[*]}' 2>/dev/null) || return 1
+  [ -n "$names" ] || return 1
+  # containerd NORMALISES on import: `dh-bf-worker:latest` is stored — and
+  # reported — as `docker.io/library/dh-bf-worker:latest`. Match the bare name
+  # or any registry-qualified form of it, never an exact string compare.
+  local img found
+  for img in "$@"; do
+    found=1
+    for name in $names; do
+      if [ "$name" = "$img" ] || [ "${name%"/$img"}" != "$name" ]; then
+        found=0; break
+      fi
+    done
+    [ "$found" -eq 0 ] || return 1
+  done
+  return 0
+}
+
 # ── local node ─────────────────────────────────────────────────────────────
 import_local() {
   local -a imgs
@@ -105,6 +186,14 @@ import_local() {
   if sudo -n true 2>/dev/null; then
     docker save "${imgs[@]}" | sudo k3s ctr -n k8s.io images import -
     return $?
+  fi
+  if _already_on_local_node "${imgs[@]}"; then
+    say "  ✓ all already present on the node (kubelet's view) — nothing to do"
+    say "    (sudo is password-gated here, so this check is what lets setup.sh"
+    say "     continue after a manual import)"
+    # Only immutable tags reach here (see _already_on_local_node): for those,
+    # matching on name IS matching on content.
+    return 0
   fi
   cat <<EOF
 

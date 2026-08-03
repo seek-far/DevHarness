@@ -1378,13 +1378,31 @@ Practical differences from Mode 6:
   `<component>.nodeSelector` chart fields. The default StorageClass is
   node-local `local-path`, so an unpinned redis can bind to the far node
   and stay there permanently.
-- **The remote node is `NoSchedule`-tainted by default.** It is meant to
-  run workers, and `crossnode-check.sh` demonstrates that it can; making it
-  the default needs worker Jobs to carry `resources`, a `nodeSelector` and
-  an `unreachable` toleration first.
+- **The remote node is `NoSchedule`-tainted by default**, and
+  `setup.sh --ver99` removes it now that worker Jobs carry `resources` and
+  eviction tolerations. The taint was never a policy against cross-continent
+  execution — it stopped placement being a coin flip before the Jobs declared
+  what they need.
 - **MTU is the trap that `Ready` does not catch:** without
   `--flannel-iface tailscale0`, cross-node pod traffic black-holes on large
   packets while pings and small responses pass.
+
+#### Running SWE-bench (`workflow_ver=99`) on this cluster
+
+```bash
+bash infra/k3s/build-swebench-image.sh   # → dh-bf-worker-swebench:<sdlcma-sha>
+bash infra/k3s/load-image.sh --node all  # every node that may run a worker
+bash infra/k3s/setup.sh --ver99          # overlay + drop the taint + pre-flight
+```
+
+This is the only containerised path that can run ver99, and it needs a
+different worker image: the base one deliberately ships without the docker
+CLI, `minisweagent` or `configs/`. mini drives the **host's** docker daemon
+through a mounted socket, so its evaluation containers are siblings of the pod
+and invisible to the scheduler — which is why the Job's `resources` are sized
+as a booking on their behalf rather than as the worker process's own usage,
+and why mounting that socket is equivalent to giving the pod root on the node.
+Full contract in [`docs/k3s.md`](docs/k3s.md) §14.
 
 Full design + the cross-continent gotchas in
 [`docs/k3s.md`](docs/k3s.md); operator runbook in `infra/k3s/README.md`.

@@ -257,10 +257,15 @@ def build_step_checkpoint_store(backend: str | None = None) -> StepCheckpointSto
 
     if backend == "redis":
         raise StepCheckpointError(
-            "BF_STEP_CHECKPOINT=redis is not implemented yet (deferred to plan item W4, "
-            "where it has to land together with node affinity — the eval container is "
-            "node-local, so a record readable from another node would promise a "
-            "recovery that cannot happen). Use 'file'."
+            "BF_STEP_CHECKPOINT=redis will not be implemented (decided in plan item "
+            "W4). A redis-backed record is readable from any node, but the eval "
+            "container it points at is not: it lives on one node's dockerd. So the "
+            "backend would only make a replacement worker on another node believe it "
+            "can resume, find no container, and purge — an ability that does not "
+            "exist, plus more traffic through the hardest branch to get right. On k8s "
+            "the answer is 'file' on a node-local hostPath (K8S_WORKER_STEP_CHECKPOINT"
+            "_HOST_PATH) plus soft node affinity on restart, so 'record readable' and "
+            "'container attachable' stay true together. Use 'file'."
         )
 
     raise StepCheckpointError(

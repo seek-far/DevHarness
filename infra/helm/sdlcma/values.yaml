@@ -290,6 +290,55 @@ llmGateway:
 # AWS ECS is unaffected — ECS workers don't use this chart; their journal
 # is per-task ephemeral (we don't run runrecord-exporter on ECS by design,
 # since ECS keeps to the minimal capacity envelope).
+# ── Worker Job shaping (optional, plan item W4) ──────────────────────────────
+# Shapes the per-bug bf-worker Jobs the orchestrator creates. EVERY field is
+# empty by default → configmap.yaml writes no K8S_WORKER_* key → K8sJobSpawner
+# produces the same Job spec it did before W4. Same "empty means unchanged"
+# convention as journal.persistence above.
+#
+# Only the k3s/ver99 overlay turns these on; see values-k3s-ver99.yaml and
+# docs/k3s.md.
+workerJob:
+  # ⚠️ READ THIS BEFORE PICKING NUMBERS. For a ver99 (SWE-bench) worker these
+  # are NOT the worker process's own usage. mini runs its evaluation container
+  # as a SIBLING on the host dockerd — the kube scheduler cannot see it at all.
+  # So the request is a proxy booking of node budget on that sibling's behalf:
+  #     node allocatable / per-instance footprint = real concurrency ceiling
+  # Shrinking it because "the node looks idle" schedules more workers, each of
+  # which starts another multi-GB container the scheduler still cannot see, and
+  # the node OOMs while `kubectl describe node` reports plenty free.
+  #
+  # limits are empty ON PURPOSE: a limit constrains only the worker process (a
+  # few hundred MB); the container that actually eats the node is in another
+  # cgroup. So a limit buys no node protection while adding a way to OOMKill
+  # the worker when it loads a large trace.
+  resources:
+    requests:
+      cpu: ""
+      memory: ""
+      ephemeralStorage: ""
+    limits:
+      cpu: ""
+      memory: ""
+  # Host docker socket, mounted at the same path inside the worker. Required
+  # for ver99 in a pod. ⚠️ Mounting it is equivalent to giving the pod root on
+  # the node, and it requires the worker container to keep running as root
+  # (the socket is root:docker 0660 and the docker GID differs per node).
+  dockerSocket: ""
+  # Node path for W2.5's intra-loop step checkpoint. Empty ⇒ the records live
+  # in the Pod's $HOME and die with it, i.e. resume does nothing on k8s.
+  stepCheckpoint:
+    hostPath: ""
+  nodeSelector: {}
+  tolerations: []
+  # Where to put a RESTARTED worker. preferred (default) = soft affinity back
+  # to the node it died on, because the evaluation container and the checkpoint
+  # records are node-local; if that node is gone the pod still schedules
+  # elsewhere and cold-starts. required = hard pin (pod stays Pending forever
+  # if the node is gone, and backoffLimit=0 means the Job never fails, so the
+  # restart cap never fires either). off = never emit affinity.
+  resumeAffinity: preferred
+
 journal:
   persistence:
     enabled: false

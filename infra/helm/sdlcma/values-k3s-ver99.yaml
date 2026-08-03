@@ -1,0 +1,101 @@
+# Overlay: run the ver99 (SWE-bench x GitLab) workload on the k3s cluster.
+#
+# Layers ON TOP of values-k3s-ls4900.yaml — apply both, in this order:
+#   helm upgrade --install sdlcma infra/helm/sdlcma \
+#     -f infra/helm/sdlcma/values-k3s-ls4900.yaml \
+#     -f infra/helm/sdlcma/values-k3s-ver99.yaml
+# or just `bash infra/k3s/setup.sh --ver99`, which does the layering and the
+# ver99 pre-flight (image present, taint removed) for you.
+#
+# What ver99-in-a-pod needs that a normal bf-worker Job does not:
+#   1. an image carrying the docker CLI + mini-swe-agent + configs/  (D3)
+#   2. the host docker socket, so mini can start its evaluation container (D2)
+#   3. a node-local path for W2.5's step checkpoint, or resume does nothing (D6)
+#   4. resources, so N workers don't all land on one node                (D1)
+#   5. tolerations that survive a cross-ocean network hiccup             (D5)
+#
+# Design: /mnt/d/PL/sdlcma/W4-worker-job-design.md   Runbook: docs/k3s.md
+
+configMaps:
+  orchestrator:
+    # D14 — an IMMUTABLE tag, produced by infra/k3s/build-swebench-image.sh
+    # (it prints the exact line to paste here). Replace on every rebuild.
+    #
+    # Never `:latest`: the chart pulls with imagePullPolicy IfNotPresent and
+    # images are side-loaded via `k3s ctr images import` with no registry to
+    # re-pull from, so two nodes can hold different content under the same
+    # moving tag and nothing will ever tell you.
+    WORKER_IMAGE: dh-bf-worker-swebench:f475eff-dirty
+    # These three are forwarded to each spawned worker Job from the
+    # ORCHESTRATOR's own process env (K8sJobSpawner reads os.environ), so they
+    # belong here and not under configMaps.worker.
+    MINI_IMPL: vendored           # W2 needs the vendored loop to hook into
+    BF_STEP_CHECKPOINT: file      # W2 intra-loop resume
+    BF_STEP_LEDGER: ledger        # W2.5 exactly-once ("marker" = the A/B arm)
+  worker:
+    # Selects workflow_ver=99. Set in exactly ONE place: an explicit container
+    # env (which the spawner would add if this were in the orchestrator's env)
+    # wins over envFrom, so having it in both is a silent-precedence trap.
+    # configs/ only exists in the swebench image — the base image has no
+    # configs/ at all, and a missing file raises FileNotFoundError rather than
+    # quietly falling back to ver0.
+    BF_AGENT_CONFIG: /app/configs/swebench/gitlab_ver99.json
+    # The CI wait must outlast the eval-image pipeline, or the worker gives up
+    # on a run that is still succeeding. Measured on ls4900: astropy's auto/bf
+    # job takes ~377 s (it recompiles C extensions via `pip install -e .`),
+    # while the default wait is 300 s — so the first ver99-in-a-pod run was
+    # scored `error` even though its patch was correct and CI went GREEN 77 s
+    # after the worker stopped looking. 1200 s matches the value the host
+    # ver99 stack has always used (infra/swebench-gitlab/ver99_stack_up.sh).
+    BF_CI_WAIT_TIMEOUT: "1200"
+    # NOT set here: BF_MINI_CONTAINER_TIMEOUT. The host ver99 stack leaves
+    # mini's 2 h default alone, and the resume window is not something to widen
+    # on a hunch — a longer window is paid for by every run that never comes
+    # back (it holds disk and memory for that whole time, and this node runs
+    # 12-15 at once).
+
+workerJob:
+  # ⚠️ NOT the worker process's own usage — a booking of node budget on behalf
+  # of mini's sibling evaluation container, which the scheduler cannot see.
+  # At cpu:3/memory:4Gi the binding dimension is memory:
+  #   ls4900  62.7Gi / 4Gi ~ 15 concurrent   (matches the hand-tuned 12-15)
+  #   minus   15.6Gi / 4Gi ~  3 concurrent   (hand-tuned ceiling was 2 — one
+  #                                           slot loose; watch for host OOM
+  #                                           on minus, see docs/k3s.md)
+  resources:
+    requests:
+      cpu: "3"
+      memory: 4Gi
+      ephemeralStorage: 20Gi
+    # limits stay empty on purpose — see values.yaml.
+  # ⚠️ Equivalent to root on the node. Only ever enable it on a cluster whose
+  # workers you already trust with the host, and never push these images to a
+  # registry (they bake settings/*.env — see project_secrets_baked_into_images).
+  dockerSocket: /var/run/docker.sock
+  stepCheckpoint:
+    hostPath: /var/sdlcma/step_checkpoints
+  # Open: W4 removes the cross-continent taint, so worker Jobs schedule on
+  # either node. To force one node while testing:
+  #   kubectl -n sdlcma set env deploy/orchestrator \
+  #     K8S_WORKER_NODE_SELECTOR='{"kubernetes.io/hostname":"minus"}'
+  nodeSelector: {}
+  # k8s auto-injects these two with tolerationSeconds: 300, i.e. today's
+  # behaviour is not "never evicted" but "evicted after 5 minutes". Five
+  # minutes is shorter than a Tailscale hiccup and far shorter than mini's 2h
+  # container window, so a transient cross-ocean blip would throw away a run
+  # that was still perfectly resumable. 1800s is an order of magnitude above
+  # the blip and an order below the container window (so a genuinely dead node
+  # still releases the bug).
+  tolerations:
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 1800
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 1800
+  # Soft-steer a restarted worker back to the node it died on (its evaluation
+  # container and step-checkpoint records are both node-local). "preferred" is
+  # the default; spelled out here because it is load-bearing for W2.5.
+  resumeAffinity: preferred

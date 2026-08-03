@@ -9,11 +9,15 @@ the suite still runs in environments without it.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
     import yaml
@@ -462,3 +466,245 @@ def test_k3s_overlay_gateway_backend_uses_the_injected_key_name():
         "ls4900's LLM_API_KEY is a DeepSeek credential — pointing the backend "
         "anywhere else reproduces the 401"
     )
+
+
+# ── W4: worker Job shaping + the ver99 overlay ─────────────────────────────
+#
+# The pattern to notice here: the chart's job is to hand the ORCHESTRATOR a set
+# of K8S_WORKER_* strings, and the orchestrator's job is to turn those into a
+# Job spec. Testing each half alone leaves the seam between them untested —
+# which is exactly where the first real W4 bug lived (Helm writes the k8s wire
+# shape `tolerationSeconds`, V1Toleration takes `toleration_seconds`, so every
+# spawn would have died on a config that reads perfectly). The last test in
+# this block closes that seam by feeding the RENDERED values into the real
+# spawner.
+
+VER99_VALUES = CHART / "values-k3s-ver99.yaml"
+
+
+def _orchestrator_config(out: str) -> dict:
+    cm = next(d for d in yaml.safe_load_all(out)
+              if d and d.get("kind") == "ConfigMap"
+              and d["metadata"]["name"] == "orchestrator-config")
+    return cm["data"]
+
+
+def test_worker_job_defaults_emit_no_k8s_worker_keys(docs):
+    """H2 — stock values ⇒ not one K8S_WORKER_* key ⇒ the spawner keeps its
+    default-empty settings ⇒ the Job spec is the pre-W4 one."""
+    cm = _named(docs, "ConfigMap", "orchestrator-config")
+    leaked = [k for k in cm["data"] if k.startswith("K8S_WORKER_")]
+    assert leaked == [], f"empty workerJob still emitted {leaked}"
+
+
+def test_ver99_overlay_emits_the_worker_job_keys():
+    """H3"""
+    out = _template_or_skip("-f", str(K3S_VALUES), "-f", str(VER99_VALUES))
+    data = _orchestrator_config(out)
+    assert data["K8S_WORKER_CPU_REQUEST"] == "3"
+    assert data["K8S_WORKER_MEM_REQUEST"] == "4Gi"
+    assert data["K8S_WORKER_EPHEMERAL_STORAGE_REQUEST"] == "20Gi"
+    # limits deliberately absent: they constrain only the worker process, while
+    # the container that actually eats the node is a sibling on the host
+    # dockerd, in another cgroup entirely.
+    assert "K8S_WORKER_CPU_LIMIT" not in data
+    assert "K8S_WORKER_MEM_LIMIT" not in data
+    assert data["K8S_WORKER_DOCKER_SOCK"] == "/var/run/docker.sock"
+    assert data["K8S_WORKER_STEP_CHECKPOINT_HOST_PATH"] == "/var/sdlcma/step_checkpoints"
+    tols = json.loads(data["K8S_WORKER_TOLERATIONS"])
+    # Exactly two: W4 removed the cross-continent taint rather than tolerating
+    # it, so the only tolerations left are the eviction-delay pair.
+    assert len(tols) == 2
+    assert {t["key"] for t in tols} == {"node.kubernetes.io/not-ready",
+                                        "node.kubernetes.io/unreachable"}
+    assert all(t["tolerationSeconds"] == 1800 for t in tols)
+
+
+def test_ver99_overlay_worker_image_is_immutable_tagged():
+    """H4 — the point of this test is the NOT-`:latest` assertion.
+
+    imagePullPolicy is IfNotPresent and images are side-loaded with
+    `k3s ctr images import` — there is no registry to re-pull from. A moving
+    tag therefore lets two nodes hold different content under one name, with
+    nothing to reveal it.
+    """
+    out = _template_or_skip("-f", str(K3S_VALUES), "-f", str(VER99_VALUES))
+    image = _orchestrator_config(out)["WORKER_IMAGE"]
+    assert image.startswith("dh-bf-worker-swebench:")
+    assert not image.endswith(":latest"), (
+        "the ver99 overlay must reference an immutable tag from "
+        "build-swebench-image.sh, never :latest"
+    )
+
+
+def test_ver99_overlay_sets_resume_env_on_the_orchestrator_side():
+    """The spawner forwards these from its OWN process env, so putting them
+    under configMaps.worker would look right and do nothing."""
+    out = _template_or_skip("-f", str(K3S_VALUES), "-f", str(VER99_VALUES))
+    data = _orchestrator_config(out)
+    assert data["MINI_IMPL"] == "vendored"
+    assert data["BF_STEP_CHECKPOINT"] == "file"
+    assert data["BF_STEP_LEDGER"] == "ledger"
+    # invariant #1: the spawner choice never rides on ENV
+    assert data["ENV"] == "local_multi_process"
+    assert data["WORKER_SPAWNER"] == "k8s"
+
+
+def test_ver99_overlay_sets_agent_config_in_exactly_one_place():
+    """An explicit container env beats envFrom, so BF_AGENT_CONFIG living in
+    both the worker ConfigMap and the orchestrator's env is a silent-precedence
+    trap. It belongs to the worker ConfigMap only."""
+    out = _template_or_skip("-f", str(K3S_VALUES), "-f", str(VER99_VALUES))
+    docs_ = [d for d in yaml.safe_load_all(out) if d]
+    worker = _named(docs_, "ConfigMap", "worker-config")["data"]
+    orch = _named(docs_, "ConfigMap", "orchestrator-config")
+    assert worker["BF_AGENT_CONFIG"] == "/app/configs/swebench/gitlab_ver99.json"
+    assert "BF_AGENT_CONFIG" not in orch["data"]
+
+
+def test_ver99_overlay_keeps_the_k3s_pins():
+    """H5 — layering the ver99 overlay must not undo values-k3s-ls4900's
+    node pinning (helm merges maps, but a mistyped key silently replaces)."""
+    out = _template_or_skip("-f", str(K3S_VALUES), "-f", str(VER99_VALUES))
+    deps = {d["metadata"]["name"]: d for d in yaml.safe_load_all(out)
+            if d and d.get("kind") == "Deployment"}
+    for name in _PINNED:
+        sel = deps[name]["spec"]["template"]["spec"].get("nodeSelector")
+        assert sel == {"kubernetes.io/hostname": "ls4900"}, name
+
+
+def _pvc_carrying_workloads(out: str):
+    """Every rendered workload that mounts a PVC or declares one.
+
+    Structural on purpose: it walks the manifests instead of naming the four
+    components we happen to know about today, so a stateful component added
+    later fails this test rather than failing an ocean away.
+    """
+    found = []
+    for d in yaml.safe_load_all(out):
+        if not d or d.get("kind") not in ("Deployment", "StatefulSet", "DaemonSet"):
+            continue
+        spec = d["spec"]["template"]["spec"]
+        has_pvc = any("persistentVolumeClaim" in v for v in spec.get("volumes", []) or [])
+        has_vct = bool(d["spec"].get("volumeClaimTemplates"))
+        if has_pvc or has_vct:
+            found.append((d["kind"], d["metadata"]["name"], spec.get("nodeSelector")))
+    return found
+
+
+def test_k3s_overlay_pins_every_pvc_carrying_workload():
+    """H7 — the guard that replaces the taint.
+
+    W4 removes the cross-continent NoSchedule taint so worker Jobs can run on
+    the remote node. That taint was also the second line of defence keeping
+    stateful pods on the server node; `nodeSelector` is now the only one.
+    A local-path PVC that binds on the remote node pins its PV there
+    permanently (the generated PV carries its own nodeAffinity), so recovering
+    means deleting the PV and losing the data.
+
+    Runs with monitoring ON because that is where the un-pinned components
+    hide: Prometheus / Grafana / Alertmanager come from the sub-chart and are
+    invisible in the default render.
+    """
+    out = _template_or_skip("-f", str(K3S_VALUES), "--set", "monitoring.enabled=true")
+    workloads = _pvc_carrying_workloads(out)
+    assert workloads, "expected at least one PVC-carrying workload with monitoring on"
+    unpinned = [(k, n) for k, n, sel in workloads if not sel]
+    assert not unpinned, (
+        f"PVC-carrying workloads without a nodeSelector: {unpinned}. On this "
+        "cluster that risks binding a node-local PV on the cross-continent "
+        "node, which is irreversible. Pin them in values-k3s-ls4900.yaml."
+    )
+
+
+def test_k3s_overlay_pins_the_operator_managed_stateful_crs():
+    """H7b — the half the walker above CANNOT see.
+
+    Prometheus and Alertmanager are not rendered workloads: the chart emits
+    CUSTOM RESOURCES and the Operator builds the StatefulSets at runtime. So
+    the PVC walker returns nothing for them and would pass vacuously — the
+    exact components D4.1 is about.
+
+    They also carry no PVC in our current values (storage unset ⇒ emptyDir),
+    which is precisely why nodeSelector must be asserted REGARDLESS of storage:
+    turning persistence on later is a one-line values change that would
+    silently reintroduce the irreversible-PV hazard.
+    """
+    out = _template_or_skip("-f", str(K3S_VALUES), "--set", "monitoring.enabled=true")
+    crs = [d for d in yaml.safe_load_all(out)
+           if d and d.get("kind") in ("Prometheus", "Alertmanager")]
+    assert crs, (
+        "no Prometheus/Alertmanager CR rendered with monitoring on — this test "
+        "has stopped covering anything; check the sub-chart's shape"
+    )
+    unpinned = [(d["kind"], d["metadata"]["name"]) for d in crs
+                if not d.get("spec", {}).get("nodeSelector")]
+    assert not unpinned, (
+        f"operator-managed stateful CRs without spec.nodeSelector: {unpinned}. "
+        "Pin them under kube-prometheus-stack in values-k3s-ls4900.yaml."
+    )
+
+
+def test_default_render_has_no_pvc_workload_expectations(docs):
+    """H8 — the guard above must not silently pass by finding nothing.
+
+    With monitoring off (the default) the set is redis alone, and redis IS
+    pinned by the k3s overlay; here we only assert the walker works.
+    """
+    out = _helm("template", "sdlcma", str(CHART))
+    names = {n for _, n, _ in _pvc_carrying_workloads(out)}
+    assert "redis" in names, (
+        "the PVC walker found no redis — it has stopped detecting PVCs and "
+        "test_k3s_overlay_pins_every_pvc_carrying_workload is now vacuous"
+    )
+
+
+def test_rendered_worker_job_values_survive_the_real_spawner():
+    """The chart↔code seam, end to end.
+
+    Renders the ver99 overlay, feeds the K8S_WORKER_* strings it produced into
+    the real K8sJobSpawner, and asserts the Job it builds. This is the test
+    that would have caught the tolerationSeconds/toleration_seconds mismatch:
+    both halves were individually correct and the pair was broken.
+    """
+    from unittest.mock import MagicMock, patch
+    import kubernetes
+    from orchestrator.registry import WorkerRegistry
+    from orchestrator.spawner import K8sJobSpawner
+
+    out = _template_or_skip("-f", str(K3S_VALUES), "-f", str(VER99_VALUES))
+    data = _orchestrator_config(out)
+
+    with patch("kubernetes.config.load_incluster_config",
+               side_effect=kubernetes.config.config_exception.ConfigException), \
+         patch("kubernetes.config.load_kube_config"), \
+         patch("kubernetes.client.BatchV1Api", return_value=MagicMock()), \
+         patch("kubernetes.client.CoreV1Api", return_value=MagicMock()):
+        spawner = K8sJobSpawner(
+            registry=WorkerRegistry(), redis_url="redis://redis:6379/0",
+            worker_image=data["WORKER_IMAGE"], namespace="sdlcma",
+            worker_config_map="worker-config", secret_name="sdlcma-secrets",
+            job_ttl_seconds=600,
+            cpu_request=data.get("K8S_WORKER_CPU_REQUEST", ""),
+            mem_request=data.get("K8S_WORKER_MEM_REQUEST", ""),
+            cpu_limit=data.get("K8S_WORKER_CPU_LIMIT", ""),
+            mem_limit=data.get("K8S_WORKER_MEM_LIMIT", ""),
+            ephemeral_storage_request=data.get(
+                "K8S_WORKER_EPHEMERAL_STORAGE_REQUEST", ""),
+            docker_sock=data.get("K8S_WORKER_DOCKER_SOCK", ""),
+            step_checkpoint_host_path=data.get(
+                "K8S_WORKER_STEP_CHECKPOINT_HOST_PATH", ""),
+            node_selector=data.get("K8S_WORKER_NODE_SELECTOR", ""),
+            tolerations=data.get("K8S_WORKER_TOLERATIONS", ""),
+            resume_affinity=data.get("K8S_WORKER_RESUME_AFFINITY", "preferred"),
+        )
+        job = spawner._build_job("bf-worker-x", "astropy__astropy-12907",
+                                 "1", "http://gitlab/x.git", "9")
+
+    pod = job.spec.template.spec
+    c = pod.containers[0]
+    assert c.resources.requests == {"cpu": "3", "memory": "4Gi",
+                                    "ephemeral-storage": "20Gi"}
+    assert [v.name for v in pod.volumes] == ["step-checkpoint", "docker-sock"]
+    assert [t.toleration_seconds for t in pod.tolerations] == [1800, 1800]
+    assert job.metadata.labels["bug-id"] == "astropy__astropy-12907"

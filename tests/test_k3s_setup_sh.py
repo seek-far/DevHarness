@@ -297,3 +297,263 @@ def test_load_image_remote_default_is_worker_only():
     assert "DEFAULT_LOCAL=" in code and "dh-gateway" in code, (
         "local default must still cover every service image"
     )
+
+
+# ── W4: ver99 mode + taint convergence ─────────────────────────────────────
+
+def test_taint_step_converges_in_both_directions():
+    """W3 turned the cross-continent taint ON; W4 (--ver99) turns it OFF.
+
+    Both directions have to be a re-run of setup.sh rather than a hand-edited
+    cluster, or the two modes drift apart on the one host that has them. The
+    removal form is `key-`, which is a no-op when the taint is already absent —
+    that's what makes the OFF direction idempotent too.
+    """
+    code = _code(SETUP)
+    assert 'if [ -n "$CROSS_TAINT" ]; then' in code, (
+        "the taint step must branch on CROSS_TAINT rather than always tainting"
+    )
+    assert '"${CROSS_TAINT_KEY}-"' in code, (
+        "removing the taint needs the `key-` form (idempotent when absent)"
+    )
+    # `${CROSS_TAINT-default}` (no colon) so an explicitly EMPTY value means
+    # "converge to absent" instead of falling back to the default.
+    assert "CROSS_TAINT=\"${CROSS_TAINT-" in code, (
+        "CROSS_TAINT must use ${VAR-default}, not ${VAR:-default}: an empty "
+        "value is a deliberate instruction, not an unset one"
+    )
+
+
+def test_ver99_flag_couples_its_three_changes():
+    """--ver99 must do all three or none.
+
+    Layering the overlay without dropping the taint gives a cluster that looks
+    ver99-enabled and can only ever use one node; dropping the taint without
+    the overlay gives workers no docker.sock and no resources. Both read as
+    "configured".
+    """
+    code = _code(SETUP)
+    assert "--ver99) VER99=1" in code
+    assert 'if [ "$VER99" = 1 ]; then\n  CROSS_TAINT=""' in code, (
+        "--ver99 must clear the taint"
+    )
+    assert "VER99_VALUES_FILE" in code and "HELM_VALUES_ARGS+=(-f \"$VER99_VALUES_FILE\")" in code, (
+        "--ver99 must layer the ver99 values file"
+    )
+
+
+def test_ver99_refuses_a_placeholder_or_latest_worker_image():
+    """The image tag is load-bearing, not cosmetic.
+
+    imagePullPolicy is IfNotPresent and images are side-loaded with
+    `k3s ctr images import` — there is no registry to re-pull from. Under a
+    moving tag the two nodes can hold different content with nothing to reveal
+    it, so setup refuses `:latest` outright, and refuses the shipped
+    placeholder rather than deploying something that cannot start.
+    """
+    code = _code(SETUP)
+    assert "*REPLACE_ME|\"\")" in code, "must refuse the placeholder tag"
+    assert "*:latest)" in code, "must refuse a :latest worker image"
+    assert "docker image inspect \"$WORKER_IMAGE_TAG\"" in code, (
+        "must verify the image exists locally before deploying"
+    )
+
+
+def test_ver99_checks_the_remote_node_has_the_image():
+    """A worker that lands on a node without the image ImagePullBackOffs, and
+    that failure is SILENT: the Job neither succeeds nor fails, so the
+    orchestrator only ever sees a warmup timeout with nothing naming the cause.
+
+    Checked via `node.status.images` (no ssh) and reported as a warning rather
+    than an automatic ~1.5 GB cross-ocean transfer on every idempotent re-run.
+    """
+    code = _code(SETUP)
+    assert "status.images" in code, (
+        "use node.status.images to check remote image presence without ssh"
+    )
+    assert "load-image.sh --node $REMOTE_NODE" in code, (
+        "the warning must name the exact fix"
+    )
+
+
+def test_load_image_picks_up_swebench_tags_automatically():
+    """The ver99 image carries an immutable tag, so it cannot be a hardcoded
+    default — but forgetting it on one node is exactly the silent
+    ImagePullBackOff above. Discover whatever is built locally instead."""
+    code = _code(LOAD_IMAGE)
+    assert "dh-bf-worker-swebench:" in code
+    assert "DEFAULT_REMOTE+=(" in code and "DEFAULT_LOCAL+=(" in code, (
+        "discovered swebench tags must be added to BOTH targets"
+    )
+    assert "grep -v ':latest$'" in code, (
+        "never ship the convenience :latest alias to a node"
+    )
+
+
+def test_crossnode_check_surfaces_the_journal_blind_spot():
+    """The journal is a node-local hostPath and the exporter is pinned to the
+    server node, so a cross-node run is invisible to Grafana —
+    `sdlcma_runs_total` is structurally low, not wrong. W4 does not fix that
+    (it is W5/W6); it must at least stop people reading the dashboard as if it
+    covered both nodes."""
+    code = _code(CROSSNODE)
+    assert "Do not use Grafana to judge cross-node runs" in code
+    assert "/var/sdlcma/journal" in code
+
+
+def test_crossnode_check_counts_orphaned_eval_containers():
+    """mini's evaluation container outliving its worker is BY DESIGN (it is
+    what makes resume possible), but at 15-way concurrency it can hold tens of
+    GB for two hours. No janitor — a wrong guess kills a run mid-recovery — so
+    visibility is the whole mitigation."""
+    code = _code(CROSSNODE)
+    assert "--filter name=minisweagent-" in code
+
+
+# ── W4: build-swebench-image.sh portability ────────────────────────────────
+#
+# Every one of these failed on the FIRST real run on ls4900 and could not have
+# failed on the dev box, because the dev box has git history, pip, and a quiet
+# import. A deploy host has none of the three.
+
+BUILD_SWEBENCH = K3S / "build-swebench-image.sh"
+
+
+def test_build_script_silences_the_mini_banner():
+    """minisweagent prints a banner + "Loading global config" to STDOUT on
+    import, so a bare command substitution captures it as part of the path."""
+    code = _code(BUILD_SWEBENCH)
+    assert "MSWEA_SILENT_STARTUP=1" in code
+
+
+def test_build_script_gets_provenance_without_local_git():
+    """On ls4900 neither ~/sdlcma nor ~/mini-swe-agent is a git checkout — both
+    are rsync'd trees. The fix is NOT to relax the "no empty label" rule (an
+    authoritative-looking empty label is worse than none), but to take the
+    commit from a stamp the source machine wrote at deploy time."""
+    code = _code(BUILD_SWEBENCH)
+    assert ".sdlcma-provenance" in code
+    assert "git rev-parse --git-dir" in code, "must probe for git before using it"
+    # …and still refuse when nothing supplies it.
+    assert "Refusing to build an image whose" in code
+
+
+def test_build_script_does_not_hardcode_pip():
+    """The deploy host's venvs come from `uv venv`, which installs no pip, and
+    its system python3 has none either — so `pip wheel` fails on exactly the
+    machine this script exists for."""
+    code = _code(BUILD_SWEBENCH)
+    assert "uv build --wheel" in code, "need a uv path when pip is absent"
+    assert 'command -v uv' in code
+
+
+def test_build_script_does_not_swallow_the_wheel_log():
+    """First failure on ls4900 printed only "pip wheel failed"; the actual
+    cause ("No module named pip") was in the discarded output."""
+    code = _code(BUILD_SWEBENCH)
+    assert 'tail -25 "$WHEEL_LOG"' in code
+
+
+def test_build_script_refuses_a_moving_tag():
+    """The tag must identify the build; :latest is only a local alias."""
+    code = _code(BUILD_SWEBENCH)
+    assert 'TAG="dh-bf-worker-swebench:${SHA}"' in code
+    assert "SDLCMA_COMMIT" in code
+
+
+def test_load_image_can_skip_when_already_present_without_sudo():
+    """On a host whose sudo is password-gated (ls4900), the import step returns
+    10 every time — including right after the operator imported by hand — so
+    setup.sh could never complete non-interactively.
+
+    The presence check therefore has to work WITHOUT sudo, which rules out
+    `k3s ctr images ls`. `node.status.images` answers it through the API.
+    """
+    code = _code(LOAD_IMAGE)
+    assert "_already_on_local_node" in code
+    assert "status.images" in code
+    assert "k3s ctr images ls" not in code, (
+        "the presence check must not need sudo — that is the whole point"
+    )
+
+
+def test_image_presence_checks_handle_containerd_name_normalisation():
+    """containerd rewrites names on import: `dh-bf-worker:latest` is stored and
+    reported as `docker.io/library/dh-bf-worker:latest`.
+
+    Two ways to get this wrong, both hit on the first real run:
+      * `{...names}` emits one JSON ARRAY per image (brackets, quotes) — only
+        `{...names[*]}` flattens to one bare name per token;
+      * an exact compare against the unqualified name never matches.
+    Failing closed made it merely useless rather than dangerous, but useless is
+    still the whole feature gone.
+    """
+    for script in (LOAD_IMAGE, SETUP):
+        code = _code(script)
+        if "status.images" not in code:
+            continue
+        assert "status.images[*].names[*]" in code, (
+            f"{script.name} must flatten with names[*], or it compares against "
+            "JSON array literals"
+        )
+        assert ('/$img' in code) or ("(^|/)" in code), (
+            f"{script.name} must tolerate the registry-qualified form"
+        )
+
+
+def test_ver99_image_tag_is_resolved_before_it_is_used():
+    """The tag must be resolved up front, not lazily at the helm step.
+
+    Real failure: the import step (which checks whether the remote node has the
+    image) referenced WORKER_IMAGE_TAG while it was still assigned twenty steps
+    later. Under `set -u` that is a hard stop — and by then the run had ALREADY
+    removed the cross-continent taint, i.e. it half-applied a mode change and
+    died. Anything the later steps consume has to be resolved in a pre-flight.
+    """
+    code = _code(SETUP)
+    resolve = code.index("WORKER_IMAGE_TAG=$(grep -oE")
+    first_use = min(
+        code.index("grep -qE \"(^|/)${WORKER_IMAGE_TAG}"),
+        code.index('say "  layering $VER99_VALUES_FILE'),
+    )
+    assert resolve < first_use, (
+        "WORKER_IMAGE_TAG is used before it is assigned — with set -u that "
+        "aborts mid-run, after earlier steps already mutated the cluster"
+    )
+
+
+def test_presence_skip_never_applies_to_a_moving_tag():
+    """Skipping the import for a `:latest` image is unsound, and the failure it
+    produces is the worst kind: the node keeps the PREVIOUS build while the new
+    config is applied, so the deployment looks successful and runs old code.
+
+    Observed on the first ver99 bring-up — the orchestrator came up pre-W4
+    while every K8S_WORKER_* variable was correctly set, because the image had
+    been rebuilt after the operator's manual import. Only an immutable tag can
+    be verified by name.
+    """
+    code = _code(LOAD_IMAGE)
+    fn = code[code.index("_already_on_local_node()"):]
+    fn = fn[:fn.index("\n}")]
+    assert "*:latest|*-dirty) return 1" in fn, (
+        "_already_on_local_node must refuse to vouch for a moving tag — and "
+        "`-dirty` is one: it names 'some uncommitted state of <sha>', which the "
+        "next rebuild reuses with different content"
+    )
+
+
+def test_setup_has_an_explicit_skip_images_escape_hatch():
+    """A config-only re-run must not cost a 2 GB save/import plus a human.
+
+    The import step deliberately refuses to vouch for moving tags without
+    sudo, which is correct — but on a password-gated host it makes EVERY
+    re-run interactive, including ones that only change a ConfigMap value.
+    `--skip-images` is the operator asserting the images are unchanged. It is
+    an assertion, not a check, so it must be typed explicitly and can never be
+    inferred (a wrong inference here is how you deploy old code).
+    """
+    code = _code(SETUP)
+    assert "--skip-images) SKIP_IMAGES=1" in code
+    assert 'if [ "$SKIP_IMAGES" = 1 ]; then' in code
+    # and it must be OFF by default
+    assert "SKIP_IMAGES=0" in code

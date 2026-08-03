@@ -134,3 +134,107 @@ def test_runrecord_exporter_module_is_in_its_image() -> None:
         f"but Dockerfile.bf-worker does not `COPY {top_pkg}/` into it — the pod "
         f"will crash with `No module named '{top_pkg}'`."
     )
+
+
+# ── W4: the ver99 worker image ─────────────────────────────────────────────
+#
+# ver99 in a pod needs three things the base worker image does not have, and
+# each one fails LATE and quietly if missing: mini's imports are lazy (so the
+# run dies mid-way with fetch_trace/parse_trace already green), the docker CLI
+# is only reached from inside mini's environment layer, and configs/ is only
+# read once the agent spec is loaded. They live in a SEPARATE image so the
+# base one — shared with kind, ECS and docker-compose — stays untouched.
+
+SWEBENCH_DF = REPO / "Dockerfile.bf-worker-swebench"
+BASE_DF = REPO / "Dockerfile.bf-worker"
+
+
+def test_base_worker_image_stays_free_of_ver99_extras() -> None:
+    """The additive guarantee for W4 is STRUCTURAL: it is the file boundary,
+    not a default value someone can flip.
+
+    If these ever move into Dockerfile.bf-worker, three unrelated deployment
+    shapes inherit a ~250 MB image and a build-time dependency on
+    download.docker.com (unreachable from the CN host). Fail here instead.
+    """
+    text = BASE_DF.read_text()
+    assert "docker-ce-cli" not in text and "docker/docker" not in text, (
+        "the docker CLI belongs in Dockerfile.bf-worker-swebench"
+    )
+    assert "mini_swe_agent" not in text and "mini-swe-agent" not in text
+    assert not re.search(r"^COPY\s+configs/", text, re.MULTILINE), (
+        "configs/ belongs in the swebench image only"
+    )
+
+
+def test_swebench_image_layers_on_the_base_image() -> None:
+    text = SWEBENCH_DF.read_text()
+    assert re.search(r"^FROM \$\{BASE\}", text, re.MULTILINE)
+    assert 'ARG BASE=dh-bf-worker:latest' in text
+
+
+def test_swebench_image_supplies_all_three_missing_pieces() -> None:
+    """docker CLI + mini wheel + configs/ + `patch`.
+
+    The first three were found while designing W4 (two of them unrecorded in
+    the plan). `patch` only surfaced on the first ver99-in-a-pod run: the apply
+    node is a fallback ladder ending in `patch -p1`, and the slim base image
+    has none — which additionally destroyed the diagnostics of the two rungs
+    that did run (see tests/test_workflow_ver99.py).
+    """
+    text = SWEBENCH_DF.read_text()
+    assert "install -m 0755 /tmp/docker/docker /usr/local/bin/docker" in text
+    assert "mini_swe_agent-*.whl" in text
+    assert re.search(r"^COPY\s+configs/\s+/app/configs/", text, re.MULTILINE)
+    assert re.search(r"apt-get install[^\n]*\bpatch\b", text), (
+        "the ver99 apply ladder needs the `patch` binary"
+    )
+
+
+def test_swebench_image_verifies_itself_at_build_time() -> None:
+    """Each of the three is otherwise discovered 20 minutes into a sweep:
+    mini's imports are lazy, so fetch_trace and parse_trace go green first and
+    it looks like a code bug (the same shape as the W3 401 incident)."""
+    text = SWEBENCH_DF.read_text()
+    assert "command -v docker" in text
+    assert "command -v patch" in text
+    assert "import minisweagent" in text
+    assert "test -f /app/configs/swebench/gitlab_ver99.json" in text
+
+
+def test_swebench_image_records_provenance_labels() -> None:
+    """A tag names the BUILD; the ingredients go in labels.
+
+    This image has three moving parts (sdlcma code, the mini fork, the docker
+    CLI), so any tag scheme is selectively silent about two of them. The
+    question that actually matters on a two-node cluster — "is this the same
+    mini fork the vendored files are pinned to?" — is answerable only from
+    here, via `docker inspect` / `crictl inspecti`.
+    """
+    text = SWEBENCH_DF.read_text()
+    for label in ("org.opencontainers.image.revision",
+                  "io.sdlcma.mini-commit",
+                  "io.sdlcma.mini-version"):
+        assert label in text, f"missing provenance label {label}"
+
+
+def test_wheels_dir_is_not_dockerignored() -> None:
+    """The wheel staging dir cannot be build/ or dist/: .dockerignore excludes
+    both, so a wheel placed there is invisible to COPY and the build fails with
+    a confusing 'no such file'. Hence the separate wheels/.
+
+    Skips when .dockerignore is absent: root dotfiles are untracked in this
+    repo (`/.*` in .gitignore), so a checkout or an rsync'd deploy host may
+    legitimately not have it — and a test that fails there would be reporting
+    on the transport, not on the code.
+    """
+    path = REPO / ".dockerignore"
+    if not path.is_file():
+        pytest.skip(".dockerignore not present (untracked root dotfile)")
+    dockerignore = path.read_text()
+    assert not re.search(r"^wheels/?$", dockerignore, re.MULTILINE), (
+        "wheels/ must NOT be in .dockerignore — the swebench image COPYs it"
+    )
+    assert re.search(r"^build/$", dockerignore, re.MULTILINE), (
+        "build/ is expected to stay excluded — that is why wheels/ exists"
+    )

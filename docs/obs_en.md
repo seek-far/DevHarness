@@ -41,6 +41,20 @@ How they join up:
   (K8s HTTP) **rescans the journal directory** and aggregates it into metrics.
   This is exactly why journal-derived metrics must use cumulative `sum()`, not
   `rate()` (see §4.2).
+
+  ⚠️ **Multi-node blind spot (k3s, as of plan item W4).** The journal is a
+  **node-local hostPath** and `runrecord-exporter` is pinned to the server
+  node, so a worker that runs on another node writes a RunRecord the exporter
+  never sees. `sdlcma_runs_total` and every other journal-derived family are
+  therefore *structurally low* on a multi-node cluster — not wrong, but not
+  complete either, and nothing about the metric says so. **Do not judge
+  cross-node runs from Grafana**; read `ssh <node> ls /var/sdlcma/journal`
+  (`infra/k3s/crossnode-check.sh` prints the reminder after a cross-node run).
+  Only this family is affected: gateway / orchestrator / llm-gateway metrics
+  are in-process counters and those services are all pinned to one node.
+  The fix — an exporter per node, whose disjoint journals `sum()` correctly,
+  plus `max()` on the scan-timestamp panel so the freshness graph stays one
+  line — is W5/W6 work, deliberately kept out of W4.
 - **Logs ↔ RunRecord**: the `phase_marker phase=fix_end` line carries
   `outcome`/`iterations`/`elapsed_ms` matching the RunRecord fields of the same
   name (`elapsed_s × 1000`), so they cross-check.

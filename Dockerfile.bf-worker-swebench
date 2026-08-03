@@ -1,0 +1,78 @@
+# ver99 (SWE-bench x GitLab) worker image — plan item W4.
+#
+# Deliberately a SEPARATE image layered on top of dh-bf-worker rather than
+# three more lines in Dockerfile.bf-worker:
+#   * the base image stays byte-identical, so kind / ECS / docker-compose are
+#     structurally unaffected (the additive guarantee is not a default value
+#     someone can flip, it is the file boundary);
+#   * only ver99 deployments pay the ~250 MB and the build-time network;
+#   * the tag says what you got. A build-arg toggle would produce two images
+#     with the SAME tag and different contents, which on this cluster
+#     (imagePullPolicy: IfNotPresent + `k3s ctr images import`, no registry to
+#     re-pull from) means two nodes can silently disagree about what
+#     "dh-bf-worker-swebench:latest" is.
+#
+# Build with infra/k3s/build-swebench-image.sh — it resolves the mini wheel and
+# stamps the immutable tag + provenance labels. See docs/k3s.md.
+
+ARG BASE=dh-bf-worker:latest
+FROM ${BASE}
+
+# 1) docker CLI ONLY (no daemon). mini's DockerEnvironment shells out to
+#    `docker run` / `docker exec` against the node's socket, so without this
+#    binary the mounted socket is useless.
+#    `patch` rides along for a different reason: the ver99 apply node is a
+#    fallback ladder `git apply --3way` → `git apply` → `patch -p1`, and the
+#    slim base image has no `patch`. On the first ver99-in-a-pod run both git
+#    rungs refused the diff and the missing third one raised, which ALSO threw
+#    away the stderr of the two that ran.
+#    Static tarball rather than apt: adding download.docker.com's apt repo is
+#    unreliable from the CN host, and Debian's `docker.io` package drags in
+#    containerd + dockerd (hundreds of MB) that this image must never run.
+ARG DOCKER_CLI_URL=https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates patch; \
+    curl -fsSL "$DOCKER_CLI_URL" -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp docker/docker; \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker.tgz /tmp/docker /var/lib/apt/lists/*; \
+    docker --version
+
+# 2) mini-swe-agent. MUST be the fork the repo's vendored files are pinned to
+#    (bf_worker/agents/vendor/mini/UPSTREAM.md), which is why the build script
+#    builds a wheel from the INSTALLED editable checkout instead of pulling a
+#    same-named release off PyPI — those would silently diverge, and the whole
+#    ver99 comparability argument rests on this being the same loop.
+ARG PIP_INDEX_URL=""
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
+COPY wheels/ /tmp/wheels/
+RUN set -eux; \
+    pip install --no-cache-dir /tmp/wheels/mini_swe_agent-*.whl; \
+    rm -rf /tmp/wheels
+
+# 3) configs/ — the base image does not ship it, and ver99 is selected by
+#    BF_AGENT_CONFIG=/app/configs/swebench/gitlab_ver99.json. Missing file
+#    raises FileNotFoundError in agent_config.load_agent_spec (loud, not a
+#    silent fall back to ver0), but that is still a run wasted.
+COPY configs/ /app/configs/
+
+# Fail the BUILD rather than the first ver99 run 20 minutes into a sweep. Each
+# of these was a real gap: three found while designing W4, plus `patch`, which
+# only the first ver99-in-a-pod run exposed.
+RUN set -eux; \
+    command -v docker; \
+    command -v patch; \
+    python -c "import minisweagent; print('minisweagent', minisweagent.__version__)"; \
+    test -f /app/configs/swebench/gitlab_ver99.json
+
+# Provenance. The tag identifies the BUILD (sdlcma commit); the ingredients go
+# here, where `docker inspect` / `crictl inspecti` can answer "which mini fork
+# is on this node?" — a question a tag can never answer honestly, since this
+# image has three moving parts.
+ARG SDLCMA_COMMIT=""
+ARG MINI_COMMIT=""
+ARG MINI_VERSION=""
+LABEL org.opencontainers.image.revision="${SDLCMA_COMMIT}" \
+      io.sdlcma.mini-commit="${MINI_COMMIT}" \
+      io.sdlcma.mini-version="${MINI_VERSION}"

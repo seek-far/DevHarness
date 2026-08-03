@@ -228,3 +228,72 @@ def test_a_crashing_graph_keeps_the_records(worker, monkeypatch):
         asyncio.run(w.run())
     assert purged == [], "an unfinished run must keep its records"
     assert "delete" in w._redis.calls, "teardown still ran"
+
+
+# ── The signal path: interrupted ≠ finished (found on k3s, W4) ──────────────
+
+def test_an_interrupted_worker_does_not_claim_completion(worker, monkeypatch):
+    """`worker:completed:{bug_id}` must NOT be written when a signal took the
+    process away.
+
+    HealthMonitor reads that key as "there is nothing to recover". On a signal
+    stop the run is INCOMPLETE and — thanks to W2's environment keeping the
+    eval container alive — perfectly resumable, so claiming completion is the
+    one answer that loses work.
+
+    Not hypothetical, and not rare: on k8s every pod deletion, eviction, drain
+    and rolling update arrives as SIGTERM, and this entry point installs a
+    handler for it, so the graceful path is the NORMAL path there. Measured on
+    the k3s cluster 2026-08-03 (`kubectl delete pod` mid-run): eval container
+    still alive, step-checkpoint records on disk, no RunRecord — and the bug
+    marked done, so nothing ever re-attached. The host harnesses never saw it
+    because their chaos tests use `kill -9`, which no handler can intercept.
+    """
+    w, purged = worker
+
+    def never_finishes():
+        import time
+        time.sleep(30)
+
+    monkeypatch.setattr(w, "_run_graph", never_finishes)
+
+    async def drive():
+        task = asyncio.create_task(w.run())
+        await asyncio.sleep(0.05)
+        w.interrupted = True          # what main() does on SIGINT/SIGTERM
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(drive())
+
+    assert "set" not in w._redis.calls, (
+        "an interrupted worker must not write the completion key — the monitor "
+        "would read it as 'done' and never restart the bug"
+    )
+    assert purged == [], "an interrupted run keeps its records; that IS the resume"
+    assert "delete" in w._redis.calls, "the rest of the teardown still runs"
+
+
+def test_a_normal_exit_still_claims_completion(worker, monkeypatch):
+    """The guard above must not weaken the ECS lag-window protection the key
+    was introduced for (a clean exit whose runtime is slow to report STOPPED
+    misfired ~30-60 restarts, 2026-05-21 MR !6)."""
+    w, purged = worker
+    monkeypatch.setattr(w, "_run_graph", lambda: None)
+    asyncio.run(w.run())
+    assert "set" in w._redis.calls
+    assert w.interrupted is False
+
+
+def test_signal_shutdown_exits_non_zero():
+    """Suppressing the key is necessary but NOT sufficient.
+
+    HealthMonitor short-circuits on `rc == 0` *before* it looks at the key, so
+    a graceful-and-clean exit would still be read as done. main() therefore
+    returns 143 (128 + SIGTERM) on the signal path.
+    """
+    src = (_ROOT / "bf_worker" / "bf_worker.py").read_text(encoding="utf-8")
+    assert "return 143" in src
+    assert "worker.interrupted = True" in src
+    # …and the exit code has to actually leave the process, not be dropped.
+    assert "raise SystemExit(asyncio.run(main())" in src

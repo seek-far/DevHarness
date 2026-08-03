@@ -32,6 +32,27 @@ in the overlay opts out without disabling the gateway itself.
 {{-   if $.Values.journal.persistence.enabled }}
 {{-     $_ := set $data "K8S_JOURNAL_HOST_PATH" $.Values.journal.persistence.hostPath }}
 {{-   end }}
+{{- /* Worker Job shaping (plan item W4). Every key is written ONLY when the
+       corresponding value is non-empty, so a chart rendered with the stock
+       values.yaml carries none of them and K8sJobSpawner falls back to its
+       default-empty settings — i.e. the pre-W4 Job spec. */}}
+{{-   with $.Values.workerJob }}
+{{-     with .resources.requests.cpu }}{{ $_ := set $data "K8S_WORKER_CPU_REQUEST" . }}{{ end }}
+{{-     with .resources.requests.memory }}{{ $_ := set $data "K8S_WORKER_MEM_REQUEST" . }}{{ end }}
+{{-     with .resources.requests.ephemeralStorage }}{{ $_ := set $data "K8S_WORKER_EPHEMERAL_STORAGE_REQUEST" . }}{{ end }}
+{{-     with .resources.limits.cpu }}{{ $_ := set $data "K8S_WORKER_CPU_LIMIT" . }}{{ end }}
+{{-     with .resources.limits.memory }}{{ $_ := set $data "K8S_WORKER_MEM_LIMIT" . }}{{ end }}
+{{-     with .dockerSocket }}{{ $_ := set $data "K8S_WORKER_DOCKER_SOCK" . }}{{ end }}
+{{-     with .stepCheckpoint.hostPath }}{{ $_ := set $data "K8S_WORKER_STEP_CHECKPOINT_HOST_PATH" . }}{{ end }}
+{{-     if gt (len .nodeSelector) 0 }}{{ $_ := set $data "K8S_WORKER_NODE_SELECTOR" (.nodeSelector | toJson) }}{{ end }}
+{{-     if gt (len .tolerations) 0 }}{{ $_ := set $data "K8S_WORKER_TOLERATIONS" (.tolerations | toJson) }}{{ end }}
+{{- /*   resumeAffinity has a non-empty default ("preferred") on the settings
+         side, so writing it always would be a no-op key in every ConfigMap.
+         Only surface a deliberate deviation. */}}
+{{-     if and .resumeAffinity (ne .resumeAffinity "preferred") }}
+{{-       $_ := set $data "K8S_WORKER_RESUME_AFFINITY" .resumeAffinity }}
+{{-     end }}
+{{-   end }}
 {{- end }}
 {{- $_ := mergeOverwrite $data (index $.Values.configMaps $svc) }}
 apiVersion: v1

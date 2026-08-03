@@ -73,6 +73,10 @@ class BugFixWorker:
         self.bug_id = bug_id
         self._redis = aioredis.from_url(cfg.redis_url, decode_responses=False)
         self._hb_key = cfg.worker_heartbeat_key.format(bug_id=bug_id)
+        # Set by main() when SIGINT/SIGTERM arrives, BEFORE the task is
+        # cancelled. It changes what the teardown means: see the completion-key
+        # comment in run()'s finally.
+        self.interrupted = False
 
     async def run(self) -> None:
         logger.info("worker started  env=%s  bug_id=%s", cfg.env, self.bug_id)
@@ -119,15 +123,40 @@ class BugFixWorker:
             # SET the completion key BEFORE clearing the heartbeat so the
             # Monitor never sees "heartbeat gone + completion absent" (it
             # would interpret that as a crash and restart). Both writes are
-            # cheap — order is what matters. Fires on EVERY exit path
-            # (fixed/no_fix/error/R10) because we're in `finally`.
+            # cheap — order is what matters. Fires on every exit path this
+            # process CHOSE (fixed/no_fix/error/R10) because we're in `finally`.
+            #
+            # …but NOT when we were interrupted. A signal-initiated stop is not
+            # "this bug is done", it is "this process is being taken away" —
+            # which is precisely what restart exists for. Writing the key there
+            # tells HealthMonitor the opposite and the run is abandoned
+            # mid-flight while being recorded as finished.
+            #
+            # This is not a corner case on k8s: EVERY pod deletion, eviction,
+            # drain and rolling update arrives as SIGTERM, and this process
+            # installs a handler for it (see main()), so the graceful path is
+            # the NORMAL path there. Measured on the k3s cluster 2026-08-03: a
+            # `kubectl delete pod` mid-run left the eval container alive (W2's
+            # environment deliberately keeps it), the step-checkpoint records
+            # on disk, no RunRecord — and the monitor marked the bug done, so
+            # nothing ever re-attached. W2.5's resume did not engage for the
+            # one class of failure k8s produces routinely. The host harnesses
+            # never saw it because their chaos tests use `kill -9`, which no
+            # handler can intercept.
             completed_key = cfg.worker_completed_key.format(bug_id=self.bug_id)
-            try:
-                await self._redis.set(
-                    completed_key, b"1", ex=cfg.worker_completed_ttl
+            if self.interrupted:
+                logger.warning(
+                    "interrupted by signal — NOT setting %s, so the orchestrator "
+                    "restarts this bug and the run resumes instead of being "
+                    "silently abandoned", completed_key,
                 )
-            except Exception as e:
-                logger.warning("failed to set completion key %s: %s", completed_key, e)
+            else:
+                try:
+                    await self._redis.set(
+                        completed_key, b"1", ex=cfg.worker_completed_ttl
+                    )
+                except Exception as e:
+                    logger.warning("failed to set completion key %s: %s", completed_key, e)
             await self._redis.delete(self._hb_key)
             await self._redis.aclose()
             self._cleanup_repo()
@@ -200,7 +229,7 @@ class BugFixWorker:
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
-async def main() -> None:
+async def main() -> int:
     parser = argparse.ArgumentParser(description="BugFix Worker")
     parser.add_argument("--bug-id", required=True, help="Bug identifier, e.g. BUG-123")
     args = parser.parse_args()
@@ -213,7 +242,8 @@ async def main() -> None:
         except NotImplementedError:
             pass  # Windows
 
-    worker_task = asyncio.create_task(BugFixWorker(args.bug_id).run())
+    worker = BugFixWorker(args.bug_id)
+    worker_task = asyncio.create_task(worker.run())
     done, _ = await asyncio.wait(
         [worker_task, stop],
         return_when=asyncio.FIRST_COMPLETED,
@@ -223,10 +253,20 @@ async def main() -> None:
             worker_task.result()
         except Exception as e:
             logger.error("worker task failed: %s", e)
-    else:
-        logger.info("stop signal received, cancelling worker…")
-        worker_task.cancel()
-        await asyncio.gather(worker_task, return_exceptions=True)
+        return 0
+    logger.info("stop signal received, cancelling worker…")
+    # Order matters: the flag must be visible to run()'s `finally`, which is
+    # what cancel() triggers.
+    worker.interrupted = True
+    worker_task.cancel()
+    await asyncio.gather(worker_task, return_exceptions=True)
+    # Exit NON-ZERO. Suppressing the completion key is necessary but not
+    # sufficient: HealthMonitor short-circuits on `rc == 0` before it ever
+    # looks at the key, so a clean exit here would still be read as "done" and
+    # the interrupted run would never be restarted. 143 = 128 + SIGTERM, the
+    # conventional code for "terminated by signal", which is what happened
+    # even though we unwound gracefully on the way out.
+    return 143
 
 
 if __name__ == "__main__":
@@ -278,4 +318,7 @@ if __name__ == "__main__":
         _bug_id, time.time_ns() // 1_000_000,
     )
 
-    asyncio.run(main())
+    # Propagate the worker's exit code. A signal-initiated stop returns 143
+    # so the orchestrator sees an abnormal exit and restarts the bug (the
+    # run is incomplete and resumable); everything else returns 0.
+    raise SystemExit(asyncio.run(main()) or 0)

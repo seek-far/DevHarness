@@ -111,6 +111,44 @@ runrecordExporter:
 monitoring:
   enabled: false
 
+# ── pin the monitoring sub-chart too (W4 / D4.1) ─────────────────────────────
+# These render nothing while monitoring.enabled is false, but they must land
+# BEFORE anyone flips that switch.
+#
+# Until W4, the cross-continent node carried a NoSchedule taint, which kept
+# unpinned pods off it as a second line of defence. W4 removes that taint so
+# worker Jobs can run on minus — leaving `nodeSelector` as the ONLY thing
+# keeping stateful pods on this side of the ocean.
+#
+# Prometheus / Grafana / Alertmanager all take PVCs, and the default
+# StorageClass is `local-path`: node-local, and the generated PV pins itself
+# with `nodeAffinity: kubernetes.io/hostname In [<node>]` (measured in W3).
+# A PVC that binds on minus is therefore stuck in Germany permanently —
+# recovering means deleting the PV and losing the data. Pinned by a chart test
+# that walks every PVC-carrying workload rather than naming these four, so a
+# future stateful component fails CI instead of failing an ocean away.
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      nodeSelector:
+        kubernetes.io/hostname: ls4900
+  grafana:
+    nodeSelector:
+      kubernetes.io/hostname: ls4900
+  alertmanager:
+    alertmanagerSpec:
+      nodeSelector:
+        kubernetes.io/hostname: ls4900
+  # No PVC, but a cross-ocean scrape/reconcile path is pointless latency.
+  kube-state-metrics:
+    nodeSelector:
+      kubernetes.io/hostname: ls4900
+  prometheusOperator:
+    nodeSelector:
+      kubernetes.io/hostname: ls4900
+  # prometheus-node-exporter is deliberately NOT pinned — it is a DaemonSet and
+  # is supposed to run on every node, including the cross-continent one.
+
 # ── ConfigMap overrides ──────────────────────────────────────────────────────
 configMaps:
   gateway:

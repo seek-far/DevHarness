@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from types import SimpleNamespace
 import sys
 from pathlib import Path
 
@@ -280,3 +281,56 @@ def test_mini_telemetry_keys_are_all_declared_in_the_state_schema():
     declared = set(BugFixState.__annotations__)
     missing = sorted(k for k in mrl_mod._MINI_TELEMETRY_KEYS if k not in declared)
     assert not missing, f"mini telemetry keys not carriable by BugFixState: {missing}"
+
+
+# ── W4: the apply ladder must survive a missing rung ───────────────────────
+
+def test_ver99_apply_skips_a_missing_binary_and_keeps_every_diagnostic(tmp_path, monkeypatch):
+    """A missing EXECUTABLE must not abort the ladder.
+
+    `_apply_model_patch_ver99` tries `git apply --3way` → `git apply` →
+    `patch -p1`. subprocess.run raises FileNotFoundError when the binary
+    itself is absent, and that exception used to escape the loop — so on the
+    first ver99-in-a-pod run (slim image, no `patch`) the operator was told
+    "No such file or directory: 'patch'" while the stderr of the two git
+    attempts that DID run was discarded, making the real failure undiagnosable.
+
+    Also pins that every attempt's output survives into apply_error: --3way and
+    plain apply fail for different reasons, and only the last used to be kept.
+    """
+    from graph.nodes import apply_change_and_test as mod
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd[0] + " " + cmd[1])
+        if cmd[0] == "patch":
+            raise FileNotFoundError(2, "No such file or directory", "patch")
+        return SimpleNamespace(returncode=1, stdout="", stderr=f"boom from {cmd[1]}")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    out = mod._apply_model_patch_ver99({"model_patch": "diff --git a/x b/x\n"}, tmp_path)
+
+    assert out["test_passed"] is False           # graceful, not an exception
+    assert "boom from apply" in out["apply_error"]
+    assert out["apply_error"].count("boom from") == 2, (
+        "both git attempts' stderr must survive, not just the last one"
+    )
+    assert "executable not found" in out["apply_error"]
+    assert calls == ["git apply", "git apply", "patch -p1"]
+
+
+def test_ver99_apply_still_short_circuits_on_first_success(tmp_path, monkeypatch):
+    """Unchanged behaviour when a rung works: stop, report which one."""
+    from graph.nodes import apply_change_and_test as mod
+
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd[0])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    out = mod._apply_model_patch_ver99({"model_patch": "diff --git a/x b/x\n"}, tmp_path)
+    assert out["test_passed"] is True
+    assert seen == ["git"]
