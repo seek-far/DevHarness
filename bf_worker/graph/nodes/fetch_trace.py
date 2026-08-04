@@ -25,18 +25,23 @@ def fetch_trace(state: BugFixState, config: Optional[RunnableConfig] = None) -> 
     project_id = state.get("project_id", "")
     job_id = state.get("job_id", "")
 
-    # No job to fetch a trace from → return an empty trace instead of building
-    # a `.../jobs//trace` URL that 400s. The real webhook flow always carries a
-    # failed job_id; an empty one only arises when a caller has no CI job to
-    # point at (e.g. the workflow_ver==99 SWE-bench substrate, which never uses
-    # the trace — mini works from problem_statement, not the CI trace). ver==0
-    # degrades gracefully: parse_trace sees an empty trace and takes its
-    # fallback path into react_loop.
-    if not project_id or not job_id:
-        logger.info("fetch_trace: no project_id/job_id (project=%r job=%r) — skipping, empty trace",
-                    project_id, job_id)
-        return {"trace": "", "fetch_trace_retries": 0}
-
+    # WHICH COORDINATES A TRACE NEEDS IS THE PROVIDER'S KNOWLEDGE, NOT THIS
+    # NODE'S. GitLab needs project_id + job_id (and returns "" without them,
+    # rather than building a `.../jobs//trace` URL that 400s); the local
+    # providers need neither — they read `--trace-file` or run `--test-cmd`.
+    #
+    # This node used to short-circuit on empty project_id/job_id and return ""
+    # without ever calling the provider. That silently broke BOTH the standalone
+    # CLI and every evaluation sweep (2026-07-26..2026-08-04): those paths run
+    # LocalNoGitProvider, whose fetch_trace is the only place `--trace-file` /
+    # `--test-cmd` is consumed, and they never carry a project_id/job_id — so
+    # the trace was always empty and parse_trace aborted the run with
+    # "trace is empty — nothing to analyse". The short-circuit's comment claimed
+    # ver==0 "degrades gracefully into parse_trace's fallback path", but that
+    # fallback is for a NON-empty trace the parser can't structure; an empty one
+    # raises. It went unnoticed because the two paths exercised since then —
+    # GitLab mode (always has both ids) and ver99 (routes to mini_react_loop
+    # before parse_trace) — are exactly the two that skip this branch.
     trace, retries = with_transient_retry(
         lambda: provider.fetch_trace(project_id=project_id, job_id=job_id),
         op_name="fetch_trace",

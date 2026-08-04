@@ -18,6 +18,7 @@ import subprocess
 from types import SimpleNamespace
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -178,20 +179,34 @@ def test_ci_wait_timeout_env_override(monkeypatch):
     assert _ci_timeout() == _DEFAULT_CI_TIMEOUT_S
 
 
-def test_fetch_trace_empty_job_id_skips_provider():
+def test_fetch_trace_empty_job_id_issues_no_request():
+    """ver99 has no CI job, so an empty job_id must yield an empty trace without
+    ever requesting `/jobs//trace` (which 400s).
+
+    This test used to assert that `provider.fetch_trace` was NOT CALLED — i.e.
+    it pinned the *implementation* (a short-circuit inside the node) rather than
+    the *intent* (no bad request). That froze a real bug in place: the node's
+    short-circuit also swallowed the local providers, whose fetch_trace is the
+    only place `--trace-file` / `--test-cmd` are read, so standalone and every
+    evaluation sweep silently ran on an empty trace. The guard now lives in
+    GitLabProvider, where needing a job coordinate is actually true, and this
+    test asserts the outcome that ver99 cares about instead.
+
+    See tests/test_fetch_trace_provider_dispatch.py for the other half.
+    """
     from graph.nodes.fetch_trace import fetch_trace
+    from providers.gitlab_provider import GitLabProvider
 
-    class _ProviderExplodes:
-        def fetch_trace(self, **kw):
-            raise AssertionError("provider.fetch_trace must NOT be called for an empty job_id")
+    provider = GitLabProvider.__new__(GitLabProvider)  # no __init__ / no network
+    cfg = {"configurable": {"provider": provider}}
 
-    cfg = {"configurable": {"provider": _ProviderExplodes()}}
-    # empty job_id → empty trace, no provider call, no 400 on `/jobs//trace`
-    out = fetch_trace({"project_id": "20", "job_id": ""}, cfg)
-    assert out == {"trace": "", "fetch_trace_retries": 0}
-    # missing project_id too
-    out2 = fetch_trace({"job_id": "1701"}, cfg)
+    with patch("providers.gitlab_provider.requests.get") as get:
+        out = fetch_trace({"project_id": "20", "job_id": ""}, cfg)
+        out2 = fetch_trace({"job_id": "1701"}, cfg)          # missing project_id too
+
+    assert out["trace"] == ""
     assert out2["trace"] == ""
+    get.assert_not_called()
 
 
 # ── 3. apply_change_and_test ver99 ──────────────────────────────────────────

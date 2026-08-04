@@ -28,7 +28,7 @@ backends:
     # not taken from ADC. If they disagree, the URL wins and ADC's project is
     # simply not consulted, so a mismatch shows up as a 403 on someone else's
     # project rather than as silent cross-project billing.
-    base_url: https://us-central1-aiplatform.googleapis.com/v1/projects/<PROJECT-ID>/locations/us-central1/endpoints/openapi
+    base_url: https://us-central1-aiplatform.googleapis.com/v1/projects/ornate-hour-479317-v0/locations/us-central1/endpoints/openapi
     model: google/gemini-2.5-flash   # the `google/` prefix is required here
     auth: gcp                        # keyless; no api_key / api_key_env
 

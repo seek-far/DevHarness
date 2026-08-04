@@ -628,6 +628,25 @@ class GitLabProvider(SourceProvider, VCSProvider, ReviewProvider):
     # ── SourceProvider ────────────────────────────────────────────────────────
 
     def fetch_trace(self, *, project_id: str = "", job_id: str = "", **kwargs) -> str:
+        # No job to fetch from → "" rather than a `.../jobs//trace` URL that
+        # 400s. The real webhook flow always carries a failed job_id; an empty
+        # one only arises when the caller has no CI job to point at (e.g. the
+        # workflow_ver==99 SWE-bench substrate, which never reads the trace —
+        # mini works from problem_statement, and routing sends it to
+        # mini_react_loop before parse_trace can object to the empty string).
+        #
+        # This guard lives HERE, not in the fetch_trace node, because needing a
+        # job coordinate is a property of GitLab, not of tracing in general.
+        # When the node owned it, the local providers — which need no
+        # coordinates at all — were short-circuited too, and standalone/eval
+        # runs silently lost `--trace-file` / `--test-cmd` entirely.
+        if not project_id or not job_id:
+            logger.info(
+                "fetch_trace: no project_id/job_id (project=%r job=%r) — empty trace",
+                project_id, job_id,
+            )
+            return ""
+
         url = f"{cfg.gitlab_api}/projects/{project_id}/jobs/{job_id}/trace"
         headers = {"PRIVATE-TOKEN": cfg.gitlab_private_token}
 
