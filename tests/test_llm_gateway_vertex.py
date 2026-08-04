@@ -230,12 +230,16 @@ def test_google_auth_owns_the_expiry_threshold():
     )
 
 
-def test_google_auth_still_has_no_lock():
-    """The reason GcpTokenProvider exists at all.
+def test_credentials_module_has_no_refresh_lock():
+    """Scope note, because the obvious phrasing of this test would be a lie.
 
-    Credentials._blocking_refresh is `if not self.valid: self.refresh(...)` with
-    no synchronisation, so N concurrent callers on an expired token would mint N
-    tokens. If upstream ever adds locking, our single-flight becomes redundant.
+    google.auth DOES contain locking — `transport/_aiohttp_requests.py` holds an
+    asyncio.Lock and `_refresh_worker.RefreshThreadManager` a threading.Lock.
+    What has none is the credentials object itself and the **sync**
+    AuthorizedSession, which is what google-cloud-bigquery rides. That is the
+    evidence that concurrent refresh is merely wasteful rather than incorrect;
+    GcpTokenProvider's single-flight is a peak-shaver for the async case, not a
+    correctness fix. This assertion covers only the module named in the test.
     """
     import inspect
 

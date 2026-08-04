@@ -46,15 +46,29 @@ correctly and without the conversion:
 Both sides of that comparison are naive UTC, so there is no timezone to get
 wrong. Deleting our own arithmetic deleted the entire bug class.
 
-What google.auth does NOT provide, and this class still must:
+What this class still adds on top:
 
-  * **Concurrency control.** `Credentials._blocking_refresh` is literally
-    `if not self.valid: self.refresh(request)` — no lock anywhere in the module.
-    A burst arriving on an expired token would mint one per in-flight request.
   * **Async.** `refresh()` is a blocking HTTPS round-trip; on an asyncio
     gateway it has to go through a thread or it stalls the event loop.
   * **A diagnosable error.** `DefaultCredentialsError` does not mention that
     `gcloud auth login` is not the command you needed.
+  * **Single-flight refresh** — for a narrower reason than "the library has
+    none". Locking DOES exist upstream, just not on the path a bare
+    `Credentials` object takes:
+
+        google/auth/credentials.py                         no lock
+        transport/requests.py        (sync  AuthorizedSession)   no lock
+        transport/_aiohttp_requests.py (async AuthorizedSession) asyncio.Lock
+        _refresh_worker.RefreshThreadManager                threading.Lock
+
+    `google-cloud-bigquery` runs on the LOCK-FREE sync session, which settles
+    the question: concurrent refresh is not a correctness problem. Racing
+    refreshes each return a valid token, the last write wins, and the only cost
+    is redundant round-trips. We lock because Google chose to on the *async*
+    transport — a thread pool bounds a sync client to tens of simultaneous
+    refreshes, while one event loop can meet the expiry instant with thousands.
+    So this is a peak-shaver, not a safety device, and the fast path below
+    never touches it. Two deferred simplifications in docs/gcp.md §2.
 """
 
 from __future__ import annotations
@@ -137,9 +151,10 @@ class GcpTokenProvider:
 
         async with self._lock_for(scope):
             # Re-check under the lock: a concurrent caller may have refreshed
-            # while we waited. Without this, a burst on an expired token mints
-            # one token per in-flight request — google.auth has no lock of its
-            # own to fall back on.
+            # while we waited. Without this a burst on an expired token mints
+            # one token per in-flight request — wasteful, not incorrect (see
+            # the module docstring; google-cloud-bigquery runs without any such
+            # lock on purpose).
             cred = self._credentials.get(scope)
             if cred is not None and getattr(cred, "valid", False):
                 return cred.token
