@@ -29,8 +29,50 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Usage:
     prompt_tokens: int = 0
+    #: BILLABLE output tokens — reasoning folded in when the backend reports it
+    #: separately. See _fold_reasoning for why this is not always what the
+    #: backend put in `completion_tokens`.
     completion_tokens: int = 0
     cached_tokens: int = 0
+    #: Informational: the raw reasoning/thinking count, whichever dialect the
+    #: backend speaks. Never added to completion_tokens twice.
+    reasoning_tokens: int = 0
+
+
+def _fold_reasoning(prompt: int, completion: int, reasoning: int, total: Any) -> int:
+    """Return the billable completion count, folding in reasoning if it is extra.
+
+    There are two dialects of `completion_tokens_details.reasoning_tokens` in
+    the wild and they disagree about the same field:
+
+      * **OpenAI / Azure** — `completion_tokens` ALREADY INCLUDES reasoning;
+        the details block is a breakdown. `total = prompt + completion`.
+      * **Vertex AI / Gemini** — `completion_tokens` EXCLUDES reasoning; the
+        thinking tokens are an additional charge at the output rate.
+        `total = prompt + completion + reasoning`.
+
+    Adding reasoning unconditionally double-bills Azure; never adding it
+    under-bills Vertex. Measured on gemini-2.5-flash the miss is not marginal:
+    two probe calls reported completion=10/reasoning=27 and completion=8/
+    reasoning=66, i.e. we would record 11% of the real output on the second.
+
+    So rather than making the operator declare the dialect per backend (a
+    config knob nobody can verify, silently wrong when a backend changes), we
+    let the response prove it: only when `total_tokens` exactly equals
+    prompt + completion + reasoning is reasoning genuinely additional.
+
+    Anything that does not add up — missing total, a backend that rounds, a
+    dialect we have not seen — falls through to the OpenAI reading, which is
+    both today's behaviour and the conservative one (it can only under-report,
+    never invent a charge that was not on the bill).
+    """
+    if reasoning <= 0:
+        return completion
+    if isinstance(total, bool) or not isinstance(total, (int, float)):
+        return completion
+    if int(total) == prompt + completion + reasoning:
+        return completion + reasoning
+    return completion
 
 
 def extract_usage(body: Any) -> Usage | None:
@@ -50,10 +92,21 @@ def extract_usage(body: Any) -> Usage | None:
     if isinstance(details, dict) and details.get("cached_tokens") is not None:
         cached = int(details["cached_tokens"] or 0)
 
+    cdetails = usage.get("completion_tokens_details")
+    reasoning = 0
+    if isinstance(cdetails, dict) and cdetails.get("reasoning_tokens") is not None:
+        reasoning = int(cdetails["reasoning_tokens"] or 0)
+
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+
     return Usage(
-        prompt_tokens=int(usage.get("prompt_tokens") or 0),
-        completion_tokens=int(usage.get("completion_tokens") or 0),
+        prompt_tokens=prompt,
+        completion_tokens=_fold_reasoning(
+            prompt, completion, reasoning, usage.get("total_tokens")
+        ),
         cached_tokens=cached,
+        reasoning_tokens=reasoning,
     )
 
 

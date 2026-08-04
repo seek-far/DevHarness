@@ -82,9 +82,12 @@ class BackendConfig:
     # Microsoft Entra ID token instead and sends THAT as the bearer token, which
     # is all Azure's /openai/v1 route needs: same header, different source. On
     # Azure compute DefaultAzureCredential resolves to the Managed Identity.
+    # `gcp` is the gcp_auth.py twin: an Application Default Credentials token
+    # for Vertex AI's OpenAI-compatible route. Same header, third source.
     auth: str = "api_key"
     entra_scope: str = "https://cognitiveservices.azure.com/.default"
     entra_client_id: str = ""   # user-assigned MI; empty → system-assigned
+    gcp_scope: str = "https://www.googleapis.com/auth/cloud-platform"
     # Which request params the backend tolerates. `reasoning` strips the ones
     # o-series / gpt-5-family models reject (see params.py). The whole point of
     # doing this HERE is that the worker then only ever emits one canonical
@@ -205,7 +208,13 @@ def _resolve_api_key(raw: dict[str, Any], backend_name: str) -> str:
     return "EMPTY"
 
 
-_AUTH_MODES = ("api_key", "entra")
+_AUTH_MODES = ("api_key", "entra", "gcp")
+# Modes that mint their credential per request instead of carrying a static
+# one. Everything downstream that asks "is there a key here?" must branch on
+# this set, not on `== "entra"` — adding `gcp` by extending an equality check
+# in only some of the places is how a keyless backend ends up sending the
+# "EMPTY" sentinel as its bearer token and getting a 401 nobody can explain.
+_KEYLESS_AUTH_MODES = ("entra", "gcp")
 _PARAM_PROFILES = ("chat", "reasoning")
 _REASONING_EFFORTS = ("", "minimal", "low", "medium", "high")
 
@@ -267,9 +276,9 @@ def _parse_backend(raw: Any) -> BackendConfig:
         )
     # A key alongside keyless auth is a contradiction — one of them is a leftover,
     # and silently preferring either is how a run ends up on the wrong credential.
-    if auth == "entra" and ("api_key" in raw or "api_key_env" in raw):
+    if auth in _KEYLESS_AUTH_MODES and ("api_key" in raw or "api_key_env" in raw):
         raise GatewayConfigError(
-            f"backend {name!r}: auth=entra is keyless — remove api_key / api_key_env"
+            f"backend {name!r}: auth={auth} is keyless — remove api_key / api_key_env"
         )
 
     profile = str(raw.get("param_profile", "chat")).lower()
@@ -295,15 +304,18 @@ def _parse_backend(raw: Any) -> BackendConfig:
         base_url=base_url.rstrip("/"),
         model=model,
         # Keyless backends have no static key; the bearer token is minted per
-        # request in azure_auth. Empty string here, never the "EMPTY" sentinel —
-        # that sentinel means "self-hosted, no auth", a different thing.
-        api_key="" if auth == "entra" else _resolve_api_key(raw, name),
+        # request in azure_auth / gcp_auth. Empty string here, never the "EMPTY"
+        # sentinel — that sentinel means "self-hosted, no auth", a different thing.
+        api_key="" if auth in _KEYLESS_AUTH_MODES else _resolve_api_key(raw, name),
         request_timeout=timeout_f,
         auth=auth,
         entra_scope=str(
             raw.get("entra_scope", "https://cognitiveservices.azure.com/.default")
         ),
         entra_client_id=str(raw.get("entra_client_id", "") or ""),
+        gcp_scope=str(
+            raw.get("gcp_scope", "https://www.googleapis.com/auth/cloud-platform")
+        ),
         param_profile=profile,
         reasoning_effort=effort,
         pricing=_parse_pricing(raw.get("pricing"), name),

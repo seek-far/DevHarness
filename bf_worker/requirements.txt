@@ -8,3 +8,4 @@ pydantic
 pydantic-settings
 azure-identity>=1.19  # keyless (Entra ID / Managed Identity) auth for Azure LLM backends — services/azure_auth.py
 psutil>=5.9  # worker_daemon free-memory admission control
+google-cloud-bigquery>=3.20  # journal → BigQuery export (tools/runrecord_to_bigquery.py; tools/ is COPYd into this image)

@@ -905,6 +905,51 @@ before deploying.
 run-to-run reproducibility for evaluation sweeps. On these backends, use the LLM Gateway's replay
 cache (`cache.mode: replay`) as the determinism anchor instead.
 
+### Google Vertex AI backend
+
+Vertex's `/endpoints/openapi` route is plain OpenAI shape too — no `?key=` param, no
+`x-goog-api-key` header, no `google-genai` SDK — so it plugs in as an ordinary gateway backend.
+Unlike Azure, Vertex is currently supported **only through the LLM Gateway**; there is no
+worker-side direct equivalent of `LLM_AUTH_MODE=entra`.
+
+```yaml
+# configs/llm_gateway/vertex.yaml
+backends:
+  - name: vertex-gemini-2.5-flash
+    base_url: https://us-central1-aiplatform.googleapis.com/v1/projects/<PROJECT-ID>/locations/us-central1/endpoints/openapi
+    model: google/gemini-2.5-flash   # the `google/` prefix is required
+    auth: gcp                        # keyless — no api_key
+```
+
+```bash
+LLM_GATEWAY_CONFIG=configs/llm_gateway/vertex.yaml uvicorn llm_gateway.app:app --port 9000
+# worker: LLM_VIA_GATEWAY=true + LLM_API_BASE_URL=http://localhost:9000/v1
+```
+
+**Keyless (Application Default Credentials).** `auth: gcp` mints an ADC token and sends it as the
+bearer credential — the attached service account on Cloud Run / GCE / GKE, your local credentials
+otherwise, so the same code path is exercised either way. The identity needs
+**`roles/aiplatform.user`** (project Owner covers it).
+
+⚠️ **`gcloud auth login` is not enough.** It authenticates the CLI; ADC is written by a *second*
+command, and without it the first request fails:
+
+```bash
+gcloud auth login                      # CLI
+gcloud auth application-default login  # ADC — this is the one the gateway reads
+```
+
+**Determinism bonus.** Gemini 2.5 accepts `temperature` even though it does internal thinking, so
+evaluation keeps `temperature=0` on this backend instead of falling back to the replay cache.
+
+**Thinking tokens are billed on top.** Vertex reports reasoning tokens *outside* `completion_tokens`
+(OpenAI and Azure report them inside), and they bill at the output rate. The gateway detects which
+convention a response uses and prices accordingly, so cost tracking stays honest — but be aware that
+thinking routinely dominates the output charge: measured probes showed 27 reasoning tokens against 10
+visible, and 66 against 8. Set prices in the config from the current Vertex pricing page.
+
+Full design contract in `docs/gcp.md`.
+
 ### Cost tracking and the `BF_MAX_COST_USD` ceiling
 
 Every run records what its LLM calls cost, on `RunRecord.total_cost_usd`.
@@ -943,7 +988,7 @@ and what the cache saved you. Full design contract in `docs/azure.md`.
 
 `llm_gateway/` is an independent FastAPI service that routes OpenAI-compatible requests to one of N configured backends per a **stateless inference policy** (today: ordered ladder — the worker's `X-Sdlcma-Attempt` header is treated as a difficulty coefficient, attempt=0 picks the primary backend and each retry climbs one rung). It is fully orthogonal to the deployment mode below — turn it on for any deployment, or leave it off; the worker code path is byte-identical with it off.
 
-Four bundled configs in `configs/llm_gateway/`:
+Bundled configs in `configs/llm_gateway/`:
 
 | File | Backends | Use case |
 |---|---|---|
@@ -951,6 +996,8 @@ Four bundled configs in `configs/llm_gateway/`:
 | `self_hosted.yaml` | local vLLM only | All self-hosted |
 | `qwen3_plus_local.yaml` | Dashscope primary + local vLLM fallback | Try cloud first, escalate to self-hosted on retry or cloud outage |
 | `qwen3_api_cached.yaml` | Dashscope + persistent response cache | Replay + stress testing (zero tokens after the first warm run) |
+| `azure.yaml` | Azure OpenAI, keyless (Entra / Managed Identity) | Azure-hosted reasoning models; see [Azure backend](#azure-openai--foundry-backend) |
+| `vertex.yaml` | Google Vertex AI, keyless (ADC / service account) | Gemini via the OpenAI-compatible route; see [Vertex AI backend](#google-vertex-ai-backend) |
 
 **Response cache (opt-in).** The gateway can persist every successful upstream response to a sqlite file and replay matching requests without touching the LLM. Four modes — `disabled` (default), `record` (write-through), `replay` (strict cache-only; miss → 409), `cache` (replay-on-hit, record-on-miss). The cache key hashes the worker-controlled inputs only — `system` / `user` / `tool` messages, `tools` schema, `model`, sampling params — and deliberately drops `assistant` messages + `tool_call_id`, so a multi-turn ReAct loop hashes to the same key on replay despite the LLM's stochastic prior-turn output and the SDK's per-call random IDs. The sqlite file *is* the portability contract, but **move it with `tools/llm_cache_transfer.py`, not `cp`** — the live cache runs in WAL mode, so until sqlite checkpoints, the entries sit in `<db>-wal` and the `.db` you copied is empty (measured: a 4 KB `.db` beside an 800 KB `-wal` holding all 45 entries). An empty cache does not error; it just misses on everything and you pay the whole bill again. `export` reads through the WAL and writes one self-contained file; `import` **merges** by cache_key so the target keeps its own recordings; `info` shows entry count, backends, and un-checkpointed WAL bytes (record on dev, replay on a soak machine with no LLM credentials). Keep `db_path` off `/tmp` — a reboot deletes the most expensive artifact you have. Live counters at `GET /cache/stats`; periodic `phase_marker phase=cache_summary` log line every `log_every_n` requests. `replay_with_latency: true` sleeps to the originally-recorded wallclock on hit so stress-test phase-3 numbers stay realistic at zero token spend.
 

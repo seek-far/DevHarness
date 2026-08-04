@@ -51,6 +51,22 @@ CROSS_CUTTING = {
     # BUNDLES the importing source must still install it, or a run with
     # llm_auth_mode=entra dies at first LLM call.
     "azure.identity": "azure-identity",
+    # ADC / service-account auth for Vertex AI backends (llm_gateway/gcp_auth.py),
+    # the GCP twin of azure.identity above and lazily imported for the same
+    # reason. Keyed on `google.auth` because that is the module our code names;
+    # note the same distribution also ships `google.oauth2`, which this key
+    # would NOT catch.
+    "google.auth": "google-auth",
+    # journal → BigQuery export (tools/, which ships inside the bf-worker image).
+    #
+    # The key is `google.cloud`, NOT `google.cloud.bigquery`, and that is
+    # load-bearing: the canonical import is `from google.cloud import bigquery`,
+    # which _imports_package matches against `google.cloud` only. Keyed on the
+    # longer name the regex finds nothing, `importer is None` short-circuits,
+    # and this guard passes GREEN while guarding nothing — the exact silent-
+    # failure shape the file exists to prevent. Revisit if a second
+    # google-cloud-* package ever lands; today bigquery is the only one.
+    "google.cloud": "google-cloud-bigquery",
 }
 
 

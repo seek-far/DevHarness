@@ -1,0 +1,68 @@
+# Google Vertex AI backend, keyless (ADC → the attached service account on
+# Cloud Run / GCE / GKE).
+#
+# Vertex exposes an OpenAI-compatible route at /endpoints/openapi: no
+# ?key= param, no x-goog-api-key header, no google-genai SDK. It takes an
+# ordinary `Authorization: Bearer <token>`, which is why `auth: gcp` is the
+# only Google-specific thing on this page — same seam as Azure's `auth: entra`.
+#
+# Run:
+#   gcloud auth application-default login    # locally; on GCP the SA is used
+#   LLM_GATEWAY_CONFIG=configs/llm_gateway/vertex.yaml \
+#     uvicorn llm_gateway.app:app --port 9000
+#
+# ⚠️ `gcloud auth login` is NOT enough — that authenticates the CLI only.
+#    google.auth reads Application Default Credentials, which is the second
+#    command. Missing ADC surfaces as GcpAuthError at the first request.
+#
+# Worker:
+#   LLM_VIA_GATEWAY=true
+#   LLM_API_BASE_URL=http://localhost:9000/v1
+#
+# The identity needs `roles/aiplatform.user` on the project. Project Owner
+# covers it; a bare service account does not.
+
+backends:
+  - name: vertex-gemini-2.5-flash
+    # Replace <PROJECT-ID> — and note the project is pinned HERE, in the URL,
+    # not taken from ADC. If they disagree, the URL wins and ADC's project is
+    # simply not consulted, so a mismatch shows up as a 403 on someone else's
+    # project rather than as silent cross-project billing.
+    base_url: https://us-central1-aiplatform.googleapis.com/v1/projects/<PROJECT-ID>/locations/us-central1/endpoints/openapi
+    model: google/gemini-2.5-flash   # the `google/` prefix is required here
+    auth: gcp                        # keyless; no api_key / api_key_env
+
+    # `chat`, deliberately — and this is a genuine advantage over the Azure
+    # reasoning backends. Gemini 2.5 thinks, but it does NOT reject
+    # `temperature` the way the o-series / gpt-5 family does (HTTP 400
+    # unsupported_value). So temperature=0 keeps working here, which means
+    # evaluation keeps its original determinism anchor instead of having to
+    # fall back on the replay cache for it.
+    param_profile: chat
+    request_timeout: 120
+
+    # ⚠️ Confirm against the current Vertex pricing page for your region.
+    # Thinking tokens bill at the OUTPUT rate — and Vertex reports them
+    # OUTSIDE completion_tokens (unlike OpenAI/Azure), which llm_gateway/
+    # cost.py detects from the total_tokens identity. Measured on probe calls:
+    # reasoning was 2.7x and 8.2x the visible completion count, so an
+    # output_per_1m that looks small still dominates the bill.
+    pricing:
+      input_per_1m: 0.30
+      output_per_1m: 2.50
+      cached_input_per_1m: 0.075
+      currency: USD
+
+inference_policy:
+  type: ordered
+  order: [vertex-gemini-2.5-flash]
+  advance_on:
+    fix_failure: true
+
+cache:
+  mode: cache                    # replay on hit, record on miss
+  # NOT /tmp: a reboot silently empties the cache and the next run just pays
+  # for everything again (this cost the minus box a whole 0:100 recording).
+  db_path: ~/.sdlcma/llm_cache_vertex.db
+  normalize_content: true
+  log_every_n: 20

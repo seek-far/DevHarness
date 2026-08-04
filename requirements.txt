@@ -16,3 +16,5 @@ kubernetes>=29.0,<33.0  # 33+ regression: InClusterConfigLoader bearer-token aut
 mcp>=1.0  # MCP server (mcp_server/) exposes evaluation state as tools/resources for MCP-aware clients
 prometheus-client>=0.20  # /metrics endpoints on gateway + orchestrator (Tier-1 counters + active_workers / stream_pending gauges)
 azure-identity>=1.19  # keyless (Entra ID / Managed Identity) auth for Azure LLM backends. NOTE: per-component images install their OWN requirements — this line reaches NO image; see bf_worker/requirements.txt (pinned by tests/test_image_dependencies.py)
+google-auth>=2.28  # keyless (ADC / service account) auth for Vertex AI backends. Same NOTE as above — the image-reaching copy is llm_gateway/requirements.txt
+google-cloud-bigquery>=3.20  # journal → BigQuery export. Same NOTE — the image-reaching copy is bf_worker/requirements.txt (tools/ ships in that image)

@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .azure_auth import EntraTokenProvider, GatewayAuthError
+from .gcp_auth import GcpAuthError, GcpTokenProvider
 from .cache import Cache
 from .config import BackendConfig, GatewayConfig, load_config
 from .cost import cost_of, extract_usage
@@ -83,6 +84,7 @@ _state: dict[str, Any] = {
     "cache": None,         # llm_gateway.cache.Cache | None
     "cache_request_count": 0,  # for periodic stats summary log
     "entra": None,         # llm_gateway.azure_auth.EntraTokenProvider
+    "gcp": None,           # llm_gateway.gcp_auth.GcpTokenProvider
 }
 
 # Header names — defined once so the worker and gateway never drift.
@@ -179,6 +181,7 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
             _state["cache"] = None
         _state["cache_request_count"] = 0
         _state["entra"] = EntraTokenProvider()
+        _state["gcp"] = GcpTokenProvider()
         logger.info(
             "gateway: loaded config %s (%d backend(s), policy=%s, order=%s)",
             path, len(cfg.backends), cfg.policy.type, list(cfg.policy.order),
@@ -200,6 +203,9 @@ def _init_app(cfg_path: str | None = None) -> FastAPI:
         entra: EntraTokenProvider | None = _state.get("entra")
         if entra is not None:
             await entra.aclose()
+        gcp: GcpTokenProvider | None = _state.get("gcp")
+        if gcp is not None:
+            await gcp.aclose()
 
     @app.get("/metrics")
     async def metrics_endpoint():
@@ -575,13 +581,18 @@ def _maybe_emit_cache_summary() -> None:
 async def _bearer_for(backend: BackendConfig) -> str:
     """The credential this backend authenticates with.
 
-    Both modes end up in the SAME `Authorization: Bearer …` header — Azure's
-    /openai/v1 route asks for nothing more. `entra` merely changes where the
-    string comes from, which is why keyless Azure needs no special HTTP path.
+    All three modes end up in the SAME `Authorization: Bearer …` header —
+    neither Azure's /openai/v1 route nor Vertex's /endpoints/openapi route asks
+    for anything more. `entra` and `gcp` merely change where the string comes
+    from, which is why keyless Azure and keyless GCP both need zero special
+    HTTP path.
     """
     if backend.auth == "entra":
         provider: EntraTokenProvider = _state["entra"]
         return await provider.get_token(backend.entra_scope, backend.entra_client_id)
+    if backend.auth == "gcp":
+        gcp_provider: GcpTokenProvider = _state["gcp"]
+        return await gcp_provider.get_token(backend.gcp_scope)
     return backend.api_key
 
 
@@ -607,16 +618,20 @@ async def _forward(
     url = backend.base_url.rstrip("/") + "/chat/completions"
     try:
         bearer = await _bearer_for(backend)
-    except GatewayAuthError as exc:
+    except (GatewayAuthError, GcpAuthError) as exc:
         # A keyless backend we cannot get a token for is a config/RBAC problem,
         # not a transient one. Surface it immediately rather than burning the
         # retry budget on a failure that will never resolve itself.
+        #
+        # The two error types stay separate (each auth module owns its own, and
+        # neither imports the other) so the class name is derived, not hardcoded
+        # — an operator reading this line needs to know WHICH cloud refused.
         return {
             "kind": "fail",
             "status": 502,
             "headers": {},
             "body_bytes": b"",
-            "error": f"GatewayAuthError: {exc}",
+            "error": f"{type(exc).__name__}: {exc}",
         }
     headers = {
         "authorization": f"Bearer {bearer}",
