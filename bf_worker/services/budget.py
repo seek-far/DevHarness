@@ -156,6 +156,64 @@ class BudgetConfig:
     max_cost_usd: float | None = DEFAULT_MAX_COST_USD
 
 
+def _reasoning_count(details) -> int:
+    """Reasoning tokens out of a LangChain ``output_token_details`` mapping.
+
+    The key is normally ``reasoning``, but langchain-openai prefixes it with the
+    OpenAI service tier when one is set (``priority_reasoning`` / ``flex_
+    reasoning``, see langchain_openai/chat_models/base.py::_create_usage_metadata),
+    so match on the suffix rather than the exact name.
+    """
+    if not isinstance(details, dict):
+        return 0
+    for key, value in details.items():
+        if key == "reasoning" or str(key).endswith("_reasoning"):
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _fold_reasoning(prompt: int, completion: int, reasoning: int, total) -> int:
+    """Billable output tokens, folding in reasoning when it is charged on top.
+
+    ⚠️ SECOND IMPLEMENTATION ON PURPOSE — the first is
+    ``llm_gateway/cost.py::_fold_reasoning``. The gateway image does not and
+    must not contain bf_worker (and vice versa), exactly as with the two
+    azure_auth.py twins, so sharing the function would force one image to bundle
+    the other's source. ``tests/test_reasoning_token_fold.py`` asserts the two
+    stay behaviourally identical.
+
+    Two dialects of ``reasoning_tokens`` exist and they disagree about the same
+    field:
+
+      * OpenAI / Azure — ``completion_tokens`` ALREADY INCLUDES reasoning;
+        ``total = prompt + completion``.
+      * Vertex / Gemini — ``completion_tokens`` EXCLUDES it; reasoning is an
+        additional charge at the output rate;
+        ``total = prompt + completion + reasoning``.
+
+    Rather than have an operator declare the dialect (a setting nobody can
+    verify, silently wrong the day a backend changes), let the response prove
+    it: fold only when the additive identity holds exactly. Anything else —
+    absent total, a rounding backend, an unseen dialect — keeps the OpenAI
+    reading, which can under-report but can never invent tokens that were not
+    spent.
+
+    Note langchain-openai synthesises ``total_tokens`` as ``input + output``
+    when the backend omits it, which lands on the conservative branch by
+    construction.
+    """
+    if reasoning <= 0:
+        return completion
+    if isinstance(total, bool) or not isinstance(total, (int, float)):
+        return completion
+    if int(total) == prompt + completion + reasoning:
+        return completion + reasoning
+    return completion
+
+
 def extract_token_usage(assistant_msg) -> tuple[int, int]:
     """Best-effort extraction of (input_tokens, output_tokens) from a LangChain
     assistant message.
@@ -164,17 +222,39 @@ def extract_token_usage(assistant_msg) -> tuple[int, int]:
     ``response_metadata['token_usage']`` (older path). Returns ``(0, 0)`` if
     neither is present so the budget still tracks call count even when the
     backend doesn't surface usage.
+
+    ``output_tokens`` here is the BILLABLE count: on backends that report
+    thinking tokens separately (Vertex/Gemini) they are folded in, because they
+    cost real money at the output rate and are real work the budget should
+    bound. Before 2026-08-04 this returned the raw value, which made
+    ``RunRecord.total_completion_tokens`` disagree with the very
+    ``total_cost_usd`` computed from the same response — measured on a live
+    Vertex run: 334 recorded against 1153 billed, 71 % of the output invisible.
+
+    Consequence worth knowing: on a thinking backend a run now reaches
+    ``max_tokens`` sooner than it used to. That is the cap doing its job — the
+    tokens were always being spent, they just weren't being counted.
     """
     meta = getattr(assistant_msg, "usage_metadata", None)
     if meta:
-        return int(meta.get("input_tokens", 0) or 0), int(meta.get("output_tokens", 0) or 0)
+        in_tok = int(meta.get("input_tokens", 0) or 0)
+        out_tok = int(meta.get("output_tokens", 0) or 0)
+        reasoning = _reasoning_count(meta.get("output_token_details"))
+        return in_tok, _fold_reasoning(in_tok, out_tok, reasoning, meta.get("total_tokens"))
 
     rmeta = getattr(assistant_msg, "response_metadata", None) or {}
     usage = rmeta.get("token_usage") or rmeta.get("usage") or {}
     if usage:
         in_tok = int(usage.get("prompt_tokens", 0) or 0)
         out_tok = int(usage.get("completion_tokens", 0) or 0)
-        return in_tok, out_tok
+        details = usage.get("completion_tokens_details") or {}
+        reasoning = 0
+        if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+            try:
+                reasoning = max(0, int(details["reasoning_tokens"] or 0))
+            except (TypeError, ValueError):
+                reasoning = 0
+        return in_tok, _fold_reasoning(in_tok, out_tok, reasoning, usage.get("total_tokens"))
 
     return 0, 0
 

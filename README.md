@@ -948,6 +948,13 @@ convention a response uses and prices accordingly, so cost tracking stays honest
 thinking routinely dominates the output charge: measured probes showed 27 reasoning tokens against 10
 visible, and 66 against 8. Set prices in the config from the current Vertex pricing page.
 
+Both `RunRecord.total_cost_usd` and `RunRecord.total_completion_tokens` account for thinking, so
+they agree with each other. Note that `max_tokens` in the run budget counts thinking too — a run on
+a thinking backend reaches that cap sooner than the same run on a non-thinking one.
+
+Verified end-to-end 2026-08-04 on fixture F01 (worker → gateway → `gemini-2.5-flash`):
+`outcome=fixed` in 2 LLM calls for **$0.003558**.
+
 Full design contract in `docs/gcp.md`.
 
 ### Cost tracking and the `BF_MAX_COST_USD` ceiling
