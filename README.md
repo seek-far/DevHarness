@@ -537,6 +537,28 @@ python -m evaluation.cli report <run_id>                             # compariso
 python -m evaluation.cli journal-prune --older-than 30d --keep-flagged  # dry-run retention
 ```
 
+#### Querying the journal with SQL (BigQuery, optional)
+
+`list-journal` shows two of `RunRecord`'s 71 fields, and every cross-run question
+("cost per fix by model", "did fix_rate drop after commit X") otherwise needs a one-off script.
+`tools/runrecord_to_bigquery.py` loads the journal into a BigQuery table so those become SQL:
+
+```bash
+python -m tools.runrecord_to_bigquery --dry-run    # scan + report, no credentials needed
+python -m tools.runrecord_to_bigquery              # → dataset `sdlcma`, table `runs`
+```
+
+It is **idempotent** — each row is keyed on the journal directory name, so re-running loads only
+what is new and it is safe to put in cron. That also means several hosts can export into one table,
+which is the main reason to bother: the journal is per-host, so no single machine (and no Grafana
+dashboard) sees all of it. Unknown values load as NULL, never 0 — an unpriced self-hosted backend
+must not read as "$0 spent". Auth is plain ADC (`gcloud auth application-default login`); the whole
+thing fits in BigQuery's permanent free tier, so it costs **$0**.
+
+This complements rather than replaces the Prometheus exporters: those answer "how is the system
+doing right now", this answers "what happened, across everything, over time". Details and the type
+mapping in `docs/gcp.md` §8.
+
 #### Published benchmark results
 
 - [Cloud vs. self-hosted — initial benchmark (2026-05-24)](evaluation/reports/2026_05_24_cloud_vs_self_hosted.md) — first side-by-side of Dashscope `qwen3-coder-480b-a35b-instruct` vs. vLLM (+FlashInfer) `qwen2.5-coder-32b-instruct-awq` across all 19 bundled fixtures, plus a back-of-envelope FlashInfer effect estimate. Initial results, one sweep per backend — see the caveats section before quoting numbers.
