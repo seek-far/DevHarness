@@ -27,9 +27,19 @@ ENV PYTHONPATH="/app" \
 
 EXPOSE 9000
 
-# Use uvicorn directly (the FastAPI app is `llm_gateway.app:app`). Single
-# worker on purpose — the inference policy holds per-bug error-count state
-# in process memory, and multi-worker would split it. Multi-replica
-# horizontal scaling is explicit non-scope today; if it becomes needed,
-# move the policy state to Redis and bump workers here.
+# Use uvicorn directly (the FastAPI app is `llm_gateway.app:app`).
+#
+# `--workers 1` is now about the CACHE, not the policy. The comment here used
+# to say the inference policy held per-bug error-count state that multiple
+# workers would split — that was true of an early draft and is no longer:
+# llm_gateway/policy.py is explicitly stateless ("no per-bug state ... no
+# shared mutable state"), selection being a pure function of the
+# X-Sdlcma-Attempt header. Corrected 2026-08-04 while sizing the Cloud Run
+# deploy, where the difference decides whether autoscaling is safe (it is).
+#
+# What does stay process-local is the sqlite response cache: multiple workers
+# behind one port would each open it, and on Cloud Run each INSTANCE has its
+# own scratch filesystem anyway. One worker keeps the single-file cache
+# coherent where it is used at all; configs/llm_gateway/vertex_cloudrun.yaml
+# disables it outright, since a Cloud Run filesystem cannot persist it.
 CMD ["sh", "-c", "uvicorn llm_gateway.app:app --host ${LLM_GATEWAY_HOST} --port ${LLM_GATEWAY_PORT} --workers 1"]

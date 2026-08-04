@@ -1,0 +1,54 @@
+# Vertex AI backend, shaped for running the gateway ON Cloud Run.
+#
+# Template, not a runnable file: `infra/gcp-cloudrun/setup.sh` substitutes
+# __PROJECT_ID__ from `gcloud config get-value project` and writes
+# vertex_cloudrun.local.yaml (gitignored) into the build context. Same
+# convention as the Helm values.local.yaml overlays.
+#
+# Differences from configs/llm_gateway/vertex.yaml, both of them deliberate:
+#
+#  1. NO `api_key` — same as vertex.yaml, but the ADC resolution is what
+#     actually changes. Locally ADC is your `gcloud auth application-default
+#     login` user; on Cloud Run it is the service account attached to the
+#     revision (llm-gateway-sa, holding only roles/aiplatform.user). Identical
+#     code path, different identity — that is the half of gcp_auth.py a local
+#     run cannot exercise.
+#
+#  2. `cache.mode: disabled`, explicitly. See below.
+
+backends:
+  - name: vertex-gemini-2.5-flash
+    base_url: https://us-central1-aiplatform.googleapis.com/v1/projects/__PROJECT_ID__/locations/us-central1/endpoints/openapi
+    model: google/gemini-2.5-flash
+    auth: gcp
+    param_profile: chat
+    request_timeout: 120
+    pricing:
+      input_per_1m: 0.30
+      output_per_1m: 2.50
+      cached_input_per_1m: 0.075
+      currency: USD
+
+inference_policy:
+  type: ordered
+  order: [vertex-gemini-2.5-flash]
+  advance_on:
+    fix_failure: true
+
+# ⚠️ DISABLED ON PURPOSE — the replay cache cannot work on Cloud Run.
+#
+# The cache is a sqlite file, and a Cloud Run container filesystem is an
+# in-memory scratch disk: it is not shared between instances, and it is gone
+# when the service scales to zero (which it does by default, on idle). So a
+# cache configured here would cost memory, appear in /cache/stats, and hit
+# approximately never.
+#
+# Setting it to `disabled` rather than leaving a db_path that silently does
+# nothing is the point: a cache that looks configured but never hits is worse
+# than no cache, because the first cost report that comes in higher than
+# expected sends you looking in the wrong place.
+#
+# A genuinely shared cache would need Cloud SQL or GCS behind llm_gateway/
+# cache.py's sqlite assumption — a different piece of work, not ver0.
+cache:
+  mode: disabled

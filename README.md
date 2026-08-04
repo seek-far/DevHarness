@@ -977,6 +977,28 @@ a thinking backend reaches that cap sooner than the same run on a non-thinking o
 Verified end-to-end 2026-08-04 on fixture F01 (worker → gateway → `gemini-2.5-flash`):
 `outcome=fixed` in 2 LLM calls for **$0.003558**.
 
+#### Running the gateway on Cloud Run
+
+`infra/gcp-cloudrun/setup.sh` deploys the gateway (and only the gateway — the other services need
+Redis, and workers need the host Docker socket) to Google Cloud Run:
+
+```bash
+bash infra/gcp-cloudrun/setup.sh        # idempotent
+bash infra/gcp-cloudrun/teardown.sh     # removes every resource it created
+```
+
+The container then runs **as a service account**, so the keyless ADC path resolves to that identity
+instead of your local login — no API key exists anywhere in the deployment. It is deployed
+**without public access** (this gateway has no authentication of its own); workers reach it through
+`gcloud run services proxy`, which keeps them pointing at `http://localhost:9000/v1` with no code
+change. Cost is **$0** — the free tier covers it and the service scales to zero when idle.
+
+⚠️ Two client-side traps, documented in `infra/gcp-cloudrun/README.md`: the proxy needs a component
+an apt-installed gcloud will not self-install (`sudo apt-get install google-cloud-cli-cloud-run-proxy`),
+and **if something else is already listening on :9000 a smoke test will silently pass against it**.
+The tell is cost: this deployment disables the response cache, so a genuine Cloud Run call is never
+free.
+
 Full design contract in `docs/gcp.md`.
 
 ### Cost tracking and the `BF_MAX_COST_USD` ceiling
