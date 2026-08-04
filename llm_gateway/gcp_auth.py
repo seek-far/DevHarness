@@ -1,48 +1,68 @@
 """Google Cloud bearer tokens for keyless Vertex AI backends.
 
-The GCP twin of `llm_gateway/azure_auth.py`, and deliberately shaped like it:
-same cache-with-skew, same async single-flight, same lazy import, same "the
-mint is a blocking HTTPS round-trip so it runs in a worker thread" rule. Read
-that file's header for the reasoning — all of it applies here unchanged.
+The GCP twin of `llm_gateway/azure_auth.py`: same lazy import, same async
+single-flight, same "the mint is a blocking HTTPS round-trip so it runs in a
+worker thread" rule. Read that file's header for the reasoning.
 
 Why this needs no Vertex-specific HTTP path at all: Vertex AI exposes an
 OpenAI-compatible route at
 
     https://<loc>-aiplatform.googleapis.com/v1/projects/<proj>/locations/<loc>/endpoints/openapi
 
-which authenticates with an ordinary `Authorization: Bearer <token>`. That is
-the same header a static API key produces, which is why `auth: gcp` only
-changes where the bearer comes from — exactly the property that made the Azure
-backend cheap.
+which authenticates with an ordinary `Authorization: Bearer <token>` — the same
+header a static API key produces. So `auth: gcp` only changes where the bearer
+comes from, and the gateway keeps ONE request path for every backend. That is
+also why we do not use the `google-genai` / `vertexai` SDKs: they speak Google's
+request/response shape, and adopting one would force request translation,
+response translation, and per-backend special cases through policy/cost/cache.
+We want exactly one thing from Google's stack — a token string.
 
-Credentials come from **Application Default Credentials**, so the resolution
-order is Google's, not ours:
+Credentials come from **Application Default Credentials**, so resolution order
+is Google's, not ours:
 
   * on GCP compute (Cloud Run, GCE, GKE) → the attached service account
   * locally → whatever `gcloud auth application-default login` wrote
 
-That is the same "local run genuinely exercises the cloud code path" property
-DefaultAzureCredential gives on the Azure side. Note it is specifically the
-ADC login that matters: a plain `gcloud auth login` authenticates the CLI and
-leaves ADC unset, which surfaces here as DefaultCredentialsError.
+Note it is specifically the ADC login that matters: a plain `gcloud auth login`
+authenticates the CLI and leaves ADC unset, which surfaces here as
+DefaultCredentialsError. The wrapped error message says so, because that is the
+single most likely operator mistake.
 
-`google.auth` is imported lazily so a gateway with no Vertex backend does not
-need the package installed at all.
+⚠️ TOKEN LIFECYCLE IS THE LIBRARY'S JOB, NOT OURS — learned the hard way.
+
+The first version of this file cached tokens itself: it converted
+`credentials.expiry` to epoch seconds and compared against `time.time()` with a
+300s skew. `credentials.expiry` is a NAIVE datetime documented as UTC, and
+`datetime.timestamp()` reads a naive value in the machine's LOCAL timezone — so
+that conversion was wrong by the UTC offset, harmlessly (over-refreshing) on a
+UTC+N box and dangerously (serving expired tokens) on any us-* host.
+
+The bug was self-inflicted. `google.auth` already answers the question
+correctly and without the conversion:
+
+    Credentials.expired → utcnow() >= (expiry - REFRESH_THRESHOLD)   # 3m45s
+    Credentials.valid   → token is not None and not expired
+
+Both sides of that comparison are naive UTC, so there is no timezone to get
+wrong. Deleting our own arithmetic deleted the entire bug class.
+
+What google.auth does NOT provide, and this class still must:
+
+  * **Concurrency control.** `Credentials._blocking_refresh` is literally
+    `if not self.valid: self.refresh(request)` — no lock anywhere in the module.
+    A burst arriving on an expired token would mint one per in-flight request.
+  * **Async.** `refresh()` is a blocking HTTPS round-trip; on an asyncio
+    gateway it has to go through a thread or it stalls the event loop.
+  * **A diagnosable error.** `DefaultCredentialsError` does not mention that
+    `gcloud auth login` is not the command you needed.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from dataclasses import dataclass
-from datetime import timezone
 
 logger = logging.getLogger(__name__)
-
-# Mirror of azure_auth._REFRESH_SKEW_S, same rationale: never hand a request a
-# token that can expire while it is still in flight upstream.
-_REFRESH_SKEW_S = 300
 
 # Vertex AI accepts the broad cloud-platform scope. ADC user credentials from
 # `gcloud auth application-default login` are minted with this scope anyway.
@@ -53,46 +73,17 @@ class GcpAuthError(RuntimeError):
     """Raised when a bearer token cannot be obtained for a Vertex backend."""
 
 
-@dataclass
-class _CachedToken:
-    token: str
-    expires_on: float  # epoch seconds
-
-
-def _expiry_to_epoch(expiry) -> float:
-    """google.auth's `credentials.expiry` → epoch seconds.
-
-    ⚠️ The load-bearing line in this file. `expiry` is a **naive** datetime
-    that google.auth documents as UTC. Calling `.timestamp()` on a naive
-    datetime makes Python interpret it in the machine's LOCAL timezone, so the
-    epoch comes out wrong by the UTC offset — and the sign of that error
-    decides whether the bug is cosmetic or a production outage:
-
-      * UTC+N host (this dev box is in Germany, UTC+1/+2): the token looks
-        like it expired earlier than it did → we refresh on every request.
-        Wasteful, self-healing, easy to miss forever.
-      * UTC-N host (any us-* deployment): the token looks like it expires
-        LATER than it does → we keep sending an expired token and Vertex
-        answers 401 for a whole UTC-offset's worth of requests.
-
-    So we stamp UTC explicitly rather than trusting the ambient timezone.
-    A missing expiry means "unknown" — treated as already-expired by the
-    caller, which costs a refresh but can never serve a stale token.
-    """
-    if expiry is None:
-        return 0.0
-    if expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
-    return expiry.timestamp()
-
-
 class GcpTokenProvider:
-    """Per-scope token cache with async single-flight refresh."""
+    """Per-scope credentials with async single-flight refresh.
+
+    There is no token cache here on purpose: a google.auth Credentials object
+    already holds its token and knows when it went stale, so a second copy in
+    this class would be one more thing that can disagree with reality.
+    """
 
     def __init__(self) -> None:
-        self._cache: dict[str, _CachedToken] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
         self._credentials: dict[str, object] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
 
     def _lock_for(self, scope: str) -> asyncio.Lock:
         lock = self._locks.get(scope)
@@ -120,35 +111,42 @@ class GcpTokenProvider:
         self._credentials[scope] = cred
         return cred
 
-    def _mint(self, scope: str) -> _CachedToken:
-        """Blocking. Always called via asyncio.to_thread."""
+    def _mint(self, scope: str) -> str:
+        """Blocking. Always called via asyncio.to_thread.
+
+        `cred.valid` carries google.auth's own 3m45s refresh threshold, so the
+        re-check here is not redundant with get_token's: by the time a queued
+        caller acquires the lock, the holder may already have refreshed this
+        very object.
+        """
         import google.auth.transport.requests
 
         cred = self._credential(scope)
-        cred.refresh(google.auth.transport.requests.Request())
-        return _CachedToken(
-            token=cred.token,
-            expires_on=_expiry_to_epoch(getattr(cred, "expiry", None)),
-        )
+        if not cred.valid:
+            cred.refresh(google.auth.transport.requests.Request())
+        return cred.token
 
     async def get_token(self, scope: str = DEFAULT_SCOPE) -> str:
         scope = scope or DEFAULT_SCOPE
 
-        cached = self._cache.get(scope)
-        if cached is not None and cached.expires_on - _REFRESH_SKEW_S > time.time():
-            return cached.token
+        # Fast path: a live token, no lock, no thread hop. This is the case for
+        # all but roughly one request an hour.
+        cred = self._credentials.get(scope)
+        if cred is not None and getattr(cred, "valid", False):
+            return cred.token
 
         async with self._lock_for(scope):
-            # Re-check under the lock: a concurrent request may have refreshed
-            # while we waited. Without this, a burst on a cold cache mints one
-            # token per in-flight request.
-            cached = self._cache.get(scope)
-            if cached is not None and cached.expires_on - _REFRESH_SKEW_S > time.time():
-                return cached.token
+            # Re-check under the lock: a concurrent caller may have refreshed
+            # while we waited. Without this, a burst on an expired token mints
+            # one token per in-flight request — google.auth has no lock of its
+            # own to fall back on.
+            cred = self._credentials.get(scope)
+            if cred is not None and getattr(cred, "valid", False):
+                return cred.token
 
             try:
                 # Off the event loop: the mint is a blocking HTTPS round-trip.
-                fresh = await asyncio.to_thread(self._mint, scope)
+                token = await asyncio.to_thread(self._mint, scope)
             except GcpAuthError:
                 raise
             except Exception as exc:
@@ -161,17 +159,13 @@ class GcpTokenProvider:
                     "set up ADC."
                 ) from exc
 
-            if not fresh.token:
+            if not token:
                 raise GcpAuthError(
                     f"google.auth returned an empty token for scope {scope!r}"
                 )
 
-            self._cache[scope] = fresh
-            logger.info(
-                "gateway: minted GCP token scope=%s ttl=%ds",
-                scope, int(fresh.expires_on - time.time()),
-            )
-            return fresh.token
+            logger.info("gateway: minted GCP token scope=%s", scope)
+            return token
 
     async def aclose(self) -> None:
         # google.auth credentials hold no socket of their own (each refresh
@@ -180,6 +174,6 @@ class GcpTokenProvider:
         self._credentials.clear()
 
     def reset(self) -> None:
-        """Drop cached tokens. For tests."""
-        self._cache.clear()
+        """Drop cached credentials. For tests."""
+        self._credentials.clear()
         self._locks.clear()

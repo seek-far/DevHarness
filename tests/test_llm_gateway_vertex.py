@@ -3,23 +3,22 @@
 Sibling of tests/test_llm_gateway_azure.py. Two things are pinned here that
 have real incident/probe provenance rather than being generic coverage:
 
-  * `_expiry_to_epoch` — google.auth hands back a NAIVE datetime documented as
-    UTC. Reading it with the ambient timezone is wrong in a way that is
-    invisible on a UTC CI box and becomes a 401 storm on a us-* deployment.
-    The test forces a non-UTC timezone so the bug cannot hide.
-
   * `_fold_reasoning` — Vertex reports thinking tokens OUTSIDE
     `completion_tokens`; OpenAI/Azure report them INSIDE. The numbers in
-    test_vertex_dialect_* are verbatim from two live gemini-2.5-flash probe
+    test_vertex_dialect_* are verbatim from live gemini-2.5-flash probe
     responses (2026-08-04), not invented.
+
+  * **The boundary with google.auth.** gcp_auth.py deliberately owns no token
+    lifecycle: the library's `Credentials.valid` already refreshes ahead of
+    expiry and compares naive-UTC to naive-UTC. An earlier version reimplemented
+    that with an epoch conversion and got the timezone wrong. What the library
+    does NOT do is lock, so the remaining tests aim at concurrency — plus two
+    guards that fail if either upstream assumption stops holding.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -27,12 +26,7 @@ import yaml
 
 from llm_gateway.config import GatewayConfigError, load_config
 from llm_gateway.cost import Usage, cost_of, extract_usage
-from llm_gateway.gcp_auth import (
-    DEFAULT_SCOPE,
-    GcpAuthError,
-    GcpTokenProvider,
-    _expiry_to_epoch,
-)
+from llm_gateway.gcp_auth import DEFAULT_SCOPE, GcpAuthError, GcpTokenProvider
 
 
 def _write(tmp_path: Path, cfg: dict) -> Path:
@@ -205,109 +199,124 @@ def test_thinking_tokens_actually_reach_the_bill(tmp_path: Path):
     assert naive < cost / 2
 
 
-# ── gcp_auth: the timezone line ──────────────────────────────────────────────
+# ── gcp_auth: what google.auth owns, and what it does NOT ────────────────────
+#
+# The provider used to cache tokens itself, converting credentials.expiry to
+# epoch seconds. That conversion was the bug: expiry is a NAIVE datetime
+# documented as UTC, and datetime.timestamp() reads naive values in LOCAL time,
+# so the result was off by the UTC offset — over-refreshing on UTC+N, serving
+# EXPIRED tokens on any us-* host. google.auth answers the same question with
+# naive-UTC on both sides, so deleting our arithmetic deleted the bug class.
+#
+# These tests therefore aim at the seam that is still ours: concurrency.
 
 
-def test_naive_expiry_is_read_as_utc():
-    naive = datetime(2030, 1, 1, 12, 0, 0)
-    aware = datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    assert _expiry_to_epoch(naive) == aware.timestamp()
+def test_google_auth_owns_the_expiry_threshold():
+    """Pins the assumption this module is built on.
 
-
-@pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs POSIX tzset")
-def test_naive_expiry_ignores_the_ambient_timezone():
-    """The test that can actually catch the bug.
-
-    `datetime.timestamp()` on a naive value interprets it in the machine's
-    local timezone. On a UTC CI box the wrong implementation passes the test
-    above, so force a non-UTC zone: an implementation that forgets to stamp
-    tzinfo=utc lands 5 hours off here, which on a us-* host means serving
-    tokens that expired hours ago.
+    gcp_auth.py has no skew arithmetic of its own because google.auth already
+    refreshes early and compares naive-UTC to naive-UTC. If either stops being
+    true, the deletion was wrong and this should fail loudly rather than
+    silently reintroducing stale-token risk.
     """
-    old_tz = os.environ.get("TZ")
-    try:
-        os.environ["TZ"] = "America/New_York"
-        time.tzset()
-        naive = datetime(2030, 1, 1, 12, 0, 0)
-        expected = datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp()
-        assert _expiry_to_epoch(naive) == expected
-    finally:
-        if old_tz is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = old_tz
-        time.tzset()
+    from google.auth import _helpers
+
+    assert _helpers.REFRESH_THRESHOLD.total_seconds() >= 60, (
+        "google.auth no longer refreshes ahead of expiry; gcp_auth.py would "
+        "need its own skew again"
+    )
+    assert _helpers.utcnow().tzinfo is None, (
+        "google.auth switched to aware datetimes; re-check Credentials.expired"
+    )
 
 
-def test_aware_expiry_is_left_alone():
-    aware = datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone(timedelta(hours=2)))
-    assert _expiry_to_epoch(aware) == aware.timestamp()
+def test_google_auth_still_has_no_lock():
+    """The reason GcpTokenProvider exists at all.
 
+    Credentials._blocking_refresh is `if not self.valid: self.refresh(...)` with
+    no synchronisation, so N concurrent callers on an expired token would mint N
+    tokens. If upstream ever adds locking, our single-flight becomes redundant.
+    """
+    import inspect
 
-def test_missing_expiry_reads_as_already_expired():
-    """Unknown expiry must cost a refresh, never serve a possibly-stale token."""
-    assert _expiry_to_epoch(None) == 0.0
+    from google.auth import credentials as gac
+
+    src = inspect.getsource(gac)
+    assert "Lock" not in src, (
+        "google.auth added locking — GcpTokenProvider's single-flight may now "
+        "be redundant"
+    )
 
 
 # ── gcp_auth: token provider ─────────────────────────────────────────────────
 
 
 class _FakeCred:
-    """Stands in for a google.auth credential."""
+    """Stands in for a google.auth credential, including its `valid` contract."""
 
-    def __init__(self, token="tok-1", ttl_s=3600):
-        self.token = token
-        self.expiry = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
-            seconds=ttl_s
-        )
+    def __init__(self, valid=False):
+        self.token = "tok-0" if valid else None
+        self._valid = valid
         self.refresh_calls = 0
+
+    @property
+    def valid(self):
+        return self._valid
 
     def refresh(self, _request):
         self.refresh_calls += 1
-        self.token = f"{self.token.split('-')[0]}-{self.refresh_calls}"
+        self.token = f"tok-{self.refresh_calls}"
+        self._valid = True
+
+    def expire(self):
+        self._valid = False
 
 
 def _provider_with(cred, monkeypatch):
     p = GcpTokenProvider()
+    # Seed the credential the way _credential() would, without touching ADC.
+    p._credentials[DEFAULT_SCOPE] = cred
     monkeypatch.setattr(p, "_credential", lambda scope: cred)
-    # _mint imports google.auth.transport.requests; stub the whole mint so the
-    # test never needs the real package.
-    def _mint(scope):
-        cred.refresh(None)
-        from llm_gateway.gcp_auth import _CachedToken
-
-        return _CachedToken(token=cred.token, expires_on=_expiry_to_epoch(cred.expiry))
-
-    monkeypatch.setattr(p, "_mint", _mint)
     return p
 
 
-def test_token_is_cached_across_calls(monkeypatch):
-    cred = _FakeCred()
+def test_live_credential_short_circuits_without_refreshing(monkeypatch):
+    """The fast path: google.auth says the token is still good, so we neither
+    lock nor hop to a thread."""
+    cred = _FakeCred(valid=True)
     p = _provider_with(cred, monkeypatch)
 
-    first = asyncio.run(p.get_token())
-    second = asyncio.run(p.get_token())
+    assert asyncio.run(p.get_token()) == "tok-0"
+    assert cred.refresh_calls == 0
 
-    assert first == second
+
+def test_expired_credential_is_refreshed(monkeypatch):
+    cred = _FakeCred(valid=False)
+    p = _provider_with(cred, monkeypatch)
+
+    assert asyncio.run(p.get_token()) == "tok-1"
     assert cred.refresh_calls == 1
 
 
-def test_expiring_token_is_refreshed(monkeypatch):
-    # Inside the 300s refresh skew → must not be handed out again.
-    cred = _FakeCred(ttl_s=60)
+def test_token_is_reused_until_the_library_says_otherwise(monkeypatch):
+    cred = _FakeCred(valid=False)
     p = _provider_with(cred, monkeypatch)
 
-    asyncio.run(p.get_token())
-    asyncio.run(p.get_token())
+    first = asyncio.run(p.get_token())
+    second = asyncio.run(p.get_token())      # now valid → no second refresh
+    assert first == second == "tok-1"
+    assert cred.refresh_calls == 1
 
+    cred.expire()
+    assert asyncio.run(p.get_token()) == "tok-2"
     assert cred.refresh_calls == 2
 
 
 def test_concurrent_cold_start_mints_once(monkeypatch):
-    """Without the re-check under the lock, a burst mints one token per
-    in-flight request."""
-    cred = _FakeCred()
+    """google.auth has no lock, so this single-flight is ours to provide:
+    without the re-check under the lock, a burst mints one token per in-flight
+    request."""
+    cred = _FakeCred(valid=False)
     p = _provider_with(cred, monkeypatch)
 
     async def _burst():
@@ -333,13 +342,15 @@ def test_missing_google_auth_package_is_a_named_error(monkeypatch):
 
 def test_refresh_failure_points_at_adc(monkeypatch):
     """The single most likely operator mistake is `gcloud auth login` instead
-    of `gcloud auth application-default login`. The error must say so."""
+    of `gcloud auth application-default login`. google.auth's own
+    DefaultCredentialsError does not draw that distinction, so we must."""
     p = GcpTokenProvider()
-
-    def _mint(scope):
-        raise RuntimeError("could not automatically determine credentials")
-
-    monkeypatch.setattr(p, "_mint", _mint)
+    monkeypatch.setattr(
+        p, "_mint",
+        lambda scope: (_ for _ in ()).throw(
+            RuntimeError("could not automatically determine credentials")
+        ),
+    )
 
     with pytest.raises(GcpAuthError, match="application-default"):
         asyncio.run(p.get_token())
@@ -349,11 +360,7 @@ def test_empty_token_is_rejected(monkeypatch):
     """An empty bearer would go out as `Authorization: Bearer ` and come back
     401 from Vertex with nothing pointing at the real cause."""
     p = GcpTokenProvider()
-    from llm_gateway.gcp_auth import _CachedToken
-
-    monkeypatch.setattr(
-        p, "_mint", lambda scope: _CachedToken(token="", expires_on=time.time() + 3600)
-    )
+    monkeypatch.setattr(p, "_mint", lambda scope: "")
     with pytest.raises(GcpAuthError, match="empty token"):
         asyncio.run(p.get_token())
 
