@@ -1,6 +1,6 @@
 # DevHarness
 
-**DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file. For larger workloads, it can distribute bug-fix jobs across multiple worker nodes while keeping one central GitLab/webhook control plane.
+**DevHarness** is an automated bug-fixing agent powered by an LLM ReAct loop. It diagnoses test/CI failures, generates patches, validates them locally, and delivers the fix — either as a GitLab merge request or a local patch file. For larger workloads, it can distribute bug-fix jobs across multiple worker nodes while keeping one central GitLab/webhook control plane. Long agent runs are crash-resilient: a worker killed mid-run resumes inside the ReAct loop at the last completed step rather than restarting the run, and the steps it had already executed are not executed twice.
 
 A built-in evaluation harness benchmarks bug-fix agents against a curated fixture set, and the engine itself is pluggable via an `Agent` interface — so alternative agents (Aider, SWE-agent, custom) can be swapped in and compared head-to-head.
 
@@ -17,7 +17,9 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
 - **Deployment & distributed processing**
   - Local: standalone CLI; multi-process or docker-compose against a local
     GitLab; docker-compose against gitlab.com.
-  - Public-host / AWS ECS / Kubernetes (kind + Helm), all against gitlab.com.
+  - Public-host / AWS ECS / single-node Kubernetes (**kind + Helm**), all
+    against gitlab.com — plus **multi-node k3s** across separate physical
+    machines (`infra/k3s/`), same images and same `WORKER_SPAWNER=k8s`.
   - Distributed pull-worker mode (`WORKER_SPAWNER=distr-pull`) for processing
     many bug-fix jobs over multiple worker nodes through Redis Streams, with
     per-node slot and memory admission and no change to the GitLab provider
@@ -93,10 +95,24 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
 - **Reliability** — narrow transient-I/O retry shared across 5 nodes; LLM
   transient retry plus a tool-call recovery fallback (vLLM + Qwen wrapper
   mismatch); per-run budget caps (calls / tokens / wallclock); LangGraph
-  checkpoint resume at node boundaries; idempotency contract (deterministic
+  checkpoint resume at node boundaries (intra-loop resume is the separate
+  mechanism below); idempotency contract (deterministic
   fix-branch name, three-state push, MR lookup-then-create); already-merged
   short-circuit that skips the whole pipeline when the deterministic branch
   already has a merged MR.
+
+- **Crash recovery for long runs** — the ReAct loop checkpoints every step: a
+  worker killed mid-run resumes from the last completed step instead of
+  re-running the trajectory, with tool execution **exactly-once** across the
+  restart, and a run killed *after* its loop finished replays its result for
+  **zero** LLM calls. Restart has exactly one owner — the orchestrator's health
+  monitor, triggering on heartbeat expiry *or* abnormal process exit and capped
+  at 3 — which catches the hung-but-alive worker that Kubernetes alone still
+  reports as `Running`. On a multi-node cluster it supervises workers on every
+  node and steers the restart back to the one the worker died on, where its
+  checkpoint lives; if that node is gone the worker schedules elsewhere and
+  cold-starts. Chaos-verified: ~1/3 of 12–15 concurrently in-flight workers
+  `kill -9`'d at random steps.
 
 - **Security** — `patch_guard` (write scope + denylist + size caps);
   `prompt_guard` (untrusted-input wrapping + injection logging); `fetch_guard`
@@ -1441,13 +1457,13 @@ For the two-host SWE-bench validation procedure and failure-recovery checks,
 see [`docs/distr-pull-test-runbook.md`](docs/distr-pull-test-runbook.md).
 Design details are in [`docs/distr-pull-design.md`](docs/distr-pull-design.md).
 
-### Mode 8: Kubernetes / k3s — multi-node, cross-continent (`ENV=local_multi_process` + `WORKER_SPAWNER=k8s`)
+### Mode 8: Kubernetes / k3s — multi-node (`ENV=local_multi_process` + `WORKER_SPAWNER=k8s`)
 
 The multi-node sibling of Mode 6, and the only deployment that spans
-physical machines: a **k3s** cluster with the server on one host and an
-agent on another **continent**, joined over Tailscale. kind cannot do this
-— its "multi-node" is several containers on one machine — so this is where
-claims about distribution actually get tested.
+separate physical machines: a **k3s** cluster with the server on one host
+and an agent on another. kind cannot do this — its "multi-node" is several
+containers on one machine — so this is where claims about distribution
+actually get tested.
 
 Same Helm chart as Mode 6, different overlay
 (`infra/helm/sdlcma/values-k3s-ls4900.yaml`) and a separate harness. Per
@@ -1478,12 +1494,13 @@ Practical differences from Mode 6:
   and stay there permanently.
 - **The remote node is `NoSchedule`-tainted by default**, and
   `setup.sh --ver99` removes it now that worker Jobs carry `resources` and
-  eviction tolerations. The taint was never a policy against cross-continent
+  eviction tolerations. The taint was never a policy against remote-node
   execution — it stopped placement being a coin flip before the Jobs declared
   what they need.
-- **MTU is the trap that `Ready` does not catch:** without
-  `--flannel-iface tailscale0`, cross-node pod traffic black-holes on large
-  packets while pings and small responses pass.
+- **MTU is the trap that `Ready` does not catch:** without pointing
+  `--flannel-iface` at the interface that actually joins the nodes, cross-node
+  pod traffic black-holes on large packets while pings and small responses
+  pass.
 
 #### Running SWE-bench (`workflow_ver=99`) on this cluster
 
@@ -1502,7 +1519,7 @@ as a booking on their behalf rather than as the worker process's own usage,
 and why mounting that socket is equivalent to giving the pod root on the node.
 Full contract in [`docs/k3s.md`](docs/k3s.md) §14.
 
-Full design + the cross-continent gotchas in
+Full design + the multi-node gotchas in
 [`docs/k3s.md`](docs/k3s.md); operator runbook in `infra/k3s/README.md`.
 
 ### GitLab Webhook Setup
@@ -1518,7 +1535,7 @@ In your GitLab project → Settings → Webhooks:
 | AWS ECS | `https://<assigned>.trycloudflare.com/webhook` (cloudflared sidecar inside the ECS services task; URL changes every service task replacement) |
 | Kubernetes / kind | `https://<assigned>.trycloudflare.com/webhook` (cloudflared Deployment; new URL on each pod restart — use a named tunnel for stability) |
 | Kubernetes / kind (ingress) | `http://<host-or-tailnet-ip-or-hostname>:18080/webhook` (when GitLab can route to the agent host directly — ingress-nginx + kind `:18080→:80` port mapping; CN networks use the `m.daocloud.io` proxy that `infra/k8s/setup.sh` rewrites in) |
-| Kubernetes / k3s (multi-node) | `http://<node-tailnet-ip>:30800/webhook` (gateway Service as NodePort; k3s has no kind `extraPortMappings` and traefik/servicelb are disabled because `:80` is a co-tenant GitLab's) |
+| Kubernetes / k3s (multi-node) | `http://<node-ip>:30800/webhook` (gateway Service as NodePort; k3s has no kind `extraPortMappings` and traefik/servicelb are disabled because `:80` is a co-tenant GitLab's) |
 | Distributed Pull Workers | Same URL as the central gateway host; `distr-pull` only changes how workers are dispatched after the webhook enters Redis |
 
 Trigger: **Pipeline events**
