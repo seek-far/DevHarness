@@ -1,15 +1,16 @@
 # uvicorn gateway.gateway:app --host 0.0.0.0 --port 8000
+import asyncio
 import json
 import logging
 import sys
 import time
 
 import redis
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from gateway import metrics
+from gateway import metrics, webhook_auth
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -73,8 +74,66 @@ async def healthz():
     return {"status": "ok"}
 
 
+async def _enforce_webhook_auth(cfg, authorization: str | None, payload: dict) -> None:
+    """Gate the webhook when `webhook_auth_mode` is on. No-op otherwise.
+
+    `getattr` rather than attribute access: this must not break test doubles
+    or an older env file that predates the setting — an absent field means
+    the pre-auth behaviour, which is exactly what `none` means.
+
+    Runs in a worker thread because a cold JWKS fetch is a blocking HTTPS
+    call; the warm path (a cached key set) is pure CPU and returns at once.
+    """
+    mode = (getattr(cfg, "webhook_auth_mode", "none") or "none").strip().lower()
+    if mode == "none":
+        return
+    if mode != "oidc":
+        # Fail closed on a typo'd mode. Treating an unrecognised value as
+        # "off" would turn a one-character mistake into a silently
+        # unauthenticated gateway.
+        metrics.WEBHOOK_AUTH_REJECTED.labels(reason="misconfigured").inc()
+        logger.error(
+            "phase_marker phase=webhook_auth result=reject reason=misconfigured "
+            "detail=unknown_webhook_auth_mode mode=%s", mode,
+        )
+        raise HTTPException(500, f"unknown webhook_auth_mode {mode!r}")
+
+    try:
+        claims = await asyncio.to_thread(
+            webhook_auth.authenticate_and_authorize, authorization, payload, cfg
+        )
+    except (
+        webhook_auth.WebhookAuthError,
+        webhook_auth.WebhookAuthzError,
+        webhook_auth.WebhookAuthConfigError,
+    ) as exc:
+        status = {
+            webhook_auth.WebhookAuthError: 401,
+            webhook_auth.WebhookAuthzError: 403,
+            webhook_auth.WebhookAuthConfigError: 500,
+        }[type(exc)]
+        metrics.WEBHOOK_AUTH_REJECTED.labels(reason=exc.reason).inc()
+        # The audit line for a refused trigger. Deliberately a single
+        # phase_marker so the same post-processor that rebuilds per-bug
+        # timelines also sees what never became a bug.
+        logger.warning(
+            "phase_marker phase=webhook_auth result=reject reason=%s status=%d detail=%s",
+            exc.reason, status, exc,
+        )
+        headers = {"WWW-Authenticate": "Bearer"} if status == 401 else None
+        raise HTTPException(status, str(exc), headers=headers) from exc
+
+    # Accepted: record WHO triggered this run. bug_id does not exist yet
+    # (the orchestrator mints it on spawn), so `project_id` + `sub` are the
+    # join keys back to the RunRecord this webhook eventually produces.
+    logger.info(
+        "phase_marker phase=webhook_auth result=accept project_id=%s sub=%s",
+        claims.get("project_id", ""), claims.get("sub", ""),
+    )
+
+
 @app.post("/webhook")
-async def webhook(payload: dict):
+async def webhook(payload: dict, authorization: str | None = Header(default=None)):
     _t0 = time.perf_counter()
     cfg, redis_client = _get_state()
     logger.debug(f"{payload=}")
@@ -101,6 +160,12 @@ async def webhook(payload: dict):
     metrics.WEBHOOKS_RECEIVED.labels(
         object_kind=object_kind, classification=classification
     ).inc()
+
+    # Authn (Step 1) + authz (Step 2) run AFTER the received counter so the
+    # denominator stays "every POST that reached us", and BEFORE the XADD so a
+    # refused request never reaches the orchestrator — the whole point is that
+    # no worker is spawned and no LLM budget is spent on it.
+    await _enforce_webhook_auth(cfg, authorization, payload)
 
     if cfg.use_redis and redis_client is not None:
         # `maxlen=N, approximate=True` enforces a soft cap on every write

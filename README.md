@@ -114,6 +114,22 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   cold-starts. Chaos-verified: ~1/3 of 12–15 concurrently in-flight workers
   `kill -9`'d at random steps.
 
+- **Authentication & authorization (OAuth 2.0 / OIDC)** — the webhook entry
+  point can require a **GitLab-signed OpenID Connect ID token** instead of
+  accepting anonymous POSTs (`WEBHOOK_AUTH_MODE=oidc`; additive, default off,
+  so existing deployments are untouched until you flip it). The failing CI job
+  obtains the token through `id_tokens:` and presents it as an **OAuth 2.0
+  Bearer credential** (RFC 6750). The gateway verifies the RS256 signature
+  against the issuer's JWKS and checks `iss` / `aud` / expiry (`401`), then
+  requires the token's `project_id` **claim** to equal the payload's
+  `project.id` (`403`) — so a perfectly valid token minted for one project
+  cannot trigger a run against another, which a shared webhook secret can
+  never guarantee. Rejections land on `sdlcma_webhook_auth_rejected_total`
+  with a closed `reason` label, and both decisions are logged for audit.
+  Verified end-to-end against a self-hosted GitLab, in both directions of the
+  loop. Full contract: [`docs/auth.md`](docs/auth.md); operator runbook and
+  the three wiring scripts: `infra/oidc-webhook/`.
+
 - **Security** — `patch_guard` (write scope + denylist + size caps);
   `prompt_guard` (untrusted-input wrapping + injection logging); `fetch_guard`
   (symmetric read-path denylist); `sanitize_untrusted` on every retry-feedback
@@ -735,6 +751,44 @@ Three recoverable failure modes that used to abort the run now keep it alive —
 In either mode the LLM works from the raw trace and uses `fetch_additional_file` to find the right file, and every fix entry must set `file_path` explicitly — `apply_change_and_test` rejects entries that omit it via the existing `apply_error` channel. Known limitation: there is no directory-listing tool, so the fallback is only effective when the trace itself mentions a usable path.
 
 ### Security & Guardrails
+
+#### Webhook authentication (OIDC, opt-in)
+
+In GitLab mode the gateway's `POST /webhook` is the one externally reachable entry point, and by default it accepts any POST. That is fine behind a private network, but on a public deployment it is remote task execution: a crafted body spawns a worker, which clones the `project_web_url` **the body names** using your GitLab token and spends your LLM budget doing it.
+
+Set `WEBHOOK_AUTH_MODE=oidc` on the gateway to require a GitLab-signed CI id_token instead:
+
+```bash
+# gateway/gateway_<env>.env
+WEBHOOK_AUTH_MODE=oidc                        # default: none (unauthenticated)
+OIDC_ISSUER=https://gitlab.com
+OIDC_AUDIENCE=https://sdlcma.example.com      # must match the .gitlab-ci.yml snippet
+```
+
+Two checks run, and both matter:
+
+1. **Authentication** — RS256 signature against the issuer's JWKS, plus `iss`, `aud` and expiry. Rejected with `401`.
+2. **Authorization** — the token's `project_id` claim must equal the payload's `project.id`. Rejected with `403`.
+
+The second is why this uses OIDC rather than GitLab's `X-Gitlab-Token` shared secret. A secret proves only that the caller knows the secret; the project id in the body is still whatever they typed. A signed claim means a valid token from project A cannot trigger a run against project B.
+
+Turning it on **replaces GitLab's webhook delivery** with CI jobs that POST to the gateway — GitLab's webhook subsystem has no workload identity and cannot mint an OIDC token, so the trigger has to move to where one can be obtained. ⚠️ That means **two** notifier jobs, not one: `wait_ci_result` blocks until it hears the fix branch went green, so shipping only the failure half makes every successful fix time out into `handle_failure` instead of opening an MR.
+
+Three scripts do the wiring, all idempotent:
+
+| Script | Does |
+|---|---|
+| `infra/oidc-webhook/setup.sh` | Gateway settings + the monitored project's CI/CD variables |
+| `infra/oidc-webhook/install_snippet.sh` | Adds the two notifier jobs to the project's `.gitlab-ci.yml` — **dry-run by default**, `APPLY=1` to commit |
+| `infra/oidc-webhook/teardown.sh` | Back to `WEBHOOK_AUTH_MODE=none` |
+
+`setup.sh` discovers the issuer from GitLab's own `/.well-known/openid-configuration` rather than trusting you to type it: `OIDC_ISSUER` must equal the token's `iss` **byte for byte**, and `iss` is the instance's `external_url` — frequently *not* the URL you reach it on. Copying the wrong one produces a 401 reading "token issuer does not match", which looks like a bad token rather than a bad setting. It also refuses to invent an `OIDC_AUDIENCE`: GitLab mints a token for whatever audience a job requests, so a guessable one is forgeable by construction.
+
+`infra/oidc-webhook/README.md` has a **no-downtime rollout order** — deploy the snippet while the gateway is still `none`, confirm the POSTs land, then flip the switch and use `sdlcma_webhook_auth_rejected_total{reason="missing_token"}` as your list of not-yet-migrated projects.
+
+Verified end-to-end (2026-08-08) against a self-hosted GitLab: a failing pipeline on fixture project `root/sdlcma-fix-f01-off-by-one` produced `result=accept project_id=1`, the worker fixed the bug in 2 LLM calls (`outcome=fixed`, `iterations=0`), and the fix branch's own green pipeline came back **through the same OIDC path** (`sub=...ref:auto/bf/...`) in 17.8 s, opening MR !68. Both directions of the loop are authenticated and authorized, not just the entry.
+
+#### Patch-scope containment
 
 DevHarness runs an autonomous LLM with write authority over your working tree, so a hallucinated path or prompt-injected trace could in principle target a sensitive file. To bound that blast radius, every patch is validated by `bf_worker/services/patch_guard.py` *before* anything is written to disk.
 

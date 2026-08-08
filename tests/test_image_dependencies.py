@@ -67,6 +67,14 @@ CROSS_CUTTING = {
     # failure shape the file exists to prevent. Revisit if a second
     # google-cloud-* package ever lands; today bigquery is the only one.
     "google.cloud": "google-cloud-bigquery",
+    # OIDC verification of GitLab CI id_tokens on POST /webhook
+    # (gateway/webhook_auth.py). Lazily imported like the two above, for the
+    # same reason: webhook_auth_mode=none must keep working without it. Listed
+    # here even though the gateway is currently its only importer, because the
+    # failure mode is identical — a `webhook_auth_mode=oidc` deployment whose
+    # image lacks PyJWT rejects every webhook at the first request, which
+    # looks like GitLab misconfiguration rather than a missing package.
+    "jwt": "PyJWT",
 }
 
 

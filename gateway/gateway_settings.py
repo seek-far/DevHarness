@@ -43,6 +43,52 @@ class GatewaySettings(BaseSettings):
     # deployments; never set to 0 (= unlimited).
     gateway_stream_maxlen: int = 10000
 
+    # --- webhook authentication / authorization (additive; default off) ---
+    #
+    # ONE switch drives both Step 1 (authn) and Step 2 (authz):
+    #
+    #   none — the pre-auth behaviour, byte-identical. `/webhook` accepts any
+    #          POST. This is what every existing harness runs, so it stays the
+    #          default; turning auth on is an operator decision.
+    #   oidc — the caller must present a GitLab-signed CI id_token whose
+    #          `project_id` claim equals the payload's `project.id`.
+    #
+    # There is deliberately NO separate "authenticate but don't authorize"
+    # mode. Verifying the signature and then trusting the payload's project id
+    # would leave the actual hole open (a valid token from project A could
+    # still trigger a run against project B), while looking secured.
+    #
+    # Contract + the .gitlab-ci.yml side: docs/auth.md, infra/oidc-webhook/.
+    webhook_auth_mode: str = "none"
+
+    # GitLab instance root, e.g. https://gitlab.com — must match the token's
+    # `iss` exactly. Empty while mode=oidc is a fatal misconfiguration, never
+    # a fallback to open.
+    oidc_issuer: str = ""
+
+    # Must match the `aud` in .gitlab-ci.yml's `id_tokens:`. GitLab mints a
+    # token for whatever audience a job asks for, so an unchecked audience
+    # means any project on the instance can forge a trigger. No default —
+    # a guessable one (e.g. "sdlcma") would defeat the purpose.
+    oidc_audience: str = ""
+
+    # Optional override; derived as {issuer}/oauth/discovery/keys when empty.
+    oidc_jwks_url: str = ""
+
+    # How long a fetched JWKS stays usable. GitLab rotates rarely; an unknown
+    # kid triggers a refetch regardless, so this is a staleness bound, not a
+    # rotation lag.
+    oidc_jwks_cache_seconds: int = 300
+
+    # Floor between forced JWKS refetches. Guards the amplification path: an
+    # unauthenticated caller sending random `kid`s would otherwise cost one
+    # HTTPS round-trip to GitLab per request.
+    oidc_jwks_min_refresh_seconds: int = 60
+
+    # Clock-skew tolerance for exp/nbf/iat. GitLab CI id_tokens are short
+    # lived (~5 min), so this stays small.
+    oidc_leeway_seconds: int = 30
+
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / f"gateway_{_probe.env}.env",
         env_file_encoding="utf-8",

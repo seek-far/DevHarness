@@ -4,3 +4,9 @@ pydantic
 pydantic-settings
 redis[hiredis]>=5.0
 prometheus-client>=0.20  # /metrics endpoint (gateway/metrics.py)
+# OIDC webhook auth (gateway/webhook_auth.py). The [crypto] extra pulls in
+# `cryptography`, which PyJWT needs for RS256 — without it every token is
+# rejected with "Algorithm not supported", at request time rather than at
+# import time. Imported lazily so webhook_auth_mode=none never needs it, but
+# the image that bundles the module must still install it.
+PyJWT[crypto]>=2.8

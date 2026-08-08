@@ -14,6 +14,16 @@ project count:
       Counts successful XADDs to gateway:stream. Delta vs `received` =
       Redis-layer failures, a hard alerting signal.
 
+  sdlcma_webhook_auth_rejected_total{reason}
+      Counts /webhook POSTs refused by the OIDC gate (webhook_auth_mode=oidc).
+      Always 0 in the default `none` mode. `reason` is a CLOSED enum defined
+      in gateway/webhook_auth.py (missing_token, expired_token,
+      invalid_audience, project_mismatch, …) — never free text, and never
+      anything derived from the request, so cardinality stays bounded.
+      Note this metric is the third term in the received/forwarded identity:
+      `received - forwarded = redis_failures + auth_rejections`. Without it a
+      spike in rejections would masquerade as a Redis outage on the dashboard.
+
   sdlcma_gateway_handle_ms (histogram)
       Wallclock from request receive to XADD completion. Phase-1
       latency view, distinct from the per-bug `phase=gateway_received`
@@ -38,6 +48,12 @@ WEBHOOKS_RECEIVED = Counter(
 WEBHOOKS_FORWARDED = Counter(
     "sdlcma_webhooks_forwarded_total",
     "Total webhooks successfully XADDed to gateway:stream",
+)
+
+WEBHOOK_AUTH_REJECTED = Counter(
+    "sdlcma_webhook_auth_rejected_total",
+    "Total /webhook POSTs rejected by the OIDC gate, by reason",
+    ["reason"],
 )
 
 WEBHOOK_HANDLE_MS = Histogram(

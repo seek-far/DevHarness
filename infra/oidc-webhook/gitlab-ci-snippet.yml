@@ -1,0 +1,106 @@
+# SDLCMA OIDC webhook trigger — drop-in snippet for a monitored project's
+# .gitlab-ci.yml. Requires the gateway to run with `WEBHOOK_AUTH_MODE=oidc`.
+#
+# Replaces GitLab's own webhook delivery. The difference that matters is not
+# the transport but WHERE the project id comes from: GitLab's webhook puts it
+# in the body (caller-controlled), while `id_tokens` puts it in a signed
+# `project_id` claim (issuer-asserted). The gateway authorizes on the claim
+# and refuses any payload whose `project.id` disagrees with it, so a token
+# minted here can only ever trigger runs against THIS project.
+#
+# Setup (per monitored project):
+#   1. CI/CD variables:
+#        SDLCMA_GATEWAY_URL   e.g. https://sdlcma.example.com   (not masked)
+#        SDLCMA_AUDIENCE      must equal the gateway's OIDC_AUDIENCE
+#        SDLCMA_CI_READ_TOKEN a read_api token — see the note below (masked)
+#   2. `include:` this file, or paste both jobs in.
+#
+# ⚠️ SDLCMA_CI_READ_TOKEN exists only to look up which job failed. The worker
+# fetches the failing job's trace by id, and a job cannot read its sibling's
+# id from predefined variables — `CI_JOB_ID` here is this notifier's own id,
+# which would hand the worker a trace of a curl command instead of the real
+# failure. If you leave the token unset the snippet still fires, but with a
+# useless job id; that is a deliberate loud-ish degradation rather than a
+# silent one (the notifier logs it). This is the one long-lived credential
+# the OIDC path does not remove — scope it to `read_api` on this project.
+
+.sdlcma_notify_base:
+  stage: .post
+  image: alpine:3
+  # Never let a notification failure fail the pipeline it is reporting on.
+  allow_failure: true
+  before_script:
+    - apk add --no-cache curl jq >/dev/null
+  variables:
+    GIT_STRATEGY: none
+
+# --- failure → this is what spawns a bug-fix worker ------------------------
+sdlcma_notify_failed:
+  extends: .sdlcma_notify_base
+  when: on_failure
+  id_tokens:
+    SDLCMA_TOKEN:
+      aud: "$SDLCMA_AUDIENCE"
+  script:
+    - |
+      FAILED_JOB_ID="$CI_JOB_ID"
+      if [ -n "$SDLCMA_CI_READ_TOKEN" ]; then
+        FAILED_JOB_ID=$(curl -sS --fail \
+          --header "PRIVATE-TOKEN: $SDLCMA_CI_READ_TOKEN" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/pipelines/$CI_PIPELINE_ID/jobs?scope[]=failed" \
+          | jq -r '.[0].id // empty') || FAILED_JOB_ID=""
+        if [ -z "$FAILED_JOB_ID" ]; then
+          echo "WARNING: could not resolve the failed job id; falling back to this job's id." >&2
+          echo "         The worker will fetch the wrong trace. Check SDLCMA_CI_READ_TOKEN." >&2
+          FAILED_JOB_ID="$CI_JOB_ID"
+        fi
+      else
+        echo "WARNING: SDLCMA_CI_READ_TOKEN unset — sending this notifier's job id." >&2
+      fi
+    - |
+      # Shaped exactly like a GitLab `pipeline` webhook so the orchestrator's
+      # parser needs no branch for this path. jq builds it so refs containing
+      # quotes cannot break out of the JSON.
+      jq -n \
+        --arg ref "$CI_COMMIT_REF_NAME" \
+        --arg weburl "$CI_PROJECT_URL" \
+        --argjson pid "$CI_PROJECT_ID" \
+        --argjson jobid "$FAILED_JOB_ID" \
+        --argjson pipeid "$CI_PIPELINE_ID" \
+        '{object_kind:"pipeline",
+          object_attributes:{id:$pipeid, ref:$ref, status:"failed"},
+          project:{id:$pid, web_url:$weburl},
+          builds:[{id:$jobid}]}' > payload.json
+    - |
+      curl -sS --fail-with-body -X POST "$SDLCMA_GATEWAY_URL/webhook" \
+        -H "Authorization: Bearer $SDLCMA_TOKEN" \
+        -H "Content-Type: application/json" \
+        --data-binary @payload.json
+
+# --- success → closes the loop for a fix branch under CI validation --------
+# The worker's wait_ci_result node blocks until it hears the verdict on its
+# own `auto/bf/...` branch. Without this job it only ever hears about
+# failures and every successful fix times out instead of opening an MR.
+sdlcma_notify_success:
+  extends: .sdlcma_notify_base
+  when: on_success
+  id_tokens:
+    SDLCMA_TOKEN:
+      aud: "$SDLCMA_AUDIENCE"
+  script:
+    - |
+      jq -n \
+        --arg ref "$CI_COMMIT_REF_NAME" \
+        --arg weburl "$CI_PROJECT_URL" \
+        --argjson pid "$CI_PROJECT_ID" \
+        --argjson jobid "$CI_JOB_ID" \
+        --argjson pipeid "$CI_PIPELINE_ID" \
+        '{object_kind:"pipeline",
+          object_attributes:{id:$pipeid, ref:$ref, status:"success"},
+          project:{id:$pid, web_url:$weburl},
+          builds:[{id:$jobid}]}' > payload.json
+    - |
+      curl -sS --fail-with-body -X POST "$SDLCMA_GATEWAY_URL/webhook" \
+        -H "Authorization: Bearer $SDLCMA_TOKEN" \
+        -H "Content-Type: application/json" \
+        --data-binary @payload.json
