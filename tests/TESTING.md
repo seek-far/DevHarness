@@ -28,8 +28,9 @@ source .venv-linux/bin/activate && uv run pytest tests/ -q
 ```
 
 Pure-Python, no Redis/GitLab/network. Pass = all green. Current baseline:
-**1037 passed / 17 skipped** (~145s). This is the regression floor — run it for
-any non-trivial change before reporting done.
+**1455 passed / 19 skipped / 1 known failure** (~145s, measured 2026-08-08).
+This is the regression floor — run it for any non-trivial change before
+reporting done.
 
 > Known pre-existing failure:
 > `test_mini_swe_agent.py::test_mode4_background_knowledge_appends_after_problem_statement`
@@ -44,6 +45,14 @@ Notable pinned contracts (don't break silently):
 - `tests/test_parse_branch.py` — orchestrator parser recognises both the
   legacy `auto/bug_..-patch_..` and the real
   `auto/bf/{bug_id}-{base_commit[:8]}` fix-branch names.
+- `tests/test_gitlab_token_check.py` — the outbound credential preflight:
+  four aborts (empty token / 401 / project unreachable / role < Developer),
+  and everything undecidable degrades to a warning. Two of its cases are
+  load-bearing beyond the module: `gitlab_private_token` must stay a
+  **declared** settings field (undeclared `extra` fields invert
+  env-var-vs-env-file priority, which silently voids every Secret injection),
+  and a preflight abort must still write `worker:completed:{bug_id}` or a
+  misconfigured credential burns `MAX_WORKER_RESTARTS` identical restarts.
 
 ### 1b. Docker-backed resume tests (opt-in, default skipped)
 

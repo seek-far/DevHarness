@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 from agents.base import BugInput
 from agent_config import load_agent_spec, make_agent, maybe_reexec_for_agent_ref
 from providers.gitlab_provider import GitLabProvider
+from services.gitlab_token_check import check_or_abort as _check_gitlab_token
 from services.llm_model_check import check_or_abort as _check_llm_model
 from services.step_checkpoint import purge_run_records
 
@@ -189,6 +190,15 @@ class BugFixWorker:
         )
 
         agent_spec = load_agent_spec(os.getenv("BF_AGENT_CONFIG"))
+        # Credential preflight BEFORE the LLM probe: if the GitLab token is
+        # dead, cannot reach the project the payload named, or holds less
+        # than Developer, there is no point warming up a backend. SystemExit
+        # here takes the same path as the LLM check's — run()'s finally still
+        # sets worker:completed:{bug_id}, so HealthMonitor does not restart a
+        # misconfigured worker into a loop.
+        _check_gitlab_token(
+            cfg, project_id=os.environ["project_id"], bug_id=self.bug_id
+        )
         served = _check_llm_model(cfg)  # SystemExit on self-hosted mismatch
         # Phase-2 sub-marker. Diff vs worker_ready = BugInput construction
         # + load_agent_spec + the HTTP `GET /v1/models` probe against the

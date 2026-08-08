@@ -130,6 +130,21 @@ A built-in evaluation harness benchmarks bug-fix agents against a curated fixtur
   loop. Full contract: [`docs/auth.md`](docs/auth.md); operator runbook and
   the three wiring scripts: `infra/oidc-webhook/`.
 
+- **Least-privilege GitLab identity** — the worker acts as a **bot** with role
+  **Developer**, not as a person. `GITLAB_PRIVATE_TOKEN` accepts a project,
+  group or personal access token interchangeably (identical on the wire), so
+  switching is a configuration change, not a code change. Granting the agent
+  access to a project is an **operations action** — a project owner adds the
+  bot as a member — which keeps the decision with the person who owns the code
+  being changed. Scopes are `api` + `write_repository`; the worker never merges
+  its own merge requests, so Maintainer is deliberately not required. A startup
+  preflight refuses to run on the four conditions an operator can fix — no
+  token, a rejected token, a project the credential cannot reach, or a role
+  below Developer — before any clone or LLM spend, and warns two weeks ahead of
+  token expiry. Credentials can be injected from a Kubernetes Secret or ECS
+  `secrets:` and override the image-baked config. Grant, storage and rotation
+  runbook: [`infra/gitlab-token/README.md`](infra/gitlab-token/README.md).
+
 - **Security** — `patch_guard` (write scope + denylist + size caps);
   `prompt_guard` (untrusted-input wrapping + injection logging); `fetch_guard`
   (symmetric read-path denylist); `sanitize_untrusted` on every retry-feedback

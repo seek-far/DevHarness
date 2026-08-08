@@ -36,6 +36,23 @@ class WorkerSettings(BaseAppSettings):
     """
     gitlab_ssh_port: str = "2222"
     gitlab_username: str
+    # The GitLab credential — used BOTH as the `PRIVATE-TOKEN:` REST header
+    # and as the git credential (`https://oauth2:<token>@…`). Accepts a
+    # personal / project / group access token interchangeably: all three are
+    # the same thing at the HTTP layer, so no code branches on the kind.
+    # See docs/auth.md "GitLab credential identity" for which to use where.
+    #
+    # DECLARED HERE EXPLICITLY for the same reason as llm_api_base_url below,
+    # and it matters more for a credential: pydantic-settings v2 REVERSES
+    # env-var-vs-env-file priority for undeclared `extra` fields — the env
+    # file wins. settings/*.env is baked into every image by `COPY settings/`,
+    # so while this field was undeclared, a k8s Secret / ECS `secrets:`
+    # injection of GITLAB_PRIVATE_TOKEN was SILENTLY overridden by the
+    # image-baked value. Declaring it restores "env var beats env file",
+    # which is the precondition for keeping the credential out of images.
+    # Unset env var still falls back to the env file, so local development
+    # is unaffected (verified against pydantic-settings 2.13.1).
+    gitlab_private_token: str = ""
     # Base directory for cloning repos; each worker appends its bug_id.
     # Resolves to /tmp/dh_repo (Linux) or %TEMP%\dh_repo (Windows).
     repo_base_path: str = str(Path(tempfile.gettempdir()) / "dh_repo")
