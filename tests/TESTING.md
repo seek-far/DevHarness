@@ -717,6 +717,51 @@ Grafana as if it covered both nodes; the fix is W5/W6.
 
 ---
 
+## 7. Heavyweight per-change e2e (`tests/e2e/`) — opt-in, NOT in the regression floor
+
+Scripts that pin **one specific change** end-to-end against real infrastructure
+(self-hosted GitLab on another host, an online Runner, local Redis, real
+billable LLM calls, inbound webhook reachability). Minutes per run.
+
+They are deliberately **not collected by `pytest tests/`** — the filenames do
+not start with `test_`. §1's baseline is unaffected by anything here.
+
+```bash
+source .venv-linux/bin/activate
+uv run python tests/e2e/e2e_gitlab_bot_identity.py --dry-run   # probe only
+uv run python tests/e2e/e2e_gitlab_bot_identity.py
+```
+
+| Script | Pins | Re-run when |
+|---|---|---|
+| `e2e_gitlab_bot_identity.py` | commit `47e0e68` — least-privilege GitLab bot identity (3A outbound). One case asserts all three parts: env var beats env file for `gitlab_private_token`, the `gitlab_token_check` preflight marker, and that Developer + `api,write_repository` completes the full run while the protected-`main` role ceiling holds | `worker_settings.py` field declarations or a pydantic-settings bump; `gitlab_token_check.py`; the clone/push credential assembly in `gitlab_provider.py`; a GitLab major version; a new spawner |
+| `e2e_webhook_oidc.py` | commit `95f9ba5` — webhook OIDC authn+authz. **Two arms in one script**, because "additive" is a *comparison*: `none` must be a true no-op (anonymous accepted, a garbage `Authorization` header also accepted, zero rejections, one MR) and `oidc` must actually block (five negative probes each hitting a distinct rejection reason, and a **real GitLab-signed token with a tampered `project.id` → 403**) | `gateway/webhook_auth.py`; `_enforce_webhook_auth`; the OIDC fields on `GatewaySettings`; anything under `infra/oidc-webhook/`; a GitLab major version (id_token claims, discovery, JWKS path) |
+
+Shared logic lives in `tests/e2e/lib/` — one **managed-resource** contract for
+every mutation: detect, change only if it differs, register the inverse **only
+if it actually changed**, and re-read after undoing. Two ordering rules the
+library encodes because both cost real time to learn: the undo stack is LIFO so
+**call order decides restore order** (anything whose restore has side effects —
+editing `.gitlab-ci.yml` fires a pipeline — must be touched *before* the local
+stack starts), and every repository commit carries **`[ci skip]`** (an
+unwanted pipeline is one thing; a string of failed webhook deliveries makes
+GitLab disable the project hook, which is worse). Explicit triggering is done
+with `POST /pipeline`.
+
+Exit codes are layered on purpose:
+`0 PASS / 2 FAIL / 3 TIMEOUT / **4 environment preflight** / **5 restore incomplete**`.
+4 separates "the environment was not ready" from "the code under test is
+wrong" — they send you to different places. 5 says the verdict is trustworthy
+but something was left changed on a real system, which always needs a human.
+
+Every script follows the same contract: probe → configure → log → **restore on
+every exit path** (PASS/FAIL/Ctrl-C), never echo a credential, never write
+`settings/*.env` (config goes in as process env vars), and never stop a
+process it did not start. Full conventions and per-script environment
+prerequisites: **`tests/e2e/README.md`**.
+
+---
+
 ## What "tested" means here
 
 - §1–§2 are deterministic and gate every change.
@@ -724,3 +769,5 @@ Grafana as if it covered both nodes; the fix is W5/W6.
 - §4 proves the real integration (webhook → fix → MR) against a real GitLab;
   always pair the journal assertion with the §4a-step-5 GitLab-API
   cross-check before claiming end-to-end.
+- §7 pins one specific change against real infrastructure. Run it when that
+  change's surface moves — it is a targeted regression, not a gate.

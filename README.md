@@ -1647,6 +1647,33 @@ Full contract + per-script knobs in [`tests/TESTING.md`](tests/TESTING.md)
 `WORKER_SPAWNER=distr-pull` checks live in
 [`docs/distr-pull-test-runbook.md`](docs/distr-pull-test-runbook.md).
 
+### Heavyweight per-change e2e (`tests/e2e/`)
+
+A separate layer from the regression scripts above, and deliberately **not**
+part of `pytest tests/` — the filenames do not start with `test_`, so nothing
+collects them by accident. Each script pins **one specific change** end-to-end
+against real infrastructure (a self-hosted GitLab, an online Runner, Redis,
+billable LLM calls, inbound webhook reachability) and takes minutes to run.
+Every script's header states which change it covers and what should trigger a
+re-run, so you can decide whether it is worth running without reading the code.
+
+```bash
+source .venv-linux/bin/activate
+uv run python tests/e2e/e2e_gitlab_bot_identity.py --dry-run   # probe only
+uv run python tests/e2e/e2e_gitlab_bot_identity.py             # least-privilege bot identity
+uv run python tests/e2e/e2e_webhook_oidc.py                    # webhook OIDC, both switch states
+```
+
+They share one contract: probe the environment, configure it, log everything,
+and **restore on every exit path** (pass, fail, or Ctrl-C) through a LIFO undo
+stack. Credentials are never echoed; configuration is injected as process
+environment variables rather than written to `settings/*.env`; and a script
+never stops a process it did not start. Exit codes add two levels to the
+regression scripts' set — `4` for an environment preflight failure (which is
+not a verdict on the code) and `5` for "the verdict is trustworthy but
+something was left changed on a real system". Conventions and per-script
+prerequisites: [`tests/e2e/README.md`](tests/e2e/README.md).
+
 ### Integration Test
 
 Runs the full pipeline (gateway → orchestrator → worker) against an isolated Redis DB with a synthetic bug report:
